@@ -1,0 +1,704 @@
+name: Feature Engineering v1.1
+inputs:
+  - {name: cleaned_X, type: Dataset, description: "Cleaned features from Brick 1"}
+  - {name: cleaned_y, type: Dataset, description: "Target labels from Brick 1"}
+  - {name: cleaning_metadata, type: Data, description: "Metadata from Brick 1"}
+  - {name: model_type, type: String, description: "classification or regression", optional: true, default: "classification"}
+  - {name: outlier_strategy, type: String, description: "drop_iqr | winsorize | none", optional: true, default: "drop_iqr"}
+  - {name: outlier_fold, type: Float, description: "IQR fold for outlier rule", optional: true, default: "1.5"}
+  - {name: max_knn_rows, type: Integer, description: "Max rows for KNN imputer", optional: true, default: "5000"}
+  - {name: rare_threshold, type: Float, description: "Rare label threshold", optional: true, default: "0.01"}
+  - {name: enable_string_similarity, type: String, description: "true/false for high-cardinality grouping", optional: true, default: "false"}
+  - {name: create_interactions, type: String, description: "true/false to create polynomial interactions", optional: true, default: "false"}
+  - {name: interaction_degree, type: Integer, description: "Polynomial degree for interactions", optional: true, default: "2"}
+  - {name: max_interaction_features, type: Integer, description: "Max interaction features to create", optional: true, default: "15"}
+outputs:
+  - {name: engineered_X, type: Dataset, description: "Engineered features parquet"}
+  - {name: train_y, type: Dataset, description: "Target parquet (aligned after outlier removal)"}
+  - {name: preprocessor, type: Data, description: "Fitted Preprocessor cloudpickle"}
+  - {name: engineering_metadata, type: Data, description: "JSON metadata"}
+implementation:
+  container:
+    image: kumar2004/ml-base:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, json, traceback, gzip
+        from datetime import datetime
+        from itertools import combinations
+        import pandas as pd, numpy as np
+        from sklearn.impute import SimpleImputer, KNNImputer
+        from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler, PowerTransformer, OneHotEncoder, OrdinalEncoder, LabelEncoder
+        from sklearn.pipeline import Pipeline
+        from sklearn.experimental import enable_iterative_imputer
+        from sklearn.impute import IterativeImputer
+        from sklearn.model_selection import StratifiedKFold, KFold
+        from rapidfuzz import process as rf_process, fuzz as rf_fuzz
+        import cloudpickle
+        
+        # Helper functions
+        def ensure_dir_for(p):
+            d=os.path.dirname(p)
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
+
+        def collapse_rare_labels(series, threshold_frac=0.01):
+            counts=series.value_counts(dropna=False)
+            n=len(series)
+            rare = set(counts[counts <= max(1,int(threshold_frac*n))].index)
+            return series.map(lambda x: "__RARE__" if x in rare else x), rare
+
+        def string_similarity_group(series, score_threshold=90):
+            vals=[v for v in pd.Series(series.dropna().unique()).astype(str)]
+            mapping={}; used=set()
+            for v in vals:
+                if v in used: continue
+                matches=rf_process.extract(v, vals, scorer=rf_fuzz.token_sort_ratio, score_cutoff=score_threshold)
+                group=[m[0] for m in matches]
+                for g in group: mapping[g]=v; used.add(g)
+            return pd.Series(series).astype(object).map(lambda x: mapping.get(str(x), x)), mapping
+
+        def drop_outliers_iqr(df, numeric_cols, fold=1.5):
+            if not numeric_cols: return df,0,pd.Series(True,index=df.index)
+            q1 = df[numeric_cols].quantile(0.25, numeric_only=True)
+            q3 = df[numeric_cols].quantile(0.75, numeric_only=True)
+            iqr = q3 - q1
+            lower = (q1 - fold * iqr).to_dict()
+            upper = (q3 + fold * iqr).to_dict()
+            mask = pd.Series(True, index=df.index)
+            for c in numeric_cols:
+                s = df[c]
+                lo = lower.get(c, None); hi = upper.get(c, None)
+                cond = pd.Series(True, index=df.index)
+                if lo is not None: cond = cond & s.ge(lo)
+                if hi is not None: cond = cond & s.le(hi)
+                cond = cond.reindex(df.index).fillna(True)
+                mask = mask & cond
+            before=len(df)
+            df2 = df.loc[mask].copy()
+            removed = before - len(df2)
+            df2.reset_index(drop=True, inplace=True)
+            return df2, removed, mask
+
+        def winsorize_df(df, numeric_cols, fold=1.5):
+            if not numeric_cols: return df,0
+            q1=df[numeric_cols].quantile(0.25, numeric_only=True)
+            q3=df[numeric_cols].quantile(0.75, numeric_only=True)
+            iqr=q3-q1
+            lower=(q1 - fold*iqr).to_dict()
+            upper=(q3 + fold*iqr).to_dict()
+            df2=df.copy()
+            for c in numeric_cols:
+                lo = lower.get(c, None); hi = upper.get(c, None)
+                if lo is not None or hi is not None:
+                    df2[c]=df2[c].clip(lower=lo, upper=hi)
+            return df2,0
+
+        def choose_scaler_for_series(s):
+            v=s.dropna()
+            if v.empty: return StandardScaler()
+            if v.std(ddof=0)==0: return StandardScaler()
+            skew=float(v.skew())
+            kurt=float(v.kurtosis()) if len(v)>3 else 0.0
+            extreme_frac=float(((v - v.mean()).abs() > 3*v.std(ddof=0)).mean())
+            if (v.min()>=0.0 and v.max()<=1.0): return MinMaxScaler()
+            if abs(skew)>=1.0: return Pipeline([('power',PowerTransformer(method='yeo-johnson')),('std',StandardScaler())])
+            if extreme_frac>0.01 or abs(kurt)>10: return RobustScaler()
+            return StandardScaler()
+
+        def choose_categorical_encoder(col, series, target_series=None, train_mode=True, model_type='classification'):
+            n = len(series)
+            nunique = series.nunique(dropna=True)
+            if nunique <= 2:
+                enc = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+                return 'onehot', enc, {}
+            elif nunique <= 10:
+                enc = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+                return 'onehot', enc, {}
+            elif nunique <= 50:
+                if target_series is not None and train_mode and model_type == 'classification':
+                    return 'target_kfold', None, {}
+                else:
+                    return 'count', None, {}
+            else:
+                if target_series is not None and train_mode and model_type == 'classification':
+                    return 'target_kfold', None, {}
+                else:
+                    return 'count', None, {}
+            
+        def fit_target_encoder_kfold(df, col, y, n_splits=5, smoothing=1.0, random_state=42):
+            X_col = df[col].astype(object).fillna('__NA__')
+            global_mean = float(y.mean())
+            oof = pd.Series(index=df.index, dtype=float)
+            try:
+                kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+                splits = list(kf.split(df, y))
+            except:
+                kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+                splits = list(kf.split(df))
+            for train_idx, val_idx in splits:
+                train_means = y.iloc[train_idx].groupby(X_col.iloc[train_idx]).mean()
+                oof.iloc[val_idx] = X_col.iloc[val_idx].map(lambda v: train_means.get(v, global_mean))
+            counts = X_col.value_counts()
+            smooth_map = {}
+            for cat, cnt in counts.items():
+                if cnt > 0:
+                    cat_mean = float(y[X_col == cat].mean())
+                    alpha = cnt / (cnt + smoothing)
+                    smooth_map[cat] = alpha * cat_mean + (1 - alpha) * global_mean
+                else:
+                    smooth_map[cat] = global_mean
+            return oof.fillna(global_mean), smooth_map, global_mean
+
+        def add_polynomial_features(df, numeric_cols, degree=2, interaction_only=True, max_features=20):
+            if len(numeric_cols) < 2:
+                print("[INFO] Not enough numeric columns for interactions (need ≥2)")
+                return df
+            
+            print(f"[INFO] Creating polynomial features (degree={degree}, interaction_only={interaction_only})")
+            variances = df[numeric_cols].var().sort_values(ascending=False)
+            top_cols = variances.head(min(5, len(numeric_cols))).index.tolist()
+            new_features = {}
+            interaction_count = 0
+            
+            for col1, col2 in combinations(top_cols, 2):
+                if interaction_count >= max_features:
+                    break
+                interaction_name = f"{col1}_x_{col2}"
+                new_features[interaction_name] = df[col1] * df[col2]
+                interaction_count += 1
+                
+                if (df[col2] != 0).all():
+                    div_name = f"{col1}_div_{col2}"
+                    new_features[div_name] = df[col1] / df[col2]
+                    interaction_count += 1
+                    
+                if interaction_count >= max_features:
+                    break
+            
+            if degree == 2 and interaction_count < max_features:
+                for col in top_cols[:3]:
+                    if interaction_count >= max_features:
+                        break
+                    new_features[f"{col}_squared"] = df[col] ** 2
+                    interaction_count += 1
+            
+            for name, values in new_features.items():
+                df[name] = values
+            
+            print(f"[INFO] Created {len(new_features)} polynomial/interaction features")
+            return df
+
+        # Preprocessor Class
+        class Preprocessor:
+            def __init__(self):
+                self.num_cols=[]; self.cat_cols=[]; self.col_config={}; self.global_metadata={}
+                self.date_columns = []
+                self.date_patterns = {}
+
+            def fit(self, df, y=None, config=None, target_cols=None, model_type='classification'):
+                self.global_metadata['config']=config or {}
+                self.global_metadata['target_cols']=target_cols
+                self.global_metadata['model_type']=model_type
+                nrows=len(df)
+                self.original_input_columns = list(df.columns)
+                
+                self.num_cols=df.select_dtypes(include=[np.number]).columns.tolist()
+                self.cat_cols=[c for c in df.columns if c not in self.num_cols]
+                
+                # Configure numeric columns
+                for c in self.num_cols:
+                    s=df[c]; cfg={}
+                    missing_frac=s.isna().mean()
+                    cfg['missing_frac']=float(missing_frac)
+                    cfg['n_unique']=int(s.nunique(dropna=True))
+                    cfg['skew']=float(s.dropna().skew()) if s.dropna().shape[0]>2 else 0.0
+                    cfg['kurtosis']=float(s.dropna().kurtosis()) if s.dropna().shape[0]>3 else 0.0
+                    
+                    if missing_frac==0:
+                        cfg['imputer']=('none',None)
+                    elif missing_frac<0.02:
+                        imp=SimpleImputer(strategy='median')
+                        imp.fit(np.array(s).reshape(-1,1))
+                        cfg['imputer']=('simple_median',imp)
+                    else:
+                        if nrows<=self.global_metadata['config'].get('max_knn_rows',5000) and missing_frac<0.25:
+                            cfg['imputer']=('knn',{'n_neighbors':5})
+                        else:
+                            cfg['imputer']=('iterative',{'max_iter':10,'random_state':0})
+                    cfg['scaler_choice']='auto'
+                    self.col_config[c]=cfg
+                
+                # Configure categorical columns
+                for c in self.cat_cols:
+                    s = df[c].astype(object)
+                    cfg = {}
+                    cfg['n_unique'] = int(s.nunique(dropna=True))
+                    cfg['missing_frac'] = float(s.isna().mean())
+                    cfg['high_card'] = cfg['n_unique'] > max(50, 0.05*nrows)
+                    cfg['rare_threshold_frac'] = self.global_metadata['config'].get('rare_threshold', 0.01)
+                    
+                    enc_name, enc_obj, _ = choose_categorical_encoder(
+                        c, s, target_series=y, train_mode=True, model_type=model_type
+                    )
+                    cfg['encoder_type'] = enc_name
+                    cfg['encoder_obj'] = enc_obj
+                    self.col_config[c] = cfg
+                
+                # Fit encoders for classification
+                if y is not None and model_type == 'classification':
+                    for c in self.cat_cols:
+                        cfg = self.col_config[c]
+                        enc_type = cfg['encoder_type']
+                        
+                        if enc_type == 'onehot':
+                            ohe = cfg.get('encoder_obj')
+                            if ohe is not None:
+                                resh = df[[c]].astype(str)
+                                ohe.fit(resh)
+                                cfg['encoder_obj'] = ohe
+                                cfg['ohe_columns'] = [f"{c}__{cat}" for cat in ohe.categories_[0]]
+                                print(f"[INFO] OneHot fitted for '{c}': {len(ohe.categories_[0])} categories")
+                        
+                        elif enc_type == 'target_kfold':
+                            oof_encoding, test_mapping, global_mean = fit_target_encoder_kfold(
+                                df, c, y, n_splits=5, smoothing=1.0, random_state=42
+                            )
+                            cfg['oof_encoding'] = oof_encoding 
+                            cfg['target_mapping'] = test_mapping 
+                            cfg['target_global_mean'] = float(global_mean)
+                            print(f"[INFO] Target encoder fitted for '{c}': {len(test_mapping)} categories")
+                            
+                        elif enc_type == 'count':
+                            counts = df[c].astype(object).value_counts().to_dict()
+                            cfg['count_map'] = counts
+                            print(f"[INFO] Count encoder fitted for '{c}': {len(counts)} categories")
+                        
+                        elif enc_type == 'ordinal':
+                            ord_enc = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+                            resh = df[[c]].astype(object)
+                            ord_enc.fit(resh)
+                            cfg['encoder_obj'] = ord_enc
+                            print(f"[INFO] Ordinal encoder fitted for '{c}': {len(ord_enc.categories_[0])} categories")
+                
+                self.global_metadata['num_cols']=self.num_cols
+                self.global_metadata['cat_cols']=self.cat_cols
+                return self
+
+            def transform(self, df, training_mode=False):
+                df=df.copy()
+                
+                # Clean inf/nan strings
+                df.replace(["NaN","nan","None","null","INF","-INF","Inf","-Inf","inf","-inf"], np.nan, inplace=True)
+                for c in list(self.num_cols):
+                    if c in df.columns:
+                        df[c] = pd.to_numeric(df[c], errors='coerce')
+                
+                # Prepare for KNN/Iterative imputation
+                temp_df=df.copy()
+                for c in self.num_cols:
+                    imputer_info=self.col_config.get(c,{}).get('imputer',('none',None))
+                    if imputer_info[0] in ('knn','iterative'):
+                        med=pd.to_numeric(temp_df[c], errors='coerce').median()
+                        temp_df[c]=temp_df[c].fillna(med)
+
+                # Fit scalers
+                scaler_objs={}
+                for c in self.num_cols:
+                    sample=temp_df[c]
+                    scaler=choose_scaler_for_series(sample)
+                    try:
+                        scaler.fit(sample.values.reshape(-1,1))
+                    except Exception:
+                        scaler=StandardScaler()
+                        scaler.fit(sample.values.reshape(-1,1))
+                    scaler_objs[c]=scaler
+                    self.col_config[c]['scaler_obj']=scaler
+
+                # Scale numeric columns
+                num_matrix=temp_df[self.num_cols].copy()
+                scaled_matrix=np.zeros_like(num_matrix.values, dtype=float)
+                for i,c in enumerate(self.num_cols):
+                    sc=scaler_objs[c]
+                    col_vals=num_matrix[c].values.reshape(-1,1)
+                    try:
+                        scaled_col=sc.transform(col_vals).reshape(-1)
+                    except Exception:
+                        scaled_col=StandardScaler().fit_transform(col_vals).reshape(-1)
+                    scaled_matrix[:,i]=scaled_col
+                scaled_df=pd.DataFrame(scaled_matrix, columns=self.num_cols, index=num_matrix.index)
+
+                # KNN imputation
+                need_knn=[c for c in self.num_cols if self.col_config[c]['imputer'][0]=='knn']
+                if need_knn:
+                    knn=KNNImputer(n_neighbors=5)
+                    imputed_scaled=knn.fit_transform(scaled_df)
+                    imputed_scaled_df=pd.DataFrame(imputed_scaled, columns=self.num_cols, index=scaled_df.index)
+                    for c in self.num_cols:
+                        sc=scaler_objs[c]
+                        try:
+                            inv=sc.inverse_transform(imputed_scaled_df[c].values.reshape(-1,1)).reshape(-1)
+                        except Exception:
+                            inv=imputed_scaled_df[c].values.reshape(-1)
+                        df[c]=inv
+
+                # Iterative imputation
+                need_iter=[c for c in self.num_cols if self.col_config[c]['imputer'][0]=='iterative']
+                if need_iter:
+                    iter_imp=IterativeImputer(max_iter=10, random_state=0)
+                    arr=df[self.num_cols].astype(float).replace([np.inf,-np.inf], np.nan).values
+                    iter_out=iter_imp.fit_transform(arr)
+                    df[self.num_cols]=pd.DataFrame(iter_out, columns=self.num_cols, index=df.index)
+
+                # Simple median imputation
+                for c in self.num_cols:
+                    cfg=self.col_config[c]
+                    if cfg['imputer'][0]=='simple_median':
+                        imp=cfg['imputer'][1]
+                        df[c]=imp.transform(df[[c]])
+                
+                # Handle outliers (training only)
+                cfg_global = self.global_metadata.get('config') or {}
+                if training_mode:
+                    if cfg_global.get('outlier_strategy','drop_iqr')=='drop_iqr':
+                        df2, n_removed, kept_mask = drop_outliers_iqr(df, self.num_cols, fold=cfg_global.get('outlier_fold',1.5))
+                        self.global_metadata['outliers_removed']=int(n_removed)
+                        self.global_metadata['kept_mask_after_outlier']=kept_mask
+                        df=df2
+                    elif cfg_global.get('outlier_strategy')=='winsorize':
+                        df,_=winsorize_df(df, self.num_cols, fold=cfg_global.get('outlier_fold',1.5))
+                        self.global_metadata['kept_mask_after_outlier']=pd.Series(True,index=df.index)
+
+                # Final scaling
+                for c in self.num_cols:
+                    sc=self.col_config[c].get('scaler_obj')
+                    if sc is None:
+                        sc=choose_scaler_for_series(df[c].fillna(df[c].median()))
+                    try:
+                        transformed=sc.transform(df[[c]].values)
+                        df[c]=transformed.reshape(-1)
+                    except Exception:
+                        try:
+                            df[c]=sc.fit_transform(df[[c]].values).reshape(-1)
+                        except Exception:
+                            df[c]=StandardScaler().fit_transform(df[[c]].fillna(df[c].median()).values).reshape(-1)
+                    self.col_config[c]['scaler_obj']=sc
+                
+                # Create polynomial interactions (training only)
+                if training_mode and cfg_global.get('create_interactions', False):
+                    print("[INFO] Creating polynomial/interaction features...")
+                    current_num_cols = [c for c in df.columns if c in self.num_cols]
+                    if len(current_num_cols) >= 2:
+                        df = add_polynomial_features(
+                            df, 
+                            current_num_cols, 
+                            degree=cfg_global.get('interaction_degree', 2), 
+                            interaction_only=True, 
+                            max_features=cfg_global.get('max_interaction_features', 15)
+                        )
+                        print(f"[INFO] DataFrame shape after interactions: {df.shape}")
+                
+                # Encode categorical columns
+                target_cols = self.global_metadata.get('target_cols') or []
+                for c in [cc for cc in self.cat_cols if cc in df.columns and cc not in target_cols]:
+                    cfg = self.col_config[c]
+                    s = df[c].astype(object)
+                    
+                    # Rare label collapse
+                    rare_thresh = cfg.get('rare_threshold_frac', 0.01)
+                    collapsed, rare_set = collapse_rare_labels(s, threshold_frac=rare_thresh)
+                    df[c] = collapsed
+                    cfg['rare_values'] = list(rare_set)
+                    
+                    # String similarity grouping
+                    if cfg_global.get('enable_string_similarity', False) and cfg['n_unique'] > 20:
+                        grouped, mapping = string_similarity_group(df[c], score_threshold=90)
+                        df[c] = grouped
+                        cfg['string_similarity_map'] = mapping
+                    
+                    enc_type = cfg.get('encoder_type')
+                    
+                    if enc_type == 'onehot':
+                        ohe = cfg.get('encoder_obj')
+                        ohe_columns = cfg.get('ohe_columns')
+                        if ohe is None or ohe_columns is None:
+                            ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+                            resh = df[[c]].astype(str)
+                            ohe.fit(resh)
+                            cfg['encoder_obj'] = ohe
+                            ohe_columns = [f"{c}__{cat}" for cat in ohe.categories_[0]]
+                            cfg['ohe_columns'] = ohe_columns
+                        arr = ohe.transform(df[[c]].astype(str))
+                        df_ohe = pd.DataFrame(arr, columns=ohe_columns, index=df.index)
+                        df = pd.concat([df.drop(columns=[c]), df_ohe], axis=1)
+                    
+                    elif enc_type == 'target_kfold':
+                        if training_mode and 'oof_encoding' in cfg:
+                            oof = cfg['oof_encoding']
+                            df[c] = oof.reindex(df.index, fill_value=cfg.get('target_global_mean', 0.0)).astype(float)
+                            print(f"[INFO] Applied OOF target encoding for '{c}' (training)")
+                        else:
+                            mapping = cfg.get('target_mapping', {})
+                            global_mean = cfg.get('target_global_mean', 0.0)
+                            df[c] = df[c].map(lambda x: mapping.get(x, global_mean)).astype(float)
+                            print(f"[INFO] Applied test target encoding for '{c}' (inference)")
+                    
+                    elif enc_type == 'count':
+                        cnt_map = cfg.get('count_map', df[c].value_counts().to_dict())
+                        df[c] = df[c].map(lambda x: cnt_map.get(x, 0)).astype(float)
+                    
+                    elif enc_type == 'ordinal':
+                        ord_enc = cfg.get('encoder_obj')
+                        if ord_enc is None:
+                            ord_enc = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+                            resh = df[[c]].astype(object)
+                            ord_enc.fit(resh)
+                            cfg['encoder_obj'] = ord_enc
+                        try:
+                            df[c] = ord_enc.transform(df[[c]].astype(object)).astype(float)
+                        except Exception:
+                            df[c] = df[c].astype('category').cat.codes.replace({-1: np.nan}).astype(float)
+                    else:
+                        df[c] = df[c].astype('category').cat.codes.replace({-1: np.nan}).astype(float)
+                
+                # Final cleanup
+                for c in list(df.columns):
+                    if df[c].dtype=='object':
+                        try:
+                            df[c]=pd.to_numeric(df[c], errors='coerce')
+                        except Exception:
+                            pass
+                df.replace([np.inf,-np.inf], np.nan, inplace=True)
+                return df
+
+            def save(self, path):
+                with gzip.open(path, "wb") as f:
+                    cloudpickle.dump(self, f)
+                    
+            @staticmethod
+            def load(path):
+                with gzip.open(path, "rb") as f:
+                    return cloudpickle.load(f)
+
+        # Main execution
+        parser=argparse.ArgumentParser()
+        parser.add_argument('--cleaned_X', type=str, required=True)
+        parser.add_argument('--cleaned_y', type=str, required=True)
+        parser.add_argument('--cleaning_metadata', type=str, required=True)
+        parser.add_argument('--model_type', type=str, default="classification")
+        parser.add_argument('--outlier_strategy', type=str, default="drop_iqr")
+        parser.add_argument('--outlier_fold', type=float, default=1.5)
+        parser.add_argument('--max_knn_rows', type=int, default=5000)
+        parser.add_argument('--rare_threshold', type=float, default=0.01)
+        parser.add_argument('--enable_string_similarity', type=str, default="false")
+        parser.add_argument('--create_interactions', type=str, default="false")
+        parser.add_argument('--interaction_degree', type=int, default=2)
+        parser.add_argument('--max_interaction_features', type=int, default=15)
+        parser.add_argument('--engineered_X', type=str, required=True)
+        parser.add_argument('--train_y', type=str, required=True)
+        parser.add_argument('--preprocessor', type=str, required=True)
+        parser.add_argument('--engineering_metadata', type=str, required=True)
+        args=parser.parse_args()
+
+        try:
+            print("="*80)
+            print("BRICK 2: FEATURE ENGINEERING")
+            print("="*80)
+            
+            model_type = args.model_type.strip().lower()
+            enable_string_sim = str(args.enable_string_similarity).lower() in ("1","true","t","yes","y")
+            create_interactions = str(args.create_interactions).lower() in ("1","true","t","yes","y")
+            
+            # Load cleaned data
+            print("[STEP 1/8] Loading cleaned data...")
+            X_clean = pd.read_parquet(args.cleaned_X)
+            y_clean = pd.read_parquet(args.cleaned_y)
+            print(f"[INFO] X shape: {X_clean.shape}")
+            print(f"[INFO] y shape: {y_clean.shape}")
+            
+            # Load metadata
+            with open(args.cleaning_metadata, 'r') as f:
+                cleaning_meta = json.load(f)
+            target_cols = cleaning_meta['target_columns']
+            print(f"[INFO] Targets: {target_cols}")
+            
+            # Prepare config
+            config = {
+                'outlier_strategy': args.outlier_strategy,
+                'outlier_fold': args.outlier_fold,
+                'max_knn_rows': args.max_knn_rows,
+                'rare_threshold': args.rare_threshold,
+                'enable_string_similarity': enable_string_sim,
+                'create_interactions': create_interactions,
+                'interaction_degree': args.interaction_degree,
+                'max_interaction_features': args.max_interaction_features
+            }
+            # Fit Preprocessor
+            print("[STEP 2/8] Fitting Preprocessor...")
+            pre = Preprocessor()
+            
+            # For multi-output classification, use first target for encoding decisions
+            if isinstance(y_clean, pd.DataFrame) and len(target_cols) > 1:
+                y_for_fit = y_clean[target_cols[0]]
+            elif isinstance(y_clean, pd.DataFrame):
+                y_for_fit = y_clean[target_cols[0]]
+            else:
+                y_for_fit = y_clean
+            
+            pre.fit(
+                X_clean,
+                y=y_for_fit if model_type == "classification" else None,
+                config=config,
+                target_cols=target_cols,
+                model_type=model_type
+            )
+            
+            print(f"[INFO] Numeric columns: {len(pre.num_cols)}")
+            print(f"[INFO] Categorical columns: {len(pre.cat_cols)}")
+            
+            # Transform data
+            print("[STEP 3/8] Transforming features...")
+            X_engineered = pre.transform(X_clean, training_mode=True)
+            print(f"[INFO] Engineered shape: {X_engineered.shape}")
+            
+            # Handle outlier mask
+            print("[STEP 4/8] Handling outliers...")
+            kmask = pre.global_metadata.get('kept_mask_after_outlier', None)
+            if kmask is not None and isinstance(kmask, pd.Series):
+                kmask = kmask.reindex(X_clean.index, fill_value=True)
+                X_engineered = X_engineered.reset_index(drop=True)
+                y_aligned = y_clean.loc[kmask].reset_index(drop=True)
+                outliers_removed = int((~kmask).sum())
+                print(f"[INFO] Removed {outliers_removed} outlier rows")
+            else:
+                y_aligned = y_clean.reset_index(drop=True)
+                outliers_removed = 0
+            
+            print(f"[INFO] Final X: {X_engineered.shape}")
+            print(f"[INFO] Final y: {y_aligned.shape}")
+            
+            # Verify alignment
+            if X_engineered.shape[0] != y_aligned.shape[0]:
+                print(f"[ERROR] Shape mismatch! X: {X_engineered.shape[0]}, y: {y_aligned.shape[0]}")
+                sys.exit(1)
+            
+            # Optimize dtypes
+            print("[STEP 5/8] Optimizing dtypes...")
+            for col in X_engineered.select_dtypes(include=[np.number]).columns:
+                try:
+                    X_engineered[col]=pd.to_numeric(X_engineered[col], downcast='float')
+                except Exception:
+                    pass
+            
+            # Save outputs
+            print("[STEP 6/8] Saving engineered features...")
+            ensure_dir_for(args.engineered_X)
+            ensure_dir_for(args.train_y)
+            ensure_dir_for(args.preprocessor)
+            ensure_dir_for(args.engineering_metadata)
+            
+            X_engineered.to_parquet(args.engineered_X, index=False)
+            y_aligned.to_parquet(args.train_y, index=False)
+            print(f"[INFO] Saved X to: {args.engineered_X}")
+            print(f"[INFO] Saved y to: {args.train_y}")
+            
+            print("[STEP 7/8] Saving preprocessor...")
+            pre.save(args.preprocessor)
+            print(f"[INFO] Saved preprocessor to: {args.preprocessor}")
+            
+            print("[STEP 8/8] Saving metadata...")
+            
+            # Collect encoder summary
+            encoder_summary = {}
+            for col in pre.cat_cols:
+                cfg = pre.col_config.get(col, {})
+                enc_type = cfg.get('encoder_type', 'unknown')
+                encoder_summary[col] = {
+                    'type': enc_type,
+                    'n_unique': cfg.get('n_unique', 0),
+                    'high_card': cfg.get('high_card', False)
+                }
+                if enc_type == 'onehot':
+                    encoder_summary[col]['n_categories'] = len(cfg.get('ohe_columns', []))
+                elif enc_type == 'target_kfold':
+                    encoder_summary[col]['n_categories'] = len(cfg.get('target_mapping', {}))
+            
+            metadata = {
+                'timestamp': datetime.utcnow().isoformat()+'Z',
+                'model_type': model_type,
+                'target_columns': target_cols,
+                'n_targets': len(target_cols),
+                'config': config,
+                'num_cols': pre.num_cols,
+                'cat_cols': pre.cat_cols,
+                'encoder_summary': encoder_summary,
+                'outliers_removed': outliers_removed,
+                'interactions_created': create_interactions,
+                'final_shape': {
+                    'rows': X_engineered.shape[0], 
+                    'cols': X_engineered.shape[1],
+                    'n_targets': len(target_cols)
+                },
+                'cleaning_metadata': cleaning_meta
+            }
+            
+            with open(args.engineering_metadata, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            print(f"[INFO] Saved metadata to: {args.engineering_metadata}")
+            
+            print(f"{'='*80}")
+            print("BRICK 2 COMPLETE - SUMMARY")
+            print(f"{'='*80}")
+            print(f"Input shape:           {X_clean.shape}")
+            print(f"Output X shape:        {X_engineered.shape}")
+            print(f"Output y shape:        {y_aligned.shape}")
+            print(f"Targets:               {target_cols}")
+            print(f"Numeric features:      {len(pre.num_cols)}")
+            print(f"Categorical features:  {len(pre.cat_cols)}")
+            print(f"Final feature count:   {X_engineered.shape[1]}")
+            print(f"Outliers removed:      {outliers_removed}")
+            print(f"Interactions created:  {create_interactions}")
+            print(f"{'='*80}")
+            print("SUCCESS: Feature engineering complete")
+            print(f"{'='*80}")
+            
+        except Exception as exc:
+            print("ERROR during feature engineering: " + str(exc), file=sys.stderr)
+            traceback.print_exc()
+            sys.exit(1)
+    args:
+      - --cleaned_X
+      - {inputPath: cleaned_X}
+      - --cleaned_y
+      - {inputPath: cleaned_y}
+      - --cleaning_metadata
+      - {inputPath: cleaning_metadata}
+      - --model_type
+      - {inputValue: model_type}
+      - --outlier_strategy
+      - {inputValue: outlier_strategy}
+      - --outlier_fold
+      - {inputValue: outlier_fold}
+      - --max_knn_rows
+      - {inputValue: max_knn_rows}
+      - --rare_threshold
+      - {inputValue: rare_threshold}
+      - --enable_string_similarity
+      - {inputValue: enable_string_similarity}
+      - --create_interactions
+      - {inputValue: create_interactions}
+      - --interaction_degree
+      - {inputValue: interaction_degree}
+      - --max_interaction_features
+      - {inputValue: max_interaction_features}
+      - --engineered_X
+      - {outputPath: engineered_X}
+      - --train_y
+      - {outputPath: train_y}
+      - --preprocessor
+      - {outputPath: preprocessor}
+      - --engineering_metadata
+      - {outputPath: engineering_metadata}
