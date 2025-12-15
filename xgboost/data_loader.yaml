@@ -1,0 +1,301 @@
+name: Data loader with cdn v3.1
+inputs:
+  - {name: cdn_url, type: String, description: 'CDN URL to download dataset file (CSV, JSON, or Parquet)'}
+  - {name: split_size, type: Integer, default: "15", description: 'Test split size as integer percent (default 15) or fraction (e.g. 0.2)'}
+  - {name: target_column, type: String, description: 'Name of target column or comma-separated list of target columns (e.g. "c1,c2,c3")'}
+  - {name: model_type, type: String, default: "classification", description: 'Type of model (classification or regression)'}
+outputs:
+  - {name: train_set, type: Dataset}
+  - {name: test_x, type: Dataset}
+  - {name: test_y, type: Dataset}
+implementation:
+  container:
+    image: kumar2004/ml-base:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import sys
+        import tempfile
+        import logging
+        import json
+        import pandas as pd
+        import numpy as np
+        import requests
+        from requests.adapters import HTTPAdapter
+        try:
+            # newer urllib3
+            from urllib3.util import Retry
+        except Exception:
+            from urllib3 import Retry
+        from sklearn.model_selection import train_test_split
+
+        # --------- CLI ----------
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--cdn_url', type=str, required=True)
+        parser.add_argument('--split_size', type=float, default=15)
+        parser.add_argument('--target_column', type=str, required=True,
+                            help='Single column name or comma-separated columns, e.g. "c1,c2,c3"')
+        parser.add_argument('--model_type', type=str, default="classification")
+        parser.add_argument('--train_set', type=str, required=True)
+        parser.add_argument('--test_x', type=str, required=True)
+        parser.add_argument('--test_y', type=str, required=True)
+        args = parser.parse_args()
+
+        # --------- Logging ----------
+        logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        logger = logging.getLogger("cdn_loader")
+
+        logger.info("Starting CDN download and processing")
+        # --------- HTTP session with retry ----------
+        session = requests.Session()
+        try:
+            retry_strategy = Retry(total=5, backoff_factor=1,
+                                   status_forcelist=[500,502,503,504],
+                                   allowed_methods=frozenset(["GET", "POST", "HEAD"]))
+        except TypeError:
+            retry_strategy = Retry(total=5, backoff_factor=1,
+                                   status_forcelist=[500,502,503,504],
+                                   method_whitelist=frozenset(["GET", "POST", "HEAD"]))
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+        # --------- Download to temporary file ----------
+        try:
+            logger.info("Downloading: %s", args.cdn_url)
+            resp = session.get(args.cdn_url, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            logger.exception("Failed to download dataset from CDN: %s", e)
+            raise
+
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".download")
+        os.close(tmp_fd)
+        with open(tmp_path, "wb") as f:
+            f.write(resp.content)
+
+        # Detect format using extension or Content-Type
+        lower_url = args.cdn_url.lower()
+        if lower_url.endswith(".parquet"):
+            fmt = "parquet"
+        elif lower_url.endswith(".csv"):
+            fmt = "csv"
+        elif lower_url.endswith(".json"):
+            fmt = "json"
+        else:
+            ctype = resp.headers.get("Content-Type", "").lower()
+            if "parquet" in ctype or lower_url.endswith(".pq"):
+                fmt = "parquet"
+            elif "csv" in ctype or "text" in ctype:
+                fmt = "csv"
+            elif "json" in ctype or "application/json" in ctype:
+                fmt = "json"
+            else:
+                fmt = None
+
+        # Load into DataFrame with nested JSON normalization support
+        try:
+            if fmt == "parquet":
+                df = pd.read_parquet(tmp_path)
+            elif fmt == "csv":
+                df = pd.read_csv(tmp_path)
+            elif fmt == "json":
+                with open(tmp_path, "r") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    for key in ("data", "items", "results", "records"):
+                        if key in raw and isinstance(raw[key], (list, dict)):
+                            raw = raw[key]
+                            break
+                if isinstance(raw, list):
+                    df = pd.json_normalize(raw)
+                else:
+                    df = pd.json_normalize([raw])
+            else:
+                # fallback attempts
+                try:
+                    with open(tmp_path, "r") as f:
+                        raw = json.load(f)
+                    if isinstance(raw, dict):
+                        for key in ("data", "items", "results", "records"):
+                            if key in raw and isinstance(raw[key], (list, dict)):
+                                raw = raw[key]
+                                break
+                    if isinstance(raw, list):
+                        df = pd.json_normalize(raw)
+                    else:
+                        df = pd.json_normalize([raw])
+                except Exception:
+                    try:
+                        df = pd.read_csv(tmp_path)
+                    except Exception:
+                        try:
+                            df = pd.read_parquet(tmp_path)
+                        except Exception as e:
+                            logger.exception("Failed to parse downloaded file: %s", e)
+                            raise ValueError("Unsupported or corrupt dataset format")
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+        # === FULL DATAFRAME DIAGNOSTICS ===
+        logger.info("===== FULL DATAFRAME SUMMARY =====")
+        logger.info("Shape: %s", df.shape)
+        logger.info("Columns: %s", df.columns.tolist())
+        logger.info("DF_HEAD:%s", df.head().to_string())
+        logger.info("DF_DTYPES:%s", df.dtypes.to_string())
+        logger.info("DF_NULL_COUNTS:%s", df.isnull().sum().to_string())
+
+        # === Prepare target(s) ===
+        target_cols = [c.strip() for c in args.target_column.split(",") if c.strip()]
+        if not target_cols:
+            raise ValueError("No target columns provided")
+
+        missing = [c for c in target_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Target columns not found in dataframe: {missing}")
+
+        target_df = df[target_cols].copy()
+
+        # === Print target variable distribution if classification ===
+        if args.model_type.lower() == "classification":
+            logger.info("===== TARGET VARIABLE DISTRIBUTION (FULL DATASET) =====")
+            # If multiple targets, print distributions per column
+            for col in target_cols:
+                logger.info("Column '%s' distribution:%s", col, target_df[col].value_counts(dropna=False).to_string())
+                logger.info("Unique classes in %s: %s", col, target_df[col].nunique())
+                logger.info("Class distribution percentages for %s:%s", col, (target_df[col].value_counts(dropna=False, normalize=True) * 100).to_string())
+        else:
+            logger.info("Model type is regression — skipping target distribution summary.")
+
+        # CRITICAL FIX: Stratify only if classification AND single target column
+        if args.model_type.lower() == "classification" and len(target_cols) == 1:
+            target_values = target_df[target_cols[0]]
+            if target_values.nunique() > 1:
+                class_counts = target_values.value_counts(dropna=False)
+                min_required_per_class = 2
+                insufficient = class_counts[class_counts < min_required_per_class]
+                if not insufficient.empty:
+                    stratify_param = None
+                    logger.warning("Some classes have fewer than %d samples; stratification disabled. Insufficient: %s", min_required_per_class, insufficient.to_dict())
+                else:
+                    stratify_param = target_values
+                    logger.info("[INFO] Using stratified split by target (stratify=%d classes)", target_values.nunique())
+            else:
+                stratify_param = None
+                logger.warning("[WARN] Only one class in target, stratification disabled")
+        else:
+            stratify_param = None
+            if args.model_type.lower() == "classification" and len(target_cols) > 1:
+                logger.info("Multiple target columns provided; stratified split is not supported for multi-target classification — proceeding without stratification")
+
+        # === Convert split size ===
+        split_size_input = float(args.split_size)
+        test_size = split_size_input / 100.0 if split_size_input >= 1.0 else split_size_input
+        if not (0.0 < test_size < 1.0):
+            raise ValueError("split_size must be between 0 and 1 or 1–99 (as percent)")
+
+        # === Perform train-test split (with fallback) ===
+        try:
+            # Passing df (features) and target_df (DataFrame) — returned order: train_df, test_df, train_targets, test_targets
+            train_df, test_df, train_y, test_y = train_test_split(
+                df, target_df, test_size=test_size, random_state=42, stratify=stratify_param
+            )
+        except ValueError as e:
+            logger.warning("Stratified split failed (%s). Retrying without stratification.", e)
+            train_df, test_df, train_y, test_y = train_test_split(
+                df, target_df, test_size=test_size, random_state=42, stratify=None
+            )
+
+        # Reset indices
+        train_df = train_df.reset_index(drop=True)
+        test_df = test_df.reset_index(drop=True)
+        # train_y/test_y can be Series (single target) or DataFrame (multi-target)
+        if isinstance(train_y, (pd.Series,)):
+            train_y = train_y.reset_index(drop=True)
+            test_y = test_y.reset_index(drop=True)
+            train_y_df = pd.DataFrame({target_cols[0]: train_y})
+            test_y_df = pd.DataFrame({target_cols[0]: test_y})
+        else:
+            train_y_df = train_y.reset_index(drop=True)
+            test_y_df = test_y.reset_index(drop=True)
+
+        # If classification and single target, print train/test distributions and check match
+        if args.model_type.lower() == "classification" and len(target_cols) == 1:
+            logger.info("="*80)
+            logger.info("CLASS DISTRIBUTION VERIFICATION")
+            logger.info("="*80)
+
+            logger.info("TRAIN SET CLASS DISTRIBUTION:%s", train_y_df[target_cols[0]].value_counts(dropna=False).sort_index().to_string())
+            logger.info("TEST SET CLASS DISTRIBUTION:%s", test_y_df[target_cols[0]].value_counts(dropna=False).sort_index().to_string())
+
+            train_pct = train_y_df[target_cols[0]].value_counts(normalize=True, dropna=False).sort_index()
+            test_pct = test_y_df[target_cols[0]].value_counts(normalize=True, dropna=False).sort_index()
+            all_idx = train_pct.index.union(test_pct.index)
+            train_pct = train_pct.reindex(all_idx, fill_value=0)
+            test_pct = test_pct.reindex(all_idx, fill_value=0)
+            max_diff = (train_pct - test_pct).abs().max() * 100
+            logger.info("Maximum class distribution difference: %.2f%%", max_diff)
+            if max_diff > 5.0:
+                logger.warning("Large distribution mismatch detected! This may cause poor test performance.")
+            else:
+                logger.info("Train/test distributions are well matched.")
+            logger.info("="*80)
+
+        # === Create outputs ===
+        # test_x_df -> drop all target columns
+        test_x_df = test_df.drop(columns=target_cols, errors="ignore")
+        train_set_df = train_df.copy()
+        # ensure train_set contains target columns (they are present in train_df since we split full df)
+        # test_y_df already created above as DataFrame
+
+        # === Diagnostics for splits ===
+        logger.info("===== TRAIN SET =====")
+        logger.info("Shape: %s", train_set_df.shape)
+        logger.info("%s", train_set_df.head(3).to_string())
+
+        logger.info("===== TEST X (features only) =====")
+        logger.info("Shape: %s", test_x_df.shape)
+        logger.info("%s", test_x_df.head(3).to_string())
+
+        logger.info("===== TEST Y (target only) =====")
+        logger.info("Shape: %s", test_y_df.shape)
+        logger.info("%s", test_y_df.head(10).to_string(index=False))
+
+        # === Save Parquet Outputs ===
+        def safe_to_parquet(df_obj, path):
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            try:
+                df_obj.to_parquet(path, index=False)
+            except Exception as e:
+                logger.exception("Failed to write parquet to %s: %s", path, e)
+                csv_path = path + ".csv"
+                logger.info("Falling back to CSV at %s", csv_path)
+                df_obj.to_csv(csv_path, index=False)
+
+        safe_to_parquet(train_set_df, args.train_set)
+        safe_to_parquet(test_x_df, args.test_x)
+        safe_to_parquet(test_y_df, args.test_y)
+
+        logger.info("Finished processing and saved outputs.")
+    args:
+      - --cdn_url
+      - {inputValue: cdn_url}
+      - --split_size
+      - {inputValue: split_size}
+      - --target_column
+      - {inputValue: target_column}
+      - --model_type
+      - {inputValue: model_type}
+      - --train_set
+      - {outputPath: train_set}
+      - --test_x
+      - {outputPath: test_x}
+      - --test_y
+      - {outputPath: test_y}
