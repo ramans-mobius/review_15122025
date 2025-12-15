@@ -1,0 +1,359 @@
+name: Boosting Trainer v1.0
+inputs:
+  - {name: train_X, type: Dataset, description: "Training features from Feature Selection brick"}
+  - {name: train_y, type: Dataset, description: "Training targets from Feature Selection brick"}
+  - {name: untrained_model, type: Model, description: "Untrained model from Model Builder brick"}
+  - {name: model_metadata, type: Data, description: "Model metadata from Model Builder brick"}
+  - {name: model_type, type: String, description: "classification or regression", optional: true, default: "classification"}
+  - {name: early_stopping_rounds, type: Integer, description: "Early stopping rounds (0 to disable)", optional: true, default: "10"}
+  - {name: validation_split, type: Float, description: "Validation split for early stopping (0-1)", optional: true, default: "0.1"}
+  - {name: random_state, type: Integer, description: "Random seed", optional: true, default: "42"}
+outputs:
+  - {name: trained_model, type: Model, description: "Trained model object (cloudpickle)"}
+  - {name: training_metrics, type: Data, description: "JSON with training metrics"}
+  - {name: trained_model_metadata, type: Data, description: "Updated metadata with training info"}
+implementation:
+  container:
+    image: kumar2004/ml-base:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, json, traceback, warnings, cloudpickle
+        from datetime import datetime
+        import numpy as np
+        import pandas as pd
+        from sklearn.metrics import (
+            accuracy_score, precision_score, recall_score, f1_score, 
+            r2_score, mean_squared_error, mean_absolute_error,
+            confusion_matrix, roc_auc_score
+        )
+        from sklearn.model_selection import train_test_split
+        from sklearn.utils.class_weight import compute_sample_weight
+        
+        # Suppress warnings
+        warnings.filterwarnings('ignore', category=UserWarning)
+        warnings.filterwarnings('ignore', category=FutureWarning)
+        
+        def load_model(model_path):
+            with open(model_path, 'rb') as f:
+                return cloudpickle.load(f)
+        
+        def prepare_data_for_training(X, y, model_type, validation_split, random_state):
+            # Ensure y is in correct format
+            if isinstance(y, pd.DataFrame):
+                if y.shape[1] == 1:
+                    y = y.iloc[:, 0]
+                else:
+                    # Multi-output case
+                    return X, y, None, None, False
+            
+            # Single output case
+            if validation_split > 0 and validation_split < 1:
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X, y, test_size=validation_split, random_state=random_state, 
+                    stratify=y if model_type == 'classification' else None
+                )
+                return X_train, y_train, X_val, y_val, True
+            else:
+                return X, y, None, None, False
+        
+        def train_with_early_stopping(model, X_train, y_train, X_val, y_val, early_stopping_rounds, model_type):
+            model_name = model.__class__.__name__.lower()
+            
+            # Check if model supports early stopping
+            if early_stopping_rounds > 0 and X_val is not None and y_val is not None:
+                print(f"[INFO] Training with early stopping (rounds={early_stopping_rounds})")
+                
+                if 'xgboost' in model_name:
+                    # XGBoost early stopping
+                    eval_set = [(X_val, y_val)]
+                    model.fit(
+                        X_train, y_train,
+                        eval_set=eval_set,
+                        early_stopping_rounds=early_stopping_rounds,
+                        verbose=False
+                    )
+                elif 'lightgbm' in model_name:
+                    # LightGBM early stopping
+                    eval_set = [(X_val, y_val)]
+                    model.fit(
+                        X_train, y_train,
+                        eval_set=eval_set,
+                        early_stopping_rounds=early_stopping_rounds,
+                        verbose=False
+                    )
+                elif 'catboost' in model_name:
+                    # CatBoost early stopping
+                    from catboost import Pool
+                    train_pool = Pool(X_train, y_train)
+                    val_pool = Pool(X_val, y_val)
+                    model.fit(
+                        train_pool,
+                        eval_set=val_pool,
+                        early_stopping_rounds=early_stopping_rounds,
+                        verbose=False
+                    )
+                elif 'histgradientboosting' in model_name:
+                    # HistGradientBoosting early stopping
+                    model.set_params(early_stopping=True, n_iter_no_change=early_stopping_rounds)
+                    model.fit(X_train, y_train)
+                else:
+                    # Model doesn't support built-in early stopping
+                    print(f"[INFO] Model {model_name} doesn't support built-in early stopping, training normally")
+                    model.fit(X_train, y_train)
+            else:
+                # Train without early stopping
+                model.fit(X_train, y_train)
+            
+            return model
+        
+        def compute_metrics(model, X, y_true, model_type, dataset_name="train"):
+            metrics = {}
+            
+            try:
+                y_pred = model.predict(X)
+                
+                if model_type == 'classification':
+                    metrics[f'{dataset_name}_accuracy'] = float(accuracy_score(y_true, y_pred))
+                    metrics[f'{dataset_name}_precision'] = float(precision_score(y_true, y_pred, average='weighted', zero_division=0))
+                    metrics[f'{dataset_name}_recall'] = float(recall_score(y_true, y_pred, average='weighted', zero_division=0))
+                    metrics[f'{dataset_name}_f1'] = float(f1_score(y_true, y_pred, average='weighted', zero_division=0))
+                    
+                    # Try to compute ROC AUC if possible
+                    try:
+                        if hasattr(model, 'predict_proba'):
+                            y_proba = model.predict_proba(X)
+                            if y_proba.shape[1] > 1:  # Multi-class
+                                metrics[f'{dataset_name}_roc_auc'] = float(roc_auc_score(
+                                    y_true, y_proba, multi_class='ovr', average='weighted'
+                                ))
+                            else:  # Binary
+                                metrics[f'{dataset_name}_roc_auc'] = float(roc_auc_score(y_true, y_proba[:, 1]))
+                    except Exception:
+                        pass
+                        
+                else:  # regression
+                    metrics[f'{dataset_name}_r2'] = float(r2_score(y_true, y_pred))
+                    metrics[f'{dataset_name}_mse'] = float(mean_squared_error(y_true, y_pred))
+                    metrics[f'{dataset_name}_rmse'] = float(np.sqrt(metrics[f'{dataset_name}_mse']))
+                    metrics[f'{dataset_name}_mae'] = float(mean_absolute_error(y_true, y_pred))
+                    
+            except Exception as e:
+                print(f"[WARN] Could not compute {dataset_name} metrics: {e}")
+            
+            return metrics
+        
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--train_X', type=str, required=True)
+            parser.add_argument('--train_y', type=str, required=True)
+            parser.add_argument('--untrained_model', type=str, required=True)
+            parser.add_argument('--model_metadata', type=str, required=True)
+            parser.add_argument('--model_type', type=str, default='classification')
+            parser.add_argument('--early_stopping_rounds', type=int, default=10)
+            parser.add_argument('--validation_split', type=float, default=0.1)
+            parser.add_argument('--random_state', type=int, default=42)
+            parser.add_argument('--trained_model', type=str, required=True)
+            parser.add_argument('--training_metrics', type=str, required=True)
+            parser.add_argument('--trained_model_metadata', type=str, required=True)
+            args = parser.parse_args()
+            
+            try:
+                print("="*80)
+                print("BOOSTING TRAINER")
+                print("="*80)
+                
+                # Load data
+                print("[INFO] Loading training data...")
+                X = pd.read_parquet(args.train_X)
+                y_df = pd.read_parquet(args.train_y)
+                print(f"[INFO] X shape: {X.shape}, y shape: {y_df.shape}")
+                
+                # Check if multi-output
+                if isinstance(y_df, pd.DataFrame) and y_df.shape[1] > 1:
+                    print(f"[INFO] Multi-output target detected: {y_df.shape[1]} targets")
+                    y = y_df
+                    multi_output = True
+                else:
+                    if isinstance(y_df, pd.DataFrame):
+                        y = y_df.iloc[:, 0]
+                    else:
+                        y = y_df
+                    multi_output = False
+                
+                # Load model and metadata
+                print("[INFO] Loading untrained model...")
+                model = load_model(args.untrained_model)
+                
+                with open(args.model_metadata, 'r') as f:
+                    metadata = json.load(f)
+                
+                model_type = args.model_type.strip().lower()
+                
+                # Train model(s)
+                if multi_output:
+                    print("[INFO] Training multi-output model...")
+                    trained_models = {}
+                    all_metrics = {}
+                    
+                    for target_col in y.columns:
+                        print(f"[INFO] Training for target: {target_col}")
+                        y_target = y[target_col]
+                        
+                        # Prepare data for this target
+                        X_train, y_train, X_val, y_val, has_val = prepare_data_for_training(
+                            X, y_target, model_type, args.validation_split, args.random_state
+                        )
+                        
+                        # Clone model for each target
+                        import copy
+                        model_copy = copy.deepcopy(model)
+                        
+                        # Train with early stopping
+                        trained_model = train_with_early_stopping(
+                            model_copy, X_train, y_train, X_val, y_val,
+                            args.early_stopping_rounds, model_type
+                        )
+                        
+                        # Compute metrics
+                        metrics = compute_metrics(trained_model, X_train, y_train, model_type, "train")
+                        if has_val:
+                            val_metrics = compute_metrics(trained_model, X_val, y_val, model_type, "val")
+                            metrics.update(val_metrics)
+                        
+                        trained_models[target_col] = trained_model
+                        all_metrics[target_col] = metrics
+                    
+                    # Save combined model
+                    final_model = trained_models
+                    final_metrics = {"targets": all_metrics}
+                    
+                else:
+                    # Single output training
+                    print("[INFO] Training single-output model...")
+                    
+                    # Prepare data
+                    X_train, y_train, X_val, y_val, has_val = prepare_data_for_training(
+                        X, y, model_type, args.validation_split, args.random_state
+                    )
+                    
+                    # Apply sample weights for classification if needed
+                    if model_type == 'classification' and hasattr(model, 'sample_weight'):
+                        try:
+                            sample_weight = compute_sample_weight(class_weight='balanced', y=y_train)
+                            print("[INFO] Using balanced sample weights")
+                        except:
+                            sample_weight = None
+                    else:
+                        sample_weight = None
+                    
+                    # Train with early stopping
+                    if sample_weight is not None:
+                        model.fit(X_train, y_train, sample_weight=sample_weight)
+                    else:
+                        model = train_with_early_stopping(
+                            model, X_train, y_train, X_val, y_val,
+                            args.early_stopping_rounds, model_type
+                        )
+                    
+                    # Compute metrics
+                    final_metrics = compute_metrics(model, X_train, y_train, model_type, "train")
+                    if has_val:
+                        val_metrics = compute_metrics(model, X_val, y_val, model_type, "val")
+                        final_metrics.update(val_metrics)
+                    
+                    final_model = model
+                
+                # Save trained model
+                os.makedirs(os.path.dirname(args.trained_model) or '.', exist_ok=True)
+                with open(args.trained_model, 'wb') as f:
+                    cloudpickle.dump(final_model, f)
+                print(f"[INFO] Trained model saved to: {args.trained_model}")
+                
+                # Save training metrics
+                training_info = {
+                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'model_type': model_type,
+                    'multi_output': multi_output,
+                    'training_samples': len(X),
+                    'features': X.shape[1],
+                    'early_stopping_rounds': args.early_stopping_rounds,
+                    'validation_split': args.validation_split,
+                    'random_state': args.random_state,
+                    'metrics': final_metrics
+                }
+                
+                os.makedirs(os.path.dirname(args.training_metrics) or '.', exist_ok=True)
+                with open(args.training_metrics, 'w') as f:
+                    json.dump(training_info, f, indent=2)
+                print(f"[INFO] Training metrics saved to: {args.training_metrics}")
+                
+                # Update and save metadata
+                metadata['training_completed'] = True
+                metadata['training_timestamp'] = datetime.utcnow().isoformat() + 'Z'
+                metadata['training_samples'] = len(X)
+                metadata['multi_output'] = multi_output
+                if multi_output:
+                    metadata['target_columns'] = list(y.columns) if isinstance(y, pd.DataFrame) else ['target']
+                
+                os.makedirs(os.path.dirname(args.trained_model_metadata) or '.', exist_ok=True)
+                with open(args.trained_model_metadata, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                print(f"[INFO] Updated metadata saved to: {args.trained_model_metadata}")
+                
+                # Print summary
+                print(f"{'='*80}")
+                print("TRAINING COMPLETE - SUMMARY")
+                print(f"{'='*80}")
+                print(f"Model: {metadata['algorithm']}")
+                print(f"Task: {model_type}")
+                print(f"Training samples: {len(X)}")
+                print(f"Features: {X.shape[1]}")
+                
+                if multi_output:
+                    print(f"Targets: {list(y.columns) if isinstance(y, pd.DataFrame) else 1}")
+                    for target, metrics in final_metrics.get('targets', {}).items():
+                        print(f"\\nTarget '{target}':")
+                        for metric_name, value in metrics.items():
+                            if value is not None:
+                                print(f"  {metric_name}: {value:.4f}")
+                else:
+                    print("\\nTraining Metrics:")
+                    for metric_name, value in final_metrics.items():
+                        if value is not None:
+                            print(f"  {metric_name}: {value:.4f}")
+                
+                print(f"{'='*80}")
+                
+            except Exception as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                traceback.print_exc()
+                sys.exit(1)
+        
+        if __name__ == "__main__":
+            main()
+    args:
+      - --train_X
+      - {inputPath: train_X}
+      - --train_y
+      - {inputPath: train_y}
+      - --untrained_model
+      - {inputPath: untrained_model}
+      - --model_metadata
+      - {inputPath: model_metadata}
+      - --model_type
+      - {inputValue: model_type}
+      - --early_stopping_rounds
+      - {inputValue: early_stopping_rounds}
+      - --validation_split
+      - {inputValue: validation_split}
+      - --random_state
+      - {inputValue: random_state}
+      - --trained_model
+      - {outputPath: trained_model}
+      - --training_metrics
+      - {outputPath: training_metrics}
+      - --trained_model_metadata
+      - {outputPath: trained_model_metadata}
