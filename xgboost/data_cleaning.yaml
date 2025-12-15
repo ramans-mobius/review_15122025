@@ -1,0 +1,423 @@
+name: Data Cleaning v1.3
+inputs:
+  - {name: in_file, type: Dataset, description: "Path to the dataset file or directory"}
+  - {name: target_column, type: String, description: "Target column(s), comma-separated for multi-output"}
+  - {name: missing_threshold, type: Float, description: "Drop columns with missing % above this", optional: true, default: "0.40"}
+  - {name: unique_threshold, type: Float, description: "Drop columns with unique % above this (ID columns)", optional: true, default: "0.95"}
+  - {name: numeric_detection_threshold, type: Float, description: "Fraction threshold to coerce object to numeric", optional: true, default: "0.6"}
+  - {name: preview_rows, type: Integer, description: "Rows to include in preview prints", optional: true, default: "20"}
+outputs:
+  - {name: cleaned_X, type: Dataset, description: "Cleaned features parquet"}
+  - {name: cleaned_y, type: Dataset, description: "Target labels parquet"}
+  - {name: cleaning_metadata, type: Data, description: "JSON metadata with cleaning stats"}
+implementation:
+  container:
+    image: kumar2004/ml-base:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, json, traceback, re, io, gzip, zipfile
+        from datetime import datetime
+        import pandas as pd, numpy as np
+        from pathlib import Path
+        
+        # Helper functions
+        def ensure_dir_for(p):
+            d=os.path.dirname(p)
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
+
+        def is_likely_json(sample_bytes):
+            if not sample_bytes: return False
+            try: txt = sample_bytes.decode("utf-8", errors="ignore").lstrip()
+            except Exception: return False
+            if not txt: return False
+            if txt[0] in ("{","["): return True
+            if "{" in txt or "[" in txt: return True
+            return False
+
+        def read_with_pandas(path):
+
+        
+            path = str(path)
+            # if directory: prefer files with known dataset extensions, else fallback to largest file
+            if os.path.isdir(path):
+                entries = [os.path.join(path, f) for f in os.listdir(path) if not f.startswith(".")]
+                files = [p for p in entries if os.path.isfile(p)]
+                if not files:
+                    raise ValueError("No files in dir: " + path)
+        
+                # prefer these extensions in this order
+                prefer_exts = ['.parquet', '.pq', '.csv', '.json', '.ndjson', '.gz', '.zip',
+                               '.xlsx', '.xls', '.feather', '.feather.parquet', '.sav', '.sas7bdat']
+                files_by_ext = {ext: [] for ext in prefer_exts}
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext in files_by_ext:
+                        files_by_ext[ext].append(f)
+                chosen = None
+                for ext in prefer_exts:
+                    if files_by_ext.get(ext):
+                        chosen = files_by_ext[ext][0]
+                        break
+                if not chosen:
+                    # fallback to largest file (legacy behavior)
+                    chosen = max(files, key=lambda p: os.path.getsize(p))
+                path = chosen
+                print("[INFO] Selected file from dir:", path)
+        
+            if not os.path.exists(path) or not os.path.isfile(path):
+                raise ValueError("Input path not found: " + str(path))
+        
+            ext = os.path.splitext(path)[1].lower()
+        
+            # handle compressed csv/json (.gz) and zip containers
+            if ext == ".gz":
+                try:
+                    with gzip.open(path, "rt", encoding="utf-8", errors="ignore") as fh:
+                        sample = fh.read(8192)
+                        fh.seek(0)
+                        # prefer json if it looks like json lines
+                        if sample.lstrip().startswith("{") or "\\n{" in sample:
+                            fh.seek(0)
+                            return pd.read_json(fh, lines=True)
+                        fh.seek(0)
+                        return pd.read_csv(fh)
+                except Exception:
+                    # fallback to binary open + try encodings
+                    pass
+        
+            if ext == ".zip":
+                with zipfile.ZipFile(path, "r") as z:
+                    members = [n for n in z.namelist() if not n.endswith("/")]
+                    if not members:
+                        raise ValueError("ZIP contains no files: " + path)
+                    member = max(members, key=lambda n: z.getinfo(n).file_size)
+                    with z.open(member) as fh:
+                        sample = fh.read(8192)
+                        # json?
+                        if sample.lstrip().startswith(b"{") or b"\\n{" in sample:
+                            with z.open(member) as fh2:
+                                return pd.read_json(io.TextIOWrapper(fh2, encoding="utf-8"), lines=True)
+                        else:
+                            with z.open(member) as fh2:
+                                return pd.read_csv(io.TextIOWrapper(fh2, encoding="utf-8"))
+        
+            # Excel support
+            if ext in (".xlsx", ".xls"):
+                try:
+                    # prefer openpyxl for xlsx; xlrd may be needed for old xls
+                    return pd.read_excel(path)
+                except Exception as e:
+                    # give more informative error
+                    raise ValueError(f"Failed to read Excel file {path}: {e}")
+        
+            # parquet
+            if ext in (".parquet", ".pq"):
+                return pd.read_parquet(path)
+        
+            # feather (if available)
+            if ext in (".feather",):
+                try:
+                    return pd.read_feather(path)
+                except Exception:
+                    pass
+        
+            # If extension suggests text-like or unknown: try a sequence of attempts with multiple encodings/parsers
+            attempts = []
+            # try JSON (lines and normal)
+            try:
+                attempts.append(("json_lines", lambda: pd.read_json(path, lines=True)))
+            except Exception:
+                pass
+            try:
+                attempts.append(("json", lambda: pd.read_json(path)))
+            except Exception:
+                pass
+        
+            # try CSV with several encodings and engine fallback
+            encodings = ['utf-8', 'latin1', 'cp1252', 'utf-16']
+            for enc in encodings:
+                def make_csv_fn(e=enc):
+                    return lambda: pd.read_csv(path, encoding=e)
+                attempts.append((f"csv_{enc}", make_csv_fn()))
+        
+            # csv with python engine (more tolerant)
+            for enc in encodings:
+                def make_csv_py(e=enc):
+                    return lambda: pd.read_csv(path, encoding=e, engine="python", error_bad_lines=False)
+                attempts.append((f"csv_py_{enc}", make_csv_py()))
+        
+            # finally try parquet read as last resort
+            attempts.append(("parquet_try", lambda: pd.read_parquet(path)))
+        
+            last_exc = None
+            for name, fn in attempts:
+                try:
+                    print(f"[INFO] Trying reader: {name}")
+                    df = fn()
+                    print(f"[INFO] Succeeded with {name}")
+                    return df
+                except Exception as e:
+                    last_exc = e
+                    # continue to next attempt
+        
+            # If nothing worked, raise clearer error describing attempts
+            raise ValueError(f"Unsupported or unreadable format: {path}. Last error: {last_exc}")
+
+
+        def make_hashable_for_dupes(df):
+            df = df.copy()
+            for c in df.columns:
+                try:
+                    if df[c].apply(lambda v: isinstance(v,(list,dict,set))).any():
+                        df[c] = df[c].map(lambda v: json.dumps(v, sort_keys=True) if isinstance(v,(list,dict,set)) else v)
+                except Exception:
+                    df[c] = df[c].astype(str)
+            return df
+
+        CURRENCY_SYMBOLS_REGEX = r'[€£¥₹$¢฿₪₩₫₽₺]'
+        MULTIPLIER_MAP = {'k':1e3,'m':1e6,'b':1e9,'t':1e12}
+        TOKEN_RE = re.compile(r'^\s*(?P<sign>[-+]?)(?P<number>(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:[.,]\d+)?)\s*(?P<mult>[kKmMbBtT])?\s*(?P<unit>[A-Za-z%/°µμ²³]*)\s*$')
+        
+        def parse_alphanumeric_to_numeric(s, decimal_comma=False):
+            if pd.isna(s): return np.nan
+            orig=str(s).strip()
+            if orig=='' or orig.lower() in {'nan','none','null','na'}: return np.nan
+            tmp=re.sub(CURRENCY_SYMBOLS_REGEX,'',orig)
+            if tmp.strip().endswith('%'):
+                try: return float(tmp.strip().rstrip('%').replace(',','').replace(' ',''))/100.0
+                except Exception: pass
+            tmp=tmp.replace('\u2212','-').replace('\u2013','-').replace('\u2014','-')
+            tmp=re.sub(r'[\u00A0\u202F]','',tmp).strip()
+            if decimal_comma: tmp=tmp.replace('.','').replace(',','.')
+            else: tmp=tmp.replace(',','').replace(' ','')
+            try: return float(tmp)
+            except Exception: pass
+            m=TOKEN_RE.match(tmp)
+            if m:
+                number=m.group('number'); mult=m.group('mult')
+                number_clean=number.replace(',','').replace(' ','')
+                try: val=float(number_clean)
+                except Exception: return np.nan
+                if mult: val*=MULTIPLIER_MAP.get(mult.lower(),1.0)
+                return val
+            return np.nan
+
+        def convert_object_columns_advanced(df, detect_threshold=0.6, exclude_cols=None):
+            df=df.copy(); report={'converted':[],'skipped':[]}
+            exclude_cols = set(exclude_cols or [])
+            obj_cols=[c for c in df.columns if (df[c].dtype=='object' or str(df[c].dtype).startswith('string'))]
+            for col in obj_cols:
+                if col in exclude_cols: continue
+                ser=df[col].astype(object); total_non_null=ser.notna().sum()
+                if total_non_null==0: 
+                    report['skipped'].append({'col':col,'parsable_fraction':0.0}); continue
+                parsed = ser.map(lambda x: parse_alphanumeric_to_numeric(x))
+                frac = parsed.notna().sum()/float(total_non_null)
+                if frac>=detect_threshold:
+                    df[col+"_orig"]=df[col]; df[col]=parsed
+                    report['converted'].append({'col':col,'parsable_fraction':frac})
+                else:
+                    report['skipped'].append({'col':col,'parsable_fraction':frac})
+            return df, report
+
+        def detect_and_extract_dates(df, exclude_cols=None):
+            df = df.copy()
+            report = {'date_columns': [], 'skipped': [], 'patterns_found': {}}
+            exclude_cols = set(exclude_cols or [])
+            cand = [c for c in df.columns if c not in exclude_cols and 
+                    (df[c].dtype == 'object' or str(df[c].dtype).startswith('string'))]
+            
+            for col in cand:
+                ser = df[col].astype(object)
+                sample = ser.dropna().astype(str).head(500)
+                if sample.empty: continue
+                
+                parsed = pd.to_datetime(sample, errors='coerce', infer_datetime_format=True)
+                frac = parsed.notna().mean()
+                
+                if frac >= 0.6:
+                    full = pd.to_datetime(ser, errors='coerce', infer_datetime_format=True)
+                    df[col + "_orig"] = df[col]
+                    df[col] = full
+                    df[col + "_year"] = df[col].dt.year.astype('Int64')
+                    df[col + "_month"] = df[col].dt.month.astype('Int64')
+                    df[col + "_day"] = df[col].dt.day.astype('Int64')
+                    df[col + "_dayofweek"] = df[col].dt.dayofweek.astype('Int64')
+                    df[col + "_quarter"] = df[col].dt.quarter.astype('Int64')
+                    df[col + "_month_sin"] = np.sin(2 * np.pi * df[col].dt.month / 12)
+                    df[col + "_month_cos"] = np.cos(2 * np.pi * df[col].dt.month / 12)
+                    df[col + "_day_sin"] = np.sin(2 * np.pi * df[col].dt.dayofweek / 7)
+                    df[col + "_day_cos"] = np.cos(2 * np.pi * df[col].dt.dayofweek / 7)
+                    df[col + "_is_weekend"] = df[col].dt.dayofweek.isin([5, 6]).astype('Int64')
+                    df[col + "_days_since_epoch"] = (df[col] - pd.Timestamp("1970-01-01")) // pd.Timedelta('1D')
+                    
+                    report['date_columns'].append({'col': col, 'parsable_fraction': frac})
+                    print(f"[INFO] Detected datetime in '{col}' ({frac*100:.1f}% valid)")
+
+            return df, report
+
+        # Main execution
+        parser=argparse.ArgumentParser()
+        parser.add_argument('--in_file', type=str, required=True)
+        parser.add_argument('--target_column', type=str, required=True)
+        parser.add_argument('--missing_threshold', type=float, default=0.40)
+        parser.add_argument('--unique_threshold', type=float, default=0.95)
+        parser.add_argument('--numeric_detection_threshold', type=float, default=0.6)
+        parser.add_argument('--preview_rows', type=int, default=20)
+        parser.add_argument('--cleaned_X', type=str, required=True)
+        parser.add_argument('--cleaned_y', type=str, required=True)
+        parser.add_argument('--cleaning_metadata', type=str, required=True)
+        args=parser.parse_args()
+
+        try:
+            print("="*80)
+            print("BRICK 1: DATA CLEANING")
+            print("="*80)
+            
+            target_cols = [t.strip() for t in args.target_column.split(',')] if ',' in args.target_column else [args.target_column.strip()]
+            print(f"[INFO] Targets: {target_cols}")
+            
+            # Load data
+            print("[STEP 1/10] Loading data...")
+            df = read_with_pandas(args.in_file)
+            print(f"[INFO] Shape: {df.shape}")
+            
+            # Validate targets
+            print("[STEP 2/10] Validating targets...")
+            for tc in target_cols:
+                if tc not in df.columns:
+                    print(f"ERROR: '{tc}' not found", file=sys.stderr); sys.exit(1)
+            
+            # Remove duplicates
+            print("[STEP 3/10] Removing duplicates...")
+            before = len(df)
+            df = make_hashable_for_dupes(df).drop_duplicates(keep='first')
+            dropped_dupes = before - len(df)
+            print(f"[INFO] Removed {dropped_dupes} duplicates")
+            
+            # Separate X and y
+            print("[STEP 4/10] Separating X and y...")
+            y_raw = df[target_cols].copy()
+            X_raw = df.drop(columns=target_cols).copy()
+            print(f"[INFO] X: {X_raw.shape}, y: {y_raw.shape}")
+            
+            # Drop high-missing columns
+            print(f"[STEP 5/10] Dropping columns >{args.missing_threshold*100}% missing...")
+            missing_report = {}
+            cols_to_drop_missing = []
+            for col in X_raw.columns:
+                missing_pct = X_raw[col].isnull().sum() / len(X_raw)
+                missing_report[col] = float(missing_pct)
+                if missing_pct > args.missing_threshold:
+                    cols_to_drop_missing.append(col)
+            if cols_to_drop_missing:
+                print(f"[INFO] Dropping {len(cols_to_drop_missing)} columns")
+                X_raw = X_raw.drop(columns=cols_to_drop_missing)
+            
+            # Drop ID columns
+            print(f"[STEP 6/10] Dropping ID columns >{args.unique_threshold*100}% unique...")
+            unique_report = {}
+            cols_to_drop_unique = []
+            for col in X_raw.columns:
+                unique_pct = X_raw[col].nunique() / len(X_raw)
+                unique_report[col] = float(unique_pct)
+                if unique_pct > args.unique_threshold:
+                    is_numeric = pd.api.types.is_numeric_dtype(X_raw[col])
+                    is_float = pd.api.types.is_float_dtype(X_raw[col])
+                    if is_numeric and is_float and len(X_raw[col].dropna()) > 0:
+                        std = X_raw[col].std()
+                        if std > 0: continue
+                    cols_to_drop_unique.append(col)
+            if cols_to_drop_unique:
+                print(f"[INFO] Dropping {len(cols_to_drop_unique)} ID columns")
+                X_raw = X_raw.drop(columns=cols_to_drop_unique)
+            
+            # Convert object to numeric
+            print(f"[STEP 7/10] Converting object→numeric...")
+            X_conv, conv_report = convert_object_columns_advanced(
+                X_raw, detect_threshold=args.numeric_detection_threshold, exclude_cols=target_cols
+            )
+            print(f"[INFO] Converted {len(conv_report['converted'])} columns")
+            
+            # Extract dates
+            print(f"[STEP 8/10] Extracting date features...")
+            X_dates, date_report = detect_and_extract_dates(X_conv, exclude_cols=target_cols)
+            print(f"[INFO] Detected {len(date_report['date_columns'])} date columns")
+            
+            # Drop _orig columns
+            cols_orig = [c for c in X_dates.columns if c.endswith('_orig')]
+            if cols_orig:
+                X_dates = X_dates.drop(columns=cols_orig)
+            
+            # Handle missing y
+            print(f"[STEP 9/10] Handling missing targets...")
+            keep_mask = y_raw.notna().all(axis=1)
+            dropped_y = int((~keep_mask).sum())
+            if dropped_y > 0:
+                print(f"[INFO] Dropping {dropped_y} rows with missing targets")
+            X_final = X_dates.loc[keep_mask].reset_index(drop=True)
+            y_final = y_raw.loc[keep_mask].reset_index(drop=True)
+            
+            # Save outputs
+            print(f"[STEP 10/10] Saving outputs...")
+            ensure_dir_for(args.cleaned_X)
+            ensure_dir_for(args.cleaned_y)
+            ensure_dir_for(args.cleaning_metadata)
+            
+            X_final.to_parquet(args.cleaned_X, index=False)
+            y_final.to_parquet(args.cleaned_y, index=False)
+            
+            metadata = {
+                'timestamp': datetime.utcnow().isoformat()+'Z',
+                'target_columns': target_cols,
+                'n_targets': len(target_cols),
+                'original_shape': {'rows': before, 'cols': len(df.columns)},
+                'final_shape': {'rows': len(X_final), 'cols': len(X_final.columns)},
+                'dropped_duplicates': dropped_dupes,
+                'dropped_missing_cols': cols_to_drop_missing,
+                'dropped_unique_cols': cols_to_drop_unique,
+                'dropped_rows_missing_y': dropped_y,
+                'missing_report': missing_report,
+                'unique_report': unique_report,
+                'conversion_report': conv_report,
+                'date_report': date_report,
+                'column_names': list(X_final.columns)
+            }
+            
+            with open(args.cleaning_metadata, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            print(f"{'='*80}")
+            print("BRICK 1 COMPLETE")
+            print(f"{'='*80}")
+            print(f"Final X: {X_final.shape}")
+            print(f"Final y: {y_final.shape}")
+            print(f"Saved to: {args.cleaned_X}")
+            
+        except Exception as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            traceback.print_exc()
+            sys.exit(1)
+    args:
+      - --in_file
+      - {inputPath: in_file}
+      - --target_column
+      - {inputValue: target_column}
+      - --missing_threshold
+      - {inputValue: missing_threshold}
+      - --unique_threshold
+      - {inputValue: unique_threshold}
+      - --numeric_detection_threshold
+      - {inputValue: numeric_detection_threshold}
+      - --preview_rows
+      - {inputValue: preview_rows}
+      - --cleaned_X
+      - {outputPath: cleaned_X}
+      - --cleaned_y
+      - {outputPath: cleaned_y}
+      - --cleaning_metadata
+      - {outputPath: cleaning_metadata}
