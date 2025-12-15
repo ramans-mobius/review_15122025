@@ -1,0 +1,757 @@
+name: Evaluate Model v13
+inputs:
+  - {name: X_test, type: Dataset, description: "Path to test feature file or directory (raw, not preprocessed)"}
+  - {name: y_test, type: Dataset, description: "Path to test target file (single-column file or multi-column with target_column)"}
+  - {name: target_column, type: String, description: "Target column in y_test if multi-column", optional: true, default: ""}
+  - {name: preprocessor, type: Data, description: "Path to saved Preprocessor (cloudpickle or joblib). .gz supported"}
+  - {name: feature_selector, type: Data, description: "Path to saved FeatureSelector (cloudpickle or joblib). Optional", optional: true}
+  - {name: pca, type: Data, description: "Path to saved PCA / dimensionality transformer (joblib/cloudpickle). Optional. If provided and not None, PCA.transform will be applied.", optional: true}
+  - {name: model_pickle, type: Model, description: "Path to saved model (joblib/pickle)"}
+  - {name: model_type, type: String, description: "classification or regression", optional: true, default: "classification"}
+  - {name: preprocess_metadata, type: Data, description: "JSON emitted at train time containing label_mapping for classification", optional: true}
+outputs:
+  - {name: metrics_json, type: String, description: "Evaluation metrics JSON (minimal fields)"}
+  - {name: predictions, type: String, description: "Parquet with y_true and y_pred (and proba if available)"}
+implementation:
+  container:
+    image: kumar2004/ml-base:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, json, io, gzip, zipfile, traceback, numbers
+        import pandas as pd, numpy as np, joblib, cloudpickle
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, r2_score, mean_squared_error, mean_absolute_error, confusion_matrix
+        from scipy import stats
+
+        def is_likely_json(sample_bytes):
+            if not sample_bytes: return False
+            try: txt = sample_bytes.decode("utf-8", errors="ignore").lstrip()
+            except Exception: return False
+            if not txt: return False
+            if txt[0] in ("{","["): return True
+            if "{" in txt or "[" in txt: return True
+            return False
+
+        def read_with_pandas(path):
+            import io, zipfile
+            if os.path.isdir(path):
+                entries=[os.path.join(path,f) for f in os.listdir(path) if not f.startswith(".")]
+                files=[p for p in entries if os.path.isfile(p)]
+                if not files: raise ValueError("No files in dir: "+path)
+                path = max(files, key=lambda p: os.path.getsize(p))
+                print("[INFO] Directory input. Picked file: " + path)
+            ext=os.path.splitext(path)[1].lower()
+            if ext==".gz" or path.endswith(".csv.gz") or path.endswith(".json.gz"):
+                try:
+                    with gzip.open(path,"rt",encoding="utf-8",errors="ignore") as fh:
+                        sample=fh.read(8192); fh.seek(0)
+                        if is_likely_json(sample.encode() if isinstance(sample,str) else sample):
+                            fh.seek(0)
+                            try: return pd.read_json(fh, lines=True)
+                            except Exception: fh.seek(0); return pd.read_csv(fh)
+                        fh.seek(0); return pd.read_csv(fh)
+                except Exception: pass
+            if ext==".zip":
+                with zipfile.ZipFile(path,"r") as z:
+                    members=[n for n in z.namelist() if not n.endswith("/")]
+                    member=max(members, key=lambda n: z.getinfo(n).file_size if z.getinfo(n).file_size else 0)
+                    with z.open(member) as fh:
+                        sample=fh.read(8192)
+                        if is_likely_json(sample):
+                            with z.open(member) as fh2:
+                                return pd.read_json(io.TextIOWrapper(fh2,encoding="utf-8"), lines=True)
+                        else:
+                            with z.open(member) as fh2:
+                                return pd.read_csv(io.TextIOWrapper(fh2,encoding="utf-8"))
+            try:
+                if ext==".csv": return pd.read_csv(path)
+                if ext in (".tsv",".tab"): return pd.read_csv(path, sep="\t")
+                if ext in (".json",".ndjson",".jsonl"):
+                    try: return pd.read_json(path, lines=True)
+                    except ValueError: return pd.read_json(path)
+                if ext in (".xls",".xlsx"): return pd.read_excel(path)
+                if ext in (".parquet",".pq"): return pd.read_parquet(path, engine="auto")
+                if ext==".feather": return pd.read_feather(path)
+                if ext==".orc": return pd.read_orc(path)
+            except Exception: pass
+            try: return pd.read_parquet(path, engine="auto")
+            except Exception: pass
+            try: return pd.read_csv(path)
+            except Exception: pass
+            raise ValueError("Unsupported format: " + path)
+
+        def ensure_dir_for(p):
+            d=os.path.dirname(p)
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
+
+        def load_pickle_any(path):
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"File not found: {path}")
+            # Try gzipped cloudpickle first
+            try:
+                with gzip.open(path, "rb") as f:
+                    return cloudpickle.load(f)
+            except Exception:
+                pass
+            # Try regular cloudpickle
+            try:
+                with open(path, "rb") as f:
+                    return cloudpickle.load(f)
+            except Exception:
+                pass
+            # Try joblib as fallback
+            try:
+                return joblib.load(path)
+            except Exception as e:
+                raise ValueError(f"Could not load pickle from {path}: {e}")
+
+        def extract_loss(model):
+            candidates = [
+                "loss_", "best_loss_", "best_score_", "train_score_", "oob_score_", "loss", "best_iteration_", "best_score"
+            ]
+            for attr in candidates:
+                try:
+                    val = getattr(model, attr, None)
+                    if val is None:
+                        continue
+                    if isinstance(val, dict):
+                        for v in val.values():
+                            if isinstance(v, (list,tuple)) and len(v)>0 and isinstance(v[-1], (int,float,np.floating,np.integer)):
+                                return float(v[-1])
+                            if isinstance(v, (int,float,np.floating,np.integer)):
+                                return float(v)
+                        continue
+                    if isinstance(val, (list, tuple, np.ndarray)) and len(val)>0:
+                        last = val[-1]
+                        if isinstance(last, (int,float,np.floating,np.integer)):
+                            return float(last)
+                    if isinstance(val, (int,float,np.floating,np.integer)):
+                        return float(val)
+                except Exception:
+                    continue
+            try:
+                er = getattr(model, "evals_result_", None)
+                if isinstance(er, dict):
+                    for m in er.values():
+                        if isinstance(m, dict):
+                            for k2 in m.values():
+                                if isinstance(k2, list) and len(k2)>0 and isinstance(k2[-1], (int,float,np.floating,np.integer)):
+                                    return float(k2[-1])
+            except Exception:
+                pass
+            return None
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--X_test", type=str, required=True)
+        parser.add_argument("--y_test", type=str, required=True)
+        parser.add_argument("--target_column", type=str, default="")
+        parser.add_argument("--preprocessor", type=str, required=True)
+        parser.add_argument("--feature_selector", type=str, required=False, default="")
+        parser.add_argument("--pca", type=str, required=False, default="")
+        parser.add_argument("--model_pickle", type=str, required=True)
+        parser.add_argument("--model_type", type=str, default="classification")
+        parser.add_argument("--preprocess_metadata", type=str, required=False, default="")
+        parser.add_argument("--metrics_json", type=str, required=True)
+        parser.add_argument("--predictions", type=str, required=True)
+        args = parser.parse_args()
+
+        try:
+            print("="*80)
+            print("EVALUATION STARTED")
+            print("="*80)
+
+            X_path = args.X_test
+            y_path = args.y_test
+            preprocessor_path = args.preprocessor
+            feature_selector_path = args.feature_selector or ""
+            pca_path = args.pca or ""
+            model_path = args.model_pickle
+            metrics_path = args.metrics_json
+            preds_path = args.predictions
+            task = str(args.model_type).strip().lower()
+            target_col = str(args.target_column or "").strip()
+            meta_path = (args.preprocess_metadata or "").strip()
+
+            print(f"[INFO] Task: {task}")
+            print(f"[INFO] X_test path: {X_path}")
+            print(f"[INFO] y_test path: {y_path}")
+            print(f"[INFO] Target column: {target_col if target_col else '(auto-detect)'}")
+
+            # Load artifacts
+            print("[INFO] Loading preprocessor...")
+            pre = load_pickle_any(preprocessor_path)
+            print("[INFO] Preprocessor loaded successfully")
+
+            print("[INFO] Loading feature selector...")
+            if feature_selector_path and os.path.exists(feature_selector_path):
+                fs = load_pickle_any(feature_selector_path)
+                print("[INFO] Feature selector loaded successfully")
+            else:
+                fs = None
+                print("[INFO] No feature selector provided")
+
+            print("[INFO] Loading model...")
+            try:
+                model = joblib.load(model_path)
+            except Exception:
+                model = load_pickle_any(model_path)
+            print("[INFO] Model loaded successfully")
+
+            # determine a model_name string for metrics
+            model_name_str = None
+            try:
+                model_name_str = getattr(model, "name", None) or getattr(model, "model_name", None) or model.__class__.__name__
+            except Exception:
+                model_name_str = str(type(model))
+
+            # Load test data
+            print("[INFO] Loading test data...")
+            X_raw = read_with_pandas(X_path)
+            print(f"[INFO] X_test shape: {X_raw.shape}")
+            print(f"[INFO] X_test columns: {list(X_raw.columns)}")
+
+            y_df = read_with_pandas(y_path)
+
+            # Extract target column and define variables y, y_raw, y_multi_df
+            y_raw = None
+            y_multi_df = None
+            y = None
+            
+            if isinstance(y_df, pd.DataFrame):
+                if target_col:
+                    # Check if target_col is comma-separated list of columns
+                    if ',' in target_col:
+                        # Multi-target scenario: user passed comma-separated list
+                        target_cols = [c.strip() for c in target_col.split(',')]
+                        missing = [c for c in target_cols if c not in y_df.columns]
+                        if missing:
+                            raise ValueError(f"Target columns {missing} not in y_test. Available columns: {list(y_df.columns)}")
+                        # Extract only the specified columns
+                        y_multi_df = y_df[target_cols].copy()
+                        y = y_multi_df  # y is DataFrame with multiple targets
+                        print(f"[INFO] Multi-target mode: {len(target_cols)} targets: {target_cols}")
+                    elif target_col not in y_df.columns:
+                        raise ValueError(f"--target_column '{target_col}' not in y_test. Available columns: {list(y_df.columns)}")
+                    else:
+                        # Single target specified
+                        y_raw = y_df[target_col].copy()
+                        y = y_raw  # y is Series
+                        print(f"[INFO] Single-target mode: {target_col}")
+                elif y_df.shape[1] == 1:
+                    # Single column DataFrame
+                    y_raw = y_df.iloc[:, 0].copy()
+                    y = y_raw  # y is Series
+                    print(f"[INFO] Single-target mode (auto-detected): {y_df.columns[0]}")
+                else:
+                    # Multi-column DataFrame, no target_col specified -> use all
+                    y_multi_df = y_df.copy()
+                    y = y_multi_df  # y is DataFrame
+                    print(f"[INFO] Multi-target mode (all columns): {list(y_df.columns)}")
+            else:
+                # y_df is a Series
+                y_raw = pd.Series(y_df).copy()
+                y = y_raw  # y is Series
+                print(f"[INFO] Single-target mode (Series input)")
+
+            # Store original y for output
+            y_original = y.copy() if y is not None else None
+
+            if y is not None and len(y) == 0:
+                raise ValueError("y_test has 0 rows. Check the input file.")
+
+            # Load metadata and label mapping
+            print("[INFO] Loading preprocessing metadata...")
+            label_mapping = None
+            if meta_path and os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    label_mapping = meta.get("label_mapping", None)
+                    if label_mapping:
+                        print(f"[INFO] Label mapping loaded from metadata: {label_mapping}")
+                    else:
+                        print("[WARN] No label_mapping found in metadata")
+                except Exception as e:
+                    print(f"[WARN] Could not read metadata: {e}")
+            else:
+                print("[WARN] No metadata file provided")
+
+            # Fallback: try to get label_mapping from preprocessor
+            if label_mapping is None:
+                try:
+                    gm = getattr(pre, "global_metadata", {}) or {}
+                    if "label_mapping" in gm:
+                        label_mapping = gm["label_mapping"]
+                        print(f"[INFO] Label mapping loaded from preprocessor: {label_mapping}")
+                except Exception:
+                    pass
+
+            # Reconstruct full dataframe for preprocessing
+            print("="*80)
+            print("RECONSTRUCTING TEST DATA FOR PREPROCESSING")
+            print("="*80)
+            try:
+                target_col_name = pre.global_metadata.get('target_col', target_col)
+                if not target_col_name:
+                    target_col_name = target_col if target_col else 'target'
+                print(f"[INFO] Target column name from preprocessor: {target_col_name}")
+            except Exception as e:
+                target_col_name = target_col if target_col else 'target'
+                print(f"[WARN] Could not get target column from preprocessor: {e}")
+                print(f"[WARN] Using: {target_col_name}")
+
+            # Reconstruct test_full for preprocessing
+            test_full = X_raw.copy()
+            if y_raw is not None:
+                # Single target case
+                test_full[target_col_name] = y_raw.values
+                print(f"[INFO] Added single target column '{target_col_name}' to test_full")
+            else:
+                # Multi-target case: don't add target columns
+                print("[INFO] Multi-target mode: not adding target columns to test_full (preprocessor must handle this)")
+            
+            print(f"[INFO] X_raw shape: {X_raw.shape}")
+            print(f"[INFO] Reconstructed test_full shape: {test_full.shape}")
+            print("="*80)
+
+            print("[INFO] Applying preprocessor to reconstructed test data...")
+            
+            # Try both flavors for pre.transform
+            Xp_full = None
+            try:
+                Xp_full = pre.transform(test_full, training_mode=False)
+            except TypeError:
+                try:
+                    Xp_full = pre.transform(test_full)
+                except Exception as e:
+                    raise RuntimeError(f"Preprocessor.transform failed: {e}")
+            except Exception as e:
+                raise RuntimeError(f"Preprocessor.transform failed: {e}")
+
+            print(f"[INFO] X after preprocessing: {getattr(Xp_full, 'shape', None)}")
+            
+            # Convert to DataFrame if needed
+            if isinstance(Xp_full, (pd.DataFrame, pd.Series)):
+                Xp_df = Xp_full.copy()
+            else:
+                # try to get output feature names from pre
+                try:
+                    cols = getattr(pre, "feature_names_out", None) or getattr(pre, "output_columns", None)
+                    if cols is None:
+                        cols = [f"f{i}" for i in range(Xp_full.shape[1])]
+                    Xp_df = pd.DataFrame(Xp_full, columns=list(cols))
+                except Exception:
+                    Xp_df = pd.DataFrame(Xp_full)
+
+            print(f"[INFO] Columns after preprocessing: {list(Xp_df.columns)[:20]} (total {len(Xp_df.columns)})")
+
+            # Remove target column if present
+            if target_col_name in Xp_df.columns:
+                print(f"[INFO] Removing target column '{target_col_name}' from processed features")
+                Xp = Xp_df.drop(columns=[target_col_name])
+            else:
+                print(f"[INFO] Target column not present in processed features")
+                Xp = Xp_df
+
+            print(f"[INFO] Final Xp shape: {Xp.shape}")
+            print("="*80)
+
+            # Apply feature selector if available
+            if fs is not None:
+                print("[INFO] Applying feature selector...")
+                if hasattr(fs, "selected_features"):
+                    want_cols = list(fs.selected_features)
+                    print(f"[INFO] Selecting {len(want_cols)} features")
+                    missing_cols = set(want_cols) - set(Xp.columns)
+                    if missing_cols:
+                        print(f"[WARN] Missing features after preprocessing: {missing_cols}")
+                        print(f"[WARN] These will be filled with zeros")
+                    Xs = Xp.reindex(columns=want_cols, fill_value=0.0)
+                else:
+                    try:
+                        Xs = fs.transform(Xp)
+                    except Exception as e:
+                        raise RuntimeError(f"Feature selector transform failed: {e}")
+                print(f"[INFO] X after feature selection: {Xs.shape}")
+            else:
+                Xs = Xp
+                print("[INFO] No feature selection applied")
+
+            # Apply PCA if provided - WITH NONE HANDLING
+            if pca_path and os.path.exists(pca_path):
+                print("[INFO] PCA file found — loading PCA model")
+                try:
+                    pca_obj = load_pickle_any(pca_path)
+                    
+                    # Check if PCA model is None (passthrough mode)
+                    if pca_obj is None:
+                        print("[INFO] PCA model is None (passthrough mode) - skipping PCA transformation")
+                        # No transformation needed, Xs remains unchanged
+                    elif hasattr(pca_obj, "transform"):
+                        # Valid PCA model with transform method
+                        print(f"[INFO] Applying PCA transform from {type(pca_obj).__name__}")
+                        
+                        # Ensure numpy array for transform
+                        Xs_arr = Xs.values if isinstance(Xs, (pd.DataFrame, pd.Series)) else np.asarray(Xs)
+                        Xs_pca = pca_obj.transform(Xs_arr)
+                        
+                        # Fix shape if 1D
+                        if Xs_pca.ndim == 1:
+                            Xs_pca = Xs_pca.reshape(-1, 1)
+                        ncomp = Xs_pca.shape[1]
+                        
+                        # Use consistent PC1-based naming
+                        pca_cols = [f"PC{i+1}" for i in range(ncomp)]
+                        print(f"[INFO] Generated PCA column names: {pca_cols[:5]}{'...' if len(pca_cols) > 5 else ''}")
+                        
+                        # Apply names to DataFrame
+                        Xs = pd.DataFrame(Xs_pca, columns=list(pca_cols))
+                        print(f"[INFO] PCA applied. New X shape: {Xs.shape}")
+                    else:
+                        print(f"[WARN] PCA object doesn't have transform() method. Type: {type(pca_obj)}")
+                        print(f"[WARN] Skipping PCA transformation")
+                except Exception as e:
+                    print(f"[WARN] Failed to load or apply PCA: {e}. Continuing without PCA")
+                    traceback.print_exc()
+            else:
+                print("[INFO] No PCA provided or file not found; skipping PCA")
+
+            # Robust multi-target prediction & metrics
+            print("="*80)
+            print("MAKING PREDICTIONS")
+            print("="*80)
+
+            def aggregate_preds_list(preds_stack, task):
+                arr = np.vstack(preds_stack)
+                if task == "regression":
+                    return np.mean(arr, axis=0)
+                else:
+                    mode_res = stats.mode(arr, axis=0, keepdims=False)
+                    if hasattr(mode_res, "mode"):
+                        return mode_res.mode
+                    return mode_res[0]
+
+            def predict_for_obj(obj, Xs, task):
+                # direct estimator
+                if hasattr(obj, "predict"):
+                    return np.asarray(obj.predict(Xs)).ravel()
+                # dict-of-estimators
+                if isinstance(obj, dict):
+                    preds = []
+                    for nm, est in obj.items():
+                        if hasattr(est, "predict"):
+                            preds.append(np.asarray(est.predict(Xs)).ravel())
+                    if not preds:
+                        raise ValueError("No usable estimators found in dict for prediction")
+                    return aggregate_preds_list(preds, task)
+                raise ValueError(f"Unsupported model object: {type(obj)}")
+
+            models_loaded = model
+            is_model_dict = isinstance(models_loaded, dict)
+
+            preds_df = None
+            ytrue_df = None
+
+            if is_model_dict:
+                # Model saved as dict {target_name: estimator_or_dict}
+                target_names = list(models_loaded.keys())
+                print(f"[INFO] Loaded model is a dict with targets: {target_names}")
+                all_preds = {}
+                all_ytrue_cols = {}
+                
+                for tgt in target_names:
+                    print(f"[INFO] Predicting target: {tgt}")
+                    obj = models_loaded[tgt]
+                    yhat = predict_for_obj(obj, Xs, task)
+                    all_preds[tgt] = yhat
+                    
+                    # Determine ground truth column for tgt
+                    if y_multi_df is not None and tgt in y_multi_df.columns:
+                        all_ytrue_cols[tgt] = y_multi_df[tgt].values
+                    elif isinstance(y, pd.Series):
+                        all_ytrue_cols[tgt] = y.values
+                    elif isinstance(y, pd.DataFrame) and tgt in y.columns:
+                        all_ytrue_cols[tgt] = y[tgt].values
+                    else:
+                        print(f"[WARN] No ground truth found for target {tgt}")
+                        all_ytrue_cols[tgt] = np.full(len(yhat), np.nan)
+                
+                preds_df = pd.DataFrame({f"y_pred_{t}": all_preds[t] for t in target_names})
+                ytrue_df = pd.DataFrame({f"y_true_{t}": all_ytrue_cols[t] for t in target_names})
+                
+            else:
+                # Single model object
+                print(f"[INFO] Loaded model object type: {type(models_loaded)}")
+                try:
+                    raw_pred = models_loaded.predict(Xs)
+                except Exception as e:
+                    raise RuntimeError(f"Model.predict failed: {e}")
+                    
+                raw_pred = np.asarray(raw_pred)
+                
+                if raw_pred.ndim == 1:
+                    # Single output
+                    preds_df = pd.DataFrame({"y_pred": raw_pred})
+                    if isinstance(y, pd.Series):
+                        ytrue_df = pd.DataFrame({"y_true": y.values})
+                    elif isinstance(y, pd.DataFrame):
+                        if y.shape[1] == 1:
+                            ytrue_df = pd.DataFrame({"y_true": y.iloc[:,0].values})
+                        else:
+                            raise ValueError("Model produced single output but y_test has multiple columns")
+                    else:
+                        ytrue_df = pd.DataFrame({"y_true": np.full(len(raw_pred), np.nan)})
+                        
+                elif raw_pred.ndim == 2:
+                    # Multiple outputs
+                    n_targets = raw_pred.shape[1]
+                    
+                    # Try to get target names
+                    try:
+                        tgt_names = getattr(models_loaded, "target_names", None) or getattr(models_loaded, "targets", None)
+                        if tgt_names and len(tgt_names) == n_targets:
+                            col_names = list(tgt_names)
+                        else:
+                            col_names = [f"target_{i}" for i in range(n_targets)]
+                    except Exception:
+                        col_names = [f"target_{i}" for i in range(n_targets)]
+                    
+                    preds_df = pd.DataFrame({f"y_pred_{col_names[i]}": raw_pred[:, i] for i in range(n_targets)})
+                    
+                    # Map y_true
+                    if y_multi_df is not None and y_multi_df.shape[1] == n_targets:
+                        ytrue_df = pd.DataFrame({f"y_true_{col_names[i]}": y_multi_df.iloc[:, i].values for i in range(n_targets)})
+                    elif isinstance(y, pd.DataFrame) and y.shape[1] == n_targets:
+                        ytrue_df = pd.DataFrame({f"y_true_{col_names[i]}": y.iloc[:, i].values for i in range(n_targets)})
+                    elif isinstance(y, pd.Series) and n_targets == 1:
+                        ytrue_df = pd.DataFrame({f"y_true_{col_names[0]}": y.values})
+                    else:
+                        ytrue_df = pd.DataFrame({f"y_true_{col_names[i]}": np.full(preds_df.shape[0], np.nan) for i in range(n_targets)})
+                else:
+                    raise ValueError("Unsupported prediction output shape from model.predict")
+
+            # Compute metrics
+            # -------------------------
+            # BUILD final metrics JSON LIST (one row per target)
+            # -------------------------
+            print("[INFO] Computing metrics for predictions...")
+
+            from sklearn.metrics import confusion_matrix as sk_confusion_matrix
+            from sklearn.metrics import roc_auc_score as sk_roc_auc_score
+
+            metrics_rows = []
+
+            # Helper to fetch y_true for a given target name
+            def get_ytrue_for_target(tname):
+                ycol = f"y_true_{tname}"
+                # fallback to single y_true if present
+                if ycol in ytrue_df.columns:
+                    return ytrue_df[ycol].values
+                if "y_true" in ytrue_df.columns and preds_df.shape[1] == 1:
+                    return ytrue_df["y_true"].values
+                # if multiple preds but no matching y_true, return None
+                return None
+
+            for pcol in preds_df.columns:
+                # compute tname more robustly
+                if pcol == "y_pred" and preds_df.shape[1] == 1:
+                    # single-output: no appended target
+                    tname = ""
+                else:
+                    tname = pcol.replace("y_pred_", "")
+                # build model_name value (skip colon if tname empty)
+                model_name_val = f"{model_name_str}:{tname}" if tname else model_name_str
+                ypred_vals = preds_df[pcol].values
+                ytrue_vals = get_ytrue_for_target(tname)
+
+                # build a base row with model_name and model_type
+                row = {
+                    "model_name": model_name_val,
+                    "model_type": "regression" if task == "regression" else "classification"
+                }
+
+                # If regression: numeric metrics
+                if task == "regression":
+                    if ytrue_vals is None:
+                        # cannot compute regression metrics without ground truth
+                        row.update({"r2_score": None, "mse": None, "rmse_score": None})
+                    else:
+                        try:
+                            ytrue_num = pd.to_numeric(ytrue_vals, errors="coerce")
+                            valid_mask = ~np.isnan(ytrue_num)
+                            if valid_mask.sum() == 0:
+                                row.update({"r2_score": None, "mse": None, "rmse_score": None})
+                            else:
+                                ytrue_f = ytrue_num[valid_mask]
+                                ypred_f = np.asarray(ypred_vals)[valid_mask].astype(float)
+                                mse_val = float(mean_squared_error(ytrue_f, ypred_f))
+                                rmse_val = float(np.sqrt(mse_val))
+                                r2_val = float(r2_score(ytrue_f, ypred_f))
+                                row.update({
+                                    "r2_score": round(r2_val, 6),
+                                    "mse": round(mse_val, 6),
+                                    "rmse_score": round(rmse_val, 6)
+                                })
+                        except Exception:
+                            row.update({"r2_score": None, "mse": None, "rmse_score": None})
+
+                # If classification: classification metrics
+                else:
+                    # Default placeholders
+                    row.update({
+                        "accuracy": None,
+                        "precision_score": None,
+                        "recall": None,
+                        "f1_score": None,
+                        "roc_auc": None,
+                        "loss": None,
+                        "confusion_matrix": []
+                    })
+
+                    # If ground truth available, recompute confusion_matrix and possibly roc_auc
+                    if ytrue_vals is not None:
+                        try:
+                            # Ensure arrays are aligned length-wise
+                            ytrue_arr = np.asarray(ytrue_vals)
+                            ypred_arr = np.asarray(ypred_vals)
+
+                            # trim to same length if needed
+                            n = min(len(ytrue_arr), len(ypred_arr))
+                            ytrue_arr = ytrue_arr[:n]
+                            ypred_arr = ypred_arr[:n]
+
+                            # confusion matrix (convert to list-of-lists for JSON)
+                            try:
+                                cm = sk_confusion_matrix(ytrue_arr, ypred_arr)
+                                # convert numpy array to nested lists
+                                row["confusion_matrix"] = cm.tolist()
+                            except Exception:
+                                # fallback: empty list
+                                row["confusion_matrix"] = []
+
+                            # Try ROC AUC (only for binary or if probability preds available)
+                            roc_val = None
+                            try:
+                                # attempt to find a proba column in preds_df (common name: same pcol + "_proba" or "proba_<tname>")
+                                proba_candidates = []
+                                cand1 = pcol + "_proba"
+                                cand2 = f"proba_{tname}"
+                                if cand1 in preds_df.columns:
+                                    proba_candidates.append(cand1)
+                                if cand2 in preds_df.columns:
+                                    proba_candidates.append(cand2)
+                                if proba_candidates:
+                                    proba_arr = preds_df[proba_candidates[0]].values
+                                    try:
+                                        par = np.asarray(proba_arr)
+                                        if par.ndim == 2:
+                                            # assume positive class at index 1
+                                            scores = par[:, 1]
+                                        else:
+                                            scores = par
+                                        roc_val = float(sk_roc_auc_score(ytrue_arr[:len(scores)], scores))
+                                    except Exception:
+                                        roc_val = None
+                                else:
+                                    # As a last resort, if ypred_arr is numeric scores (not class labels), try AUC
+                                    try:
+                                        ypred_num = pd.to_numeric(ypred_arr, errors="coerce")
+                                        if not np.isnan(ypred_num).all():
+                                            roc_val = float(sk_roc_auc_score(ytrue_arr, ypred_num))
+                                    except Exception:
+                                        roc_val = None
+                            except Exception:
+                                roc_val = None
+
+                            if roc_val is not None:
+                                row["roc_auc"] = round(float(roc_val), 6)
+                        except Exception:
+                            # any failure keep defaults
+                            pass
+
+                    # If some metrics still None, try to compute basic ones from ytrue/pred
+                    if (row["accuracy"] is None or row["precision_score"] is None or
+                        row["recall"] is None or row["f1_score"] is None):
+                        if ytrue_vals is not None:
+                            try:
+                                ytrue_arr = np.asarray(ytrue_vals)
+                                ypred_arr = np.asarray(ypred_vals)
+                                n = min(len(ytrue_arr), len(ypred_arr))
+                                ytrue_arr = ytrue_arr[:n]
+                                ypred_arr = ypred_arr[:n]
+
+                                row["accuracy"] = round(float(accuracy_score(ytrue_arr, ypred_arr)), 6)
+                                row["precision_score"] = round(float(precision_score(ytrue_arr, ypred_arr, average="weighted", zero_division=0)), 6)
+                                row["recall"] = round(float(recall_score(ytrue_arr, ypred_arr, average="weighted", zero_division=0)), 6)
+                                row["f1_score"] = round(float(f1_score(ytrue_arr, ypred_arr, average="weighted", zero_division=0)), 6)
+                            except Exception:
+                                pass
+
+                # append the built row
+                metrics_rows.append(row)
+
+            # Save metrics_rows (this is the multiple_rows_json you will pass to UpdateSchema)
+            print("[INFO] Final metrics rows (to be used as multiple_rows_json):")
+            try:
+                print(json.dumps(metrics_rows, indent=2, ensure_ascii=False))
+            except Exception:
+                print(str(metrics_rows))
+
+            print(f"[INFO] Saving metrics JSON to: {metrics_path}")
+            ensure_dir_for(metrics_path)
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(metrics_rows, f, indent=2, ensure_ascii=False)
+            print(f"[INFO] Metrics JSON saved successfully: {metrics_path}")
+
+            ensure_dir_for(preds_path)
+
+            # Merge ytrue_df and preds_df side-by-side
+            out_df = pd.concat([ytrue_df.reset_index(drop=True), preds_df.reset_index(drop=True)], axis=1)
+            
+            out_df.to_parquet(preds_path, index=False)
+            print(f"[INFO] Predictions saved successfully")
+            print(f"[INFO] Predictions dataframe shape: {out_df.shape}")
+            print(f"[INFO] Predictions dataframe columns: {list(out_df.columns)}")
+            print("="*80)
+            print("SUCCESS: Evaluation completed successfully")
+            print("="*80)
+            print(f"Total samples evaluated: {len(Xs)}")
+            print(f"Metrics saved to: {metrics_path}")
+            print(f"Predictions saved to: {preds_path}")
+            print("="*80)
+
+        except Exception as e:
+            print("="*80, file=sys.stderr)
+            print("ERROR DURING EVALUATION", file=sys.stderr)
+            print("="*80, file=sys.stderr)
+            print(f"Error: {e}", file=sys.stderr)
+            print("Full traceback:", file=sys.stderr)
+            traceback.print_exc()
+            print("="*80, file=sys.stderr)
+            sys.exit(1)
+    args:
+      - --X_test
+      - {inputPath: X_test}
+      - --y_test
+      - {inputPath: y_test}
+      - --target_column
+      - {inputValue: target_column}
+      - --preprocessor
+      - {inputPath: preprocessor}
+      - --feature_selector
+      - {inputPath: feature_selector}
+      - --pca
+      - {inputPath: pca}
+      - --model_pickle
+      - {inputPath: model_pickle}
+      - --model_type
+      - {inputValue: model_type}
+      - --preprocess_metadata
+      - {inputPath: preprocess_metadata}
+      - --metrics_json
+      - {outputPath: metrics_json}
+      - --predictions
+      - {outputPath: predictions}
