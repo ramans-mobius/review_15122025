@@ -1,0 +1,408 @@
+name: Feature Selection v5
+inputs:
+  - {name: engineered_X, type: Dataset, description: "Engineered features from Brick 2"}
+  - {name: train_y, type: Dataset, description: "Target labels from Brick 2"}
+  - {name: engineering_metadata, type: Data, description: "Metadata from Brick 2"}
+  - {name: preprocessor, type: Data, description: "Preprocessor from Brick 2 (pass-through)"}
+  - {name: enable_feature_selection, type: String, description: "true/false to enable feature selection", optional: true, default: "true"}
+  - {name: model_type, type: String, description: "classification or regression", optional: true, default: "classification"}
+outputs:
+  - {name: train_X, type: Dataset, description: "Final selected features parquet"}
+  - {name: train_y, type: Dataset, description: "Target parquet (pass-through)"}
+  - {name: feature_selector, type: Data, description: "Fitted FeatureSelector cloudpickle"}
+  - {name: preprocessor, type: Data, description: "Preprocessor cloudpickle (pass-through)"}
+  - {name: preprocess_metadata, type: Data, description: "Combined metadata JSON"}
+implementation:
+  container:
+    image: kumar2004/ml-base:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, json, traceback, gzip, math, shutil
+        from datetime import datetime
+        import pandas as pd, numpy as np
+        from sklearn.feature_selection import mutual_info_classif, mutual_info_regression, VarianceThreshold
+        from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
+        from sklearn.inspection import permutation_importance
+        import cloudpickle
+        
+        # Helper functions
+        def ensure_dir_for(p):
+            d=os.path.dirname(p)
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
+
+        # FeatureSelector Class
+        class FeatureSelector:
+            _VAR_THRESH = 1e-5
+            _CORR_THRESH = 0.95
+            _RELEVANCE = "mi"
+            _PI_REPEATS = 5
+            _RANDOM_STATE = 42
+        
+            def __init__(self, task):
+                self.task = str(task).lower()
+                self.selected_features = []
+                self._filter_keep_ = []
+                self._relevance_keep_ = []
+                self._mi_scores_ = pd.Series(dtype=float)
+                self._pi_importance_ = pd.Series(dtype=float)
+
+            def _auto_k(self, p: int, n_samples: int = None) -> int:
+                if n_samples is None:
+                    base_k = max(10, min(int(math.sqrt(p) * 3.0), p))
+                else:
+                    if n_samples < 500:
+                        base_k = max(10, min(int(math.sqrt(p) * 1.5), int(p * 0.6)))
+                    elif n_samples < 5000:
+                        base_k = max(10, min(int(math.sqrt(p) * 3), int(p * 0.7)))
+                    else:
+                        base_k = max(10, min(int(math.sqrt(p) * 4), int(p * 0.8)))
+                    
+                    max_allowed = max(10, n_samples // 5)
+                    base_k = min(base_k, max_allowed)
+                
+                return base_k
+        
+            @staticmethod
+            def _nzv_keep(X: pd.DataFrame, threshold: float) -> list:
+                if X.shape[1] == 0:
+                    return []
+                vt = VarianceThreshold(threshold=threshold)
+                vt.fit(X.values)
+                mask = vt.get_support()
+                return list(X.columns[mask])
+        
+            @staticmethod
+            def _corr_prune_keep(X: pd.DataFrame, corr_thresh: float) -> list:
+                cols = list(X.columns)
+                if len(cols) <= 1:
+                    return cols
+                corr = X.corr(method="spearman").abs()
+                keep = set(cols)
+                while True:
+                    sub = corr.loc[list(keep), list(keep)]
+                    np.fill_diagonal(sub.values, 0.0)
+                    max_val = sub.values.max()
+                    if not np.isfinite(max_val) or max_val < corr_thresh:
+                        break
+                    idx = np.unravel_index(np.argmax(sub.values), sub.shape)
+                    a = sub.index[idx[0]]
+                    b = sub.columns[idx[1]]
+                    mean_a = sub[a].mean()
+                    mean_b = sub[b].mean()
+                    drop = a if mean_a >= mean_b else b
+                    keep.remove(drop)
+                return list(keep)
+        
+            def _mi_scores(self, X: pd.DataFrame, y: pd.Series) -> pd.Series:
+                cols = list(X.columns)
+                if self.task == "classification":
+                    scores = mutual_info_classif(X.values, y, random_state=self._RANDOM_STATE)
+                else:
+                    y_num = pd.to_numeric(y, errors="ignore")
+                    scores = mutual_info_regression(X.values, y_num, random_state=self._RANDOM_STATE)
+                return pd.Series(scores, index=cols).fillna(0.0)
+        
+            @staticmethod
+            def _topk_by_series(scores: pd.Series, k: int) -> list:
+                k = max(1, min(k, scores.shape[0]))
+                return list(scores.sort_values(ascending=False).head(k).index)
+        
+            @staticmethod
+            def _mrmr_greedy(X: pd.DataFrame, mi: pd.Series, k: int) -> list:
+                k = max(1, min(k, X.shape[1]))
+                corr = X.corr(method="spearman").abs().fillna(0.0)
+                selected = []
+                candidates = list(X.columns)
+                while len(selected) < k and candidates:
+                    best_feat = None
+                    best_score = -1e18
+                    for c in candidates:
+                        rel = float(mi.get(c, 0.0))
+                        if not selected:
+                            score = rel
+                        else:
+                            red = float(corr.loc[c, selected].mean())
+                            score = rel - red
+                        if score > best_score:
+                            best_score = score
+                            best_feat = c
+                    selected.append(best_feat)
+                    candidates.remove(best_feat)
+                return selected
+        
+            def _permutation_keep(self, X: pd.DataFrame, y: pd.Series) -> tuple:
+                if self.task == "classification":
+                    est = ExtraTreesClassifier(
+                        n_estimators=400, max_features="sqrt", random_state=self._RANDOM_STATE, n_jobs=-1
+                    )
+                else:
+                    est = ExtraTreesRegressor(
+                        n_estimators=400, max_features="sqrt", random_state=self._RANDOM_STATE, n_jobs=-1
+                    )
+                est.fit(X, y)
+                pi = permutation_importance(
+                    est, X, y, n_repeats=self._PI_REPEATS, random_state=self._RANDOM_STATE, n_jobs=-1
+                )
+                imp = pd.Series(pi.importances_mean, index=X.columns).fillna(0.0)
+                keep = list(imp[imp > 0.0].index)
+                if not keep:
+                    keep = [imp.sort_values(ascending=False).index[0]]
+                return keep, imp
+        
+            def fit(self, X: pd.DataFrame, y) -> "FeatureSelector":
+                if isinstance(y, (pd.DataFrame, pd.Series)):
+                    y_arr = pd.Series(y).values.ravel()
+                else:
+                    y_arr = np.asarray(y).ravel()
+        
+                print(f"[INFO] Starting feature selection on {X.shape[1]} features")
+                
+                # Step 1: Remove near-zero variance
+                keep1 = self._nzv_keep(X, self._VAR_THRESH)
+                X1 = X[keep1]
+                print(f"[INFO] After variance filter: {len(keep1)} features")
+                
+                # Step 2: Remove highly correlated
+                keep2 = self._corr_prune_keep(X1, self._CORR_THRESH)
+                Xf = X1[keep2]
+                self._filter_keep_ = list(Xf.columns)
+                print(f"[INFO] After correlation filter: {len(keep2)} features")
+                
+                # Step 3: Mutual information ranking
+                mi = self._mi_scores(Xf, y_arr)
+                self._mi_scores_ = mi.copy()
+                
+                # Step 4: Adaptive k selection
+                k = self._auto_k(Xf.shape[1], n_samples=len(Xf))
+                print(f"[INFO] Adaptive k selection: {k} features (from {Xf.shape[1]} candidates, {len(Xf)} samples)")
+                
+                if self._RELEVANCE == "mrmr":
+                    keep_rel = self._mrmr_greedy(Xf, mi, k)
+                else:
+                    keep_rel = self._topk_by_series(mi, k)
+                Xr = Xf[keep_rel]
+                self._relevance_keep_ = list(Xr.columns)
+                print(f"[INFO] After MI ranking: {len(keep_rel)} features")
+        
+                # Step 5: Permutation importance
+                print(f"[INFO] Computing permutation importance...")
+                keep_pi, imp = self._permutation_keep(Xr, y_arr)
+                Xb = Xr[keep_pi]
+                self._pi_importance_ = imp
+                self.selected_features = list(Xb.columns)
+                print(f"[INFO] After permutation importance: {len(keep_pi)} features")
+                print(f"[INFO] Final selected features: {len(self.selected_features)}")
+                
+                return self
+        
+            def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+                return X.reindex(columns=self.selected_features, fill_value=0.0)
+        
+            def save(self, path: str) -> None:
+                with gzip.open(path, "wb") as f:
+                    cloudpickle.dump(self, f)
+        
+            @staticmethod
+            def load(path: str) -> "FeatureSelector":
+                with gzip.open(path, "rb") as f:
+                    return cloudpickle.load(f)
+
+        # Main execution
+        parser=argparse.ArgumentParser()
+        parser.add_argument('--engineered_X', type=str, required=True)
+        parser.add_argument('--train_y', type=str, required=True)
+        parser.add_argument('--engineering_metadata', type=str, required=True)
+        parser.add_argument('--preprocessor', type=str, required=True)
+        parser.add_argument('--enable_feature_selection', type=str, default="true")
+        parser.add_argument('--model_type', type=str, default="classification")
+        parser.add_argument('--train_X', type=str, required=True)
+        parser.add_argument('--train_y_out', type=str, required=True)
+        parser.add_argument('--feature_selector', type=str, required=True)
+        parser.add_argument('--preprocessor_out', type=str, required=True)
+        parser.add_argument('--preprocess_metadata', type=str, required=True)
+        args=parser.parse_args()
+
+        try:
+            print("="*80)
+            print("BRICK 3: FEATURE SELECTION")
+            print("="*80)
+            
+            enable_fs = str(args.enable_feature_selection).lower() in ("1","true","t","yes","y")
+            model_type = args.model_type.strip().lower()
+            
+            # Load engineered data
+            print("[STEP 1/8] Loading engineered data...")
+            X_eng = pd.read_parquet(args.engineered_X)
+            y_train = pd.read_parquet(args.train_y)
+            print(f"[INFO] X shape: {X_eng.shape}")
+            print(f"[INFO] y shape: {y_train.shape}")
+            
+            # Load metadata
+            print("[STEP 2/8] Loading metadata...")
+            with open(args.engineering_metadata, 'r') as f:
+                eng_meta = json.load(f)
+            target_cols = eng_meta['target_columns']
+            print(f"[INFO] Targets: {target_cols}")
+            print(f"[INFO] Model type: {model_type}")
+            
+            # Feature selection (optional)
+            if enable_fs:
+                print("[STEP 3/8] Performing feature selection...")
+                print(f"[INFO] Using first target for selection: {target_cols[0]}")
+                
+                fs = FeatureSelector(task=("classification" if model_type=="classification" else "regression"))
+                
+                # Use first target for feature selection
+                y_for_fs = y_train[target_cols[0]] if isinstance(y_train, pd.DataFrame) else y_train
+                fs.fit(X_eng, y_for_fs.values)
+                
+                X_selected = fs.transform(X_eng)
+                print(f"[INFO] Selected {len(fs.selected_features)} features from {X_eng.shape[1]}")
+                
+                # Print top features by MI score
+                top_features = fs._mi_scores_.sort_values(ascending=False).head(20)
+                print(f"[INFO] Top 20 features by Mutual Information:")
+                for feat, score in top_features.items():
+                    if feat in fs.selected_features:
+                        print(f"   {feat}: {score:.4f}")
+                    else:
+                        print(f"   {feat}: {score:.4f} (filtered out)")
+            else:
+                print("[STEP 3/8] Feature selection disabled, using all features...")
+                X_selected = X_eng.copy()
+                fs = None
+                print(f"[INFO] Using all {X_selected.shape[1]} features")
+            
+            print(f"[INFO] Final feature shape: {X_selected.shape}")
+            
+            # Save train_X
+            print("[STEP 4/8] Saving final features...")
+            ensure_dir_for(args.train_X)
+            X_selected.to_parquet(args.train_X, index=False)
+            print(f"[INFO] Saved train_X to: {args.train_X}")
+            
+            # Save train_y (pass-through)
+            print("[STEP 5/8] Saving target labels...")
+            ensure_dir_for(args.train_y_out)
+            y_train.to_parquet(args.train_y_out, index=False)
+            print(f"[INFO] Saved train_y to: {args.train_y_out}")
+            
+            # Save feature selector
+            print("[STEP 6/8] Saving feature selector...")
+            ensure_dir_for(args.feature_selector)
+            if fs is not None:
+                fs.save(args.feature_selector)
+                print(f"[INFO] Saved feature_selector to: {args.feature_selector}")
+            else:
+                # Create dummy selector
+                dummy_fs = type('DummySelector', (), {
+                    'selected_features': list(X_selected.columns),
+                    'transform': lambda self, X: X
+                })()
+                with gzip.open(args.feature_selector, "wb") as f:
+                    cloudpickle.dump(dummy_fs, f)
+                print(f"[INFO] Saved dummy feature_selector to: {args.feature_selector}")
+            
+            # Pass-through preprocessor
+            print("[STEP 7/8] Passing through preprocessor...")
+            ensure_dir_for(args.preprocessor_out)
+            shutil.copy(args.preprocessor, args.preprocessor_out)
+            print(f"[INFO] Copied preprocessor to: {args.preprocessor_out}")
+            
+            # Combine all metadata
+            print("[STEP 8/8] Saving combined metadata...")
+            ensure_dir_for(args.preprocess_metadata)
+            
+            # Build comprehensive metadata
+            final_metadata = {
+                'timestamp': datetime.utcnow().isoformat()+'Z',
+                'model_type': model_type,
+                'target_columns': target_cols,
+                'n_targets': len(target_cols),
+                'enable_feature_selection': enable_fs,
+                'final_shape': {
+                    'rows': X_selected.shape[0],
+                    'cols': X_selected.shape[1],
+                    'n_targets': len(target_cols)
+                },
+                'selected_features': fs.selected_features if fs else list(X_selected.columns),
+                'n_selected_features': len(fs.selected_features) if fs else X_selected.shape[1],
+                'feature_selection_stats': {
+                    'variance_filtered': len(fs._filter_keep_) if fs else X_eng.shape[1],
+                    'correlation_filtered': len(fs._relevance_keep_) if fs else X_eng.shape[1],
+                    'mi_top_k': len(fs._relevance_keep_) if fs else X_eng.shape[1],
+                    'permutation_filtered': len(fs.selected_features) if fs else X_eng.shape[1]
+                } if fs else {},
+                'top_features_mi': fs._mi_scores_.sort_values(ascending=False).head(20).to_dict() if fs else {},
+                'top_features_pi': fs._pi_importance_.sort_values(ascending=False).head(20).to_dict() if fs else {},
+                'engineering_metadata': eng_meta,
+                'cleaning_metadata': eng_meta.get('cleaning_metadata', {})
+            }
+            
+            with open(args.preprocess_metadata, 'w') as f:
+                json.dump(final_metadata, f, indent=2, ensure_ascii=False)
+            print(f"[INFO] Saved metadata to: {args.preprocess_metadata}")
+            
+            # Final summary
+            print(f"{'='*80}")
+            print("BRICK 3 COMPLETE - FINAL SUMMARY")
+            print(f"{'='*80}")
+            print(f"Input engineered features: {X_eng.shape[1]}")
+            print(f"Final selected features: {X_selected.shape[1]}")
+            print(f"Reduction: {X_eng.shape[1] - X_selected.shape[1]} features removed")
+            print(f"Final dataset shape: {X_selected.shape[0]} rows × {X_selected.shape[1]} features")
+            print(f"Target shape: {y_train.shape}")
+            print(f"Outputs saved:")
+            print(f"  - train_X: {args.train_X}")
+            print(f"  - train_y: {args.train_y_out}")
+            print(f"  - feature_selector: {args.feature_selector}")
+            print(f"  - preprocessor: {args.preprocessor_out}")
+            print(f"  - metadata: {args.preprocess_metadata}")
+            
+            if enable_fs and fs:
+                print(f"Feature selection stages:")
+                print(f"  1. Variance filter: {X_eng.shape[1]} → {len(fs._filter_keep_)} features")
+                print(f"  2. Correlation filter: {len(fs._filter_keep_)} → {len(fs._relevance_keep_)} features")
+                print(f"  3. MI ranking: {len(fs._relevance_keep_)} → {len(fs._relevance_keep_)} features")
+                print(f"  4. Permutation importance: {len(fs._relevance_keep_)} → {len(fs.selected_features)} features")
+                
+                print(f"Top 10 selected features (by MI score):")
+                top_10 = fs._mi_scores_.loc[fs.selected_features].sort_values(ascending=False).head(10)
+                for i, (feat, score) in enumerate(top_10.items(), 1):
+                    print(f"  {i}. {feat}: {score:.4f}")
+            
+            print(f"{'='*80}")
+            print("SUCCESS: Complete preprocessing pipeline finished!")
+            print(f"{'='*80}")
+            
+        except Exception as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            traceback.print_exc()
+            sys.exit(1)
+    args:
+      - --engineered_X
+      - {inputPath: engineered_X}
+      - --train_y
+      - {inputPath: train_y}
+      - --engineering_metadata
+      - {inputPath: engineering_metadata}
+      - --preprocessor
+      - {inputPath: preprocessor}
+      - --enable_feature_selection
+      - {inputValue: enable_feature_selection}
+      - --model_type
+      - {inputValue: model_type}
+      - --train_X
+      - {outputPath: train_X}
+      - --train_y_out
+      - {outputPath: train_y}
+      - --feature_selector
+      - {outputPath: feature_selector}
+      - --preprocessor_out
+      - {outputPath: preprocessor}
+      - --preprocess_metadata
+      - {outputPath: preprocess_metadata}
