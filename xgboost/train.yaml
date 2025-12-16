@@ -1,4 +1,4 @@
-name: Boosting Training Brick v2.0
+name: Boosting Training Brick v2.1
 description: Generic training brick for boosting models with GPU/CPU support
 inputs:
   - {name: train_X, type: Dataset, description: "Final training features (after feature selection/PCA)"}
