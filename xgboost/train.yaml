@@ -1,4 +1,4 @@
-name: Boosting Trainer v1.7
+name: Boosting Trainer v1.8
 inputs:
   # Required inputs - CORRECTED DATA TYPES
   - name: train_X
@@ -115,19 +115,16 @@ implementation:
         # ============================================================================
         
         def load_model(model_path):
-            """Load model from file path"""
             with open(model_path, 'rb') as f:
                 return cloudpickle.load(f)
         
         def load_json_file(json_path):
-            """Load JSON from file path"""
             if os.path.exists(json_path):
                 with open(json_path, 'r') as f:
                     return json.load(f)
             return {}
         
         def load_gzipped_pickle(file_path):
-            """Load gzipped pickle file"""
             with gzip.open(file_path, 'rb') as f:
                 return cloudpickle.load(f)
         
@@ -503,7 +500,7 @@ implementation:
                 if multi_output:
                     print(f"Targets: {len(target_cols)}")
                 
-                print(f"\nMetrics Summary:")
+                print(f"\\nMetrics Summary:")
                 if model_type == 'classification':
                     print(f"  Training Accuracy: {final_metrics.get('train_accuracy', 0):.4f}")
                     if has_val:
@@ -513,7 +510,7 @@ implementation:
                     if has_val:
                         print(f"  Validation R²: {final_metrics.get('val_r2', 0):.4f}")
                 
-                print(f"\nOutputs generated (4 files):")
+                print(f"\\nOutputs generated (4 files):")
                 print(f"  1. trained_model: {args.trained_model}")
                 print(f"  2. training_metrics: {args.training_metrics}")
                 print(f"  3. trained_model_metadata: {args.trained_model_metadata}")
