@@ -149,7 +149,6 @@ implementation:
         # DEVICE DETECTION AND CONFIGURATION
         # ============================================================================
         def detect_and_configure_device(preferred_device="auto", n_jobs=-1):
-            """Detect GPU availability and configure device settings"""
             device_config = {
                 'xgboost': {'device': 'cpu', 'tree_method': 'hist', 'n_jobs': n_jobs},
                 'lightgbm': {'device': 'cpu', 'n_jobs': n_jobs},
@@ -207,7 +206,6 @@ implementation:
         # MODEL CONFIGURATION
         # ============================================================================
         def configure_model_for_training(model, device_config, early_stopping_rounds, task):
-            """Configure model with device settings and early stopping"""
             model_class = model.__class__.__name__.lower()
             
             print(f"[MODEL CONFIG] Configuring {model_class} for training")
@@ -289,7 +287,6 @@ implementation:
         # TRAINING FUNCTION
         # ============================================================================
         def train_model(model, X_train, y_train, X_val, y_val, task, random_state):
-            """Train model with optional validation set"""
             model_class = model.__class__.__name__.lower()
             fit_params = {}
             
@@ -350,7 +347,6 @@ implementation:
         # METRICS CALCULATION
         # ============================================================================
         def calculate_metrics(model, X, y_true, task):
-            """Calculate performance metrics"""
             metrics = {}
             
             try:
@@ -436,7 +432,6 @@ implementation:
         # FEATURE IMPORTANCE EXTRACTION
         # ============================================================================
         def extract_feature_importance(model, feature_names):
-            """Extract feature importance from trained model"""
             importance_data = {}
             
             try:
@@ -718,7 +713,7 @@ implementation:
                     if val_metrics.get('r2') is not None:
                         print(f"Validation R²: {val_metrics['r2']:.4f}")
                 
-                print(f"\nOutputs:")
+                print(f"\\nOutputs:")
                 print(f"  1. trained_model: {args.trained_model}")
                 print(f"  2. training_metadata: {args.training_metadata}")
                 print(f"  3. validation_metrics: {args.validation_metrics}")
