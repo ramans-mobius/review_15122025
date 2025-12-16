@@ -1,4 +1,4 @@
-name: Boosting Training Brick v2.0
+name: Boosting Training Brick v2.1
 description: Generic training brick for boosting models with GPU/CPU support
 inputs:
   - {name: train_X, type: Dataset, description: "Final training features (after feature selection/PCA)"}
@@ -131,7 +131,6 @@ implementation:
         # DEVICE DETECTION AND CONFIGURATION
         # ============================================================================
         def detect_and_configure_device(preferred_device="auto", n_jobs=-1):
-            """Detect GPU availability and configure device settings"""
             device_config = {
                 'xgboost': {'device': 'cpu', 'tree_method': 'hist', 'n_jobs': n_jobs},
                 'lightgbm': {'device': 'cpu', 'n_jobs': n_jobs},
@@ -210,7 +209,6 @@ implementation:
         # MODEL CONFIGURATION
         # ============================================================================
         def configure_model_for_training(model, device_config, early_stopping_rounds, task):
-            """Configure model with device settings and early stopping"""
             model_class = model.__class__.__name__.lower()
             model_params = model.get_params()
             
@@ -278,7 +276,6 @@ implementation:
         # TRAINING WITH EARLY STOPPING
         # ============================================================================
         def train_with_early_stopping(model, X_train, y_train, X_val, y_val, task, random_state):
-            """Train model with early stopping support"""
             model_class = model.__class__.__name__.lower()
             fit_params = {}
             
@@ -338,8 +335,7 @@ implementation:
         # ============================================================================
         # METRICS CALCULATION
         # ============================================================================
-        def calculate_metrics(model, X, y_true, task, model_name=""):
-            """Calculate performance metrics"""
+        def calculate_metrics(model, X, y_true, task, model_name="")
             metrics = {}
             
             try:
@@ -397,7 +393,6 @@ implementation:
         # FEATURE IMPORTANCE EXTRACTION
         # ============================================================================
         def extract_feature_importance(model, feature_names):
-            """Extract feature importance from trained model"""
             importance_data = {}
             
             try:
