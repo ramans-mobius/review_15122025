@@ -1,4 +1,4 @@
-name: Boosting Model Builder v1.1
+name: Boosting Model Builder v1.2
 description: Builds boosting models (xgboost, catboost, lightgbm, adaboost, gradient_boosting, hist_gradient_boosting)
 inputs:
   - name: config_json
@@ -542,7 +542,7 @@ implementation:
                         if value is not None:
                             print(f"  {param}: {value}")
                 
-                print(f"\nOutputs generated:")
+                print(f"\\nOutputs generated:")
                 print(f"  1. untrained_model: {args.untrained_model}")
                 print(f"  2. model_metadata: {args.model_metadata}")
                 print(f"  3. config_updated: {args.config_updated}")
