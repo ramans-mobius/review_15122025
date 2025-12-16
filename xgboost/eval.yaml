@@ -1,4 +1,5 @@
-name: Evaluate Model v13
+name: Evaluate Model v14
+description: Evaluate trained boosting models with full dependency support
 inputs:
   - {name: X_test, type: Dataset, description: "Path to test feature file or directory (raw, not preprocessed)"}
   - {name: y_test, type: Dataset, description: "Path to test target file (single-column file or multi-column with target_column)"}
@@ -14,16 +15,78 @@ outputs:
   - {name: predictions, type: String, description: "Parquet with y_true and y_pred (and proba if available)"}
 implementation:
   container:
-    image: kumar2004/ml-base:v1
+    image: python:3.10-slim
     command:
+      - sh
+      - -c
+      - |
+        # Install ALL dependencies upfront
+        echo "=== INSTALLING ALL DEPENDENCIES ==="
+        apt-get update && apt-get install -y --no-install-recommends \
+            wget curl gcc g++ git ca-certificates \
+            && rm -rf /var/lib/apt/lists/*
+
+        pip install --no-cache-dir --upgrade pip
+
+        # Install all required packages (same as training brick)
+        pip install --no-cache-dir \
+            pyarrow \
+            numpy==1.24.3 \
+            pandas==1.5.3 \
+            scikit-learn==1.3.0 \
+            scipy==1.10.1 \
+            cloudpickle==2.2.1 \
+            joblib==1.3.2 \
+            xgboost==1.6.2 \
+            lightgbm==3.3.5 \
+            catboost==1.2
+
+        echo "=== ALL PACKAGES INSTALLED SUCCESSFULLY ==="
+
+        # Run the evaluation script
+        exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
         import argparse, os, sys, json, io, gzip, zipfile, traceback, numbers
         import pandas as pd, numpy as np, joblib, cloudpickle
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, r2_score, mean_squared_error, mean_absolute_error, confusion_matrix
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, r2_score, mean_squared_error, mean_absolute_error, confusion_matrix, roc_auc_score, log_loss
         from scipy import stats
+
+        # Import boosting libraries (for model loading compatibility)
+        try:
+            import xgboost as xgb
+            XGB_AVAILABLE = True
+        except ImportError:
+            XGB_AVAILABLE = False
+            xgb = None
+
+        try:
+            import lightgbm as lgb
+            LGB_AVAILABLE = True
+        except ImportError:
+            LGB_AVAILABLE = False
+            lgb = None
+
+        try:
+            import catboost as cb
+            CATBOOST_AVAILABLE = True
+        except ImportError:
+            CATBOOST_AVAILABLE = False
+            cb = None
+
+        print("="*80)
+        print("EVALUATION STARTED")
+        print("="*80)
+        print(f"Python {sys.version}")
+        if XGB_AVAILABLE:
+            print(f"XGBoost {xgb.__version__} loaded")
+        if LGB_AVAILABLE:
+            print(f"LightGBM {lgb.__version__} loaded")
+        if CATBOOST_AVAILABLE:
+            print(f"CatBoost {cb.__version__} loaded")
+        print("="*80)
 
         def is_likely_json(sample_bytes):
             if not sample_bytes: return False
@@ -35,7 +98,6 @@ implementation:
             return False
 
         def read_with_pandas(path):
-            import io, zipfile
             if os.path.isdir(path):
                 entries=[os.path.join(path,f) for f in os.listdir(path) if not f.startswith(".")]
                 files=[p for p in entries if os.path.isfile(p)]
@@ -108,42 +170,6 @@ implementation:
             except Exception as e:
                 raise ValueError(f"Could not load pickle from {path}: {e}")
 
-        def extract_loss(model):
-            candidates = [
-                "loss_", "best_loss_", "best_score_", "train_score_", "oob_score_", "loss", "best_iteration_", "best_score"
-            ]
-            for attr in candidates:
-                try:
-                    val = getattr(model, attr, None)
-                    if val is None:
-                        continue
-                    if isinstance(val, dict):
-                        for v in val.values():
-                            if isinstance(v, (list,tuple)) and len(v)>0 and isinstance(v[-1], (int,float,np.floating,np.integer)):
-                                return float(v[-1])
-                            if isinstance(v, (int,float,np.floating,np.integer)):
-                                return float(v)
-                        continue
-                    if isinstance(val, (list, tuple, np.ndarray)) and len(val)>0:
-                        last = val[-1]
-                        if isinstance(last, (int,float,np.floating,np.integer)):
-                            return float(last)
-                    if isinstance(val, (int,float,np.floating,np.integer)):
-                        return float(val)
-                except Exception:
-                    continue
-            try:
-                er = getattr(model, "evals_result_", None)
-                if isinstance(er, dict):
-                    for m in er.values():
-                        if isinstance(m, dict):
-                            for k2 in m.values():
-                                if isinstance(k2, list) and len(k2)>0 and isinstance(k2[-1], (int,float,np.floating,np.integer)):
-                                    return float(k2[-1])
-            except Exception:
-                pass
-            return None
-
         parser = argparse.ArgumentParser()
         parser.add_argument("--X_test", type=str, required=True)
         parser.add_argument("--y_test", type=str, required=True)
@@ -159,10 +185,6 @@ implementation:
         args = parser.parse_args()
 
         try:
-            print("="*80)
-            print("EVALUATION STARTED")
-            print("="*80)
-
             X_path = args.X_test
             y_path = args.y_test
             preprocessor_path = args.preprocessor
@@ -209,11 +231,11 @@ implementation:
 
             # Load test data
             print("[INFO] Loading test data...")
-            X_raw = read_with_pandas(X_path)
+            X_raw = pd.read_parquet(X_path)  # Now using installed pyarrow
             print(f"[INFO] X_test shape: {X_raw.shape}")
-            print(f"[INFO] X_test columns: {list(X_raw.columns)}")
+            print(f"[INFO] X_test columns: {list(X_raw.columns[:10])}{'...' if len(X_raw.columns) > 10 else ''}")
 
-            y_df = read_with_pandas(y_path)
+            y_df = pd.read_parquet(y_path)  # Now using installed pyarrow
 
             # Extract target column and define variables y, y_raw, y_multi_df
             y_raw = None
@@ -539,9 +561,6 @@ implementation:
             # -------------------------
             print("[INFO] Computing metrics for predictions...")
 
-            from sklearn.metrics import confusion_matrix as sk_confusion_matrix
-            from sklearn.metrics import roc_auc_score as sk_roc_auc_score
-
             metrics_rows = []
 
             # Helper to fetch y_true for a given target name
@@ -625,7 +644,7 @@ implementation:
 
                             # confusion matrix (convert to list-of-lists for JSON)
                             try:
-                                cm = sk_confusion_matrix(ytrue_arr, ypred_arr)
+                                cm = confusion_matrix(ytrue_arr, ypred_arr)
                                 # convert numpy array to nested lists
                                 row["confusion_matrix"] = cm.tolist()
                             except Exception:
@@ -652,7 +671,7 @@ implementation:
                                             scores = par[:, 1]
                                         else:
                                             scores = par
-                                        roc_val = float(sk_roc_auc_score(ytrue_arr[:len(scores)], scores))
+                                        roc_val = float(roc_auc_score(ytrue_arr[:len(scores)], scores))
                                     except Exception:
                                         roc_val = None
                                 else:
@@ -660,7 +679,7 @@ implementation:
                                     try:
                                         ypred_num = pd.to_numeric(ypred_arr, errors="coerce")
                                         if not np.isnan(ypred_num).all():
-                                            roc_val = float(sk_roc_auc_score(ytrue_arr, ypred_num))
+                                            roc_val = float(roc_auc_score(ytrue_arr, ypred_num))
                                     except Exception:
                                         roc_val = None
                             except Exception:
