@@ -1,4 +1,4 @@
-name: Boosting Trainer v2.2
+name: Boosting Trainer v2.3
 description: "Unified boosting trainer with all outputs from both Boosting Trainer v1.2 and Trainer bricks"
 inputs:
   - name: train_X
@@ -9,10 +9,12 @@ inputs:
     description: "Training targets"
   - name: test_X
     type: Dataset
-    description: "Test features (optional)", optional: true
+    description: "Test features (optional)"
+    optional: true
   - name: test_y
     type: Dataset
-    description: "Test targets (optional)", optional: true
+    description: "Test targets (optional)"
+    optional: true
   - name: untrained_model
     type: Model
     description: "Untrained model from Model Builder"
@@ -24,7 +26,8 @@ inputs:
     description: "Unified configuration JSON string"
   - name: pca_metadata
     type: Data
-    description: "PCA metadata (optional)", optional: true
+    description: "PCA metadata (optional)"
+    optional: true
   - name: model_type
     type: String
     description: "classification or regression"
