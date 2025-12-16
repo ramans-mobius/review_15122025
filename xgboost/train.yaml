@@ -1,9 +1,9 @@
 name: Boosting Trainer v1.4
 inputs:
-  # Core inputs
+  # Required inputs
   - name: train_X
     type: Dataset
-    description: "Training features (PCA or original)"
+    description: "Training features (from previous component)"
   - name: train_y
     type: Dataset
     description: "Training targets"
@@ -14,17 +14,11 @@ inputs:
     type: Data
     description: "Model metadata from Model Builder"
   
-  # PCA-related inputs (connected from PCA transformer)
+  # PCA-related input - always required but can be empty JSON
   - name: pca_metadata
-    type: Data
-    description: "PCA metadata from PCA transformer"
-    optional: true
-    default: ""
-  - name: original_train_X
-    type: Dataset
-    description: "Original features before PCA"
-    optional: true
-    default: ""
+    type: String
+    description: "PCA metadata as JSON string (empty if PCA not used)"
+    default: "{}"
   
   # Configuration parameters
   - name: enable_pca
@@ -88,7 +82,7 @@ implementation:
         from sklearn.utils.class_weight import compute_sample_weight
         
         print("="*80)
-        print("BOOSTING TRAINER v1.2 - SIMPLIFIED")
+        print("BOOSTING TRAINER v1.3 - NO OPTIONAL INPUTS")
         print("="*80)
         
         # Install required packages
@@ -121,10 +115,12 @@ implementation:
         # ============================================================================
         
         def load_model(model_path):
+            """Load model from cloudpickle"""
             with open(model_path, 'rb') as f:
                 return cloudpickle.load(f)
         
         def prepare_data(X, y, model_type, validation_split, random_state):
+            """Split data into train/validation sets"""
             if validation_split > 0 and validation_split < 1:
                 X_train, X_val, y_train, y_val = train_test_split(
                     X, y, test_size=validation_split, random_state=random_state,
@@ -137,6 +133,7 @@ implementation:
                 return X, y, None, None, False
         
         def train_with_early_stopping(model, X_train, y_train, X_val, y_val, early_stopping_rounds):
+            """Train model with early stopping if supported"""
             model_name = model.__class__.__name__.lower()
             
             if early_stopping_rounds > 0 and X_val is not None and y_val is not None:
@@ -180,6 +177,7 @@ implementation:
             return model
         
         def compute_metrics(model, X, y_true, model_type, dataset_name="train"):
+            """Compute metrics for model evaluation"""
             metrics = {}
             
             try:
@@ -231,15 +229,14 @@ implementation:
         def main():
             parser = argparse.ArgumentParser()
             
-            # Core inputs
+            # Required inputs
             parser.add_argument('--train_X', type=str, required=True)
             parser.add_argument('--train_y', type=str, required=True)
             parser.add_argument('--untrained_model', type=str, required=True)
             parser.add_argument('--model_metadata', type=str, required=True)
             
-            # Optional PCA inputs
-            parser.add_argument('--pca_metadata', type=str, default="")
-            parser.add_argument('--original_train_X', type=str, default="")
+            # PCA metadata as JSON string (always required but can be empty)
+            parser.add_argument('--pca_metadata', type=str, default="{}")
             
             # Parameters
             parser.add_argument('--enable_pca', type=str, default="false")
@@ -258,34 +255,38 @@ implementation:
             
             try:
                 print("="*80)
-                print("BOOSTING TRAINER v1.2")
+                print("BOOSTING TRAINER v1.3")
                 print("="*80)
                 
-                # Parse enable_pca parameter
+                # Parse parameters
                 enable_pca = args.enable_pca.lower() in ['true', '1', 'yes', 't', 'y']
                 print(f"[INFO] PCA Enabled: {enable_pca}")
                 print(f"[INFO] Model type: {args.model_type}")
                 print(f"[INFO] Early stopping rounds: {args.early_stopping_rounds}")
                 print(f"[INFO] Validation split: {args.validation_split}")
                 
-                # Load PCA metadata if PCA is enabled and file exists
+                # Parse PCA metadata (always provided as JSON string)
                 pca_metadata = {}
                 pca_available = False
                 
-                if enable_pca and args.pca_metadata and os.path.exists(args.pca_metadata):
-                    try:
-                        with open(args.pca_metadata, 'r') as f:
-                            pca_metadata = json.load(f)
-                        pca_available = True
-                        print(f"[INFO] PCA metadata loaded successfully")
-                        print(f"[INFO] PCA variant: {pca_metadata.get('pca_variant', 'unknown')}")
-                        print(f"[INFO] Components: {pca_metadata.get('n_components', 'unknown')}")
-                    except Exception as e:
-                        print(f"[WARN] Could not load PCA metadata: {e}")
-                elif enable_pca and not args.pca_metadata:
-                    print(f"[WARN] PCA is enabled but no PCA metadata provided")
-                else:
-                    print(f"[INFO] PCA is not enabled")
+                try:
+                    if args.pca_metadata and args.pca_metadata.strip():
+                        pca_metadata = json.loads(args.pca_metadata)
+                        # Check if this is valid PCA metadata
+                        if pca_metadata.get('pca_enabled', False) or 'pca_variant' in pca_metadata:
+                            pca_available = True
+                            print(f"[INFO] PCA metadata parsed successfully")
+                            print(f"[INFO] PCA variant: {pca_metadata.get('pca_variant', 'unknown')}")
+                            print(f"[INFO] Components: {pca_metadata.get('n_components', 'unknown')}")
+                        else:
+                            print(f"[INFO] No PCA metadata found in JSON string")
+                    else:
+                        print(f"[INFO] Empty PCA metadata string provided")
+                except json.JSONDecodeError as e:
+                    print(f"[WARN] Could not parse PCA metadata JSON: {e}")
+                    print(f"[WARN] PCA metadata string: {args.pca_metadata[:100]}...")
+                except Exception as e:
+                    print(f"[WARN] Error processing PCA metadata: {e}")
                 
                 # Load data
                 print("[INFO] Loading training data...")
@@ -499,7 +500,7 @@ implementation:
                 if multi_output:
                     print(f"Targets: {len(target_cols)}")
                 
-                print(f"\\nMetrics Summary:")
+                print(f"\nMetrics Summary:")
                 if model_type == 'classification':
                     print(f"  Training Accuracy: {final_metrics.get('train_accuracy', 0):.4f}")
                     if has_val:
@@ -509,7 +510,7 @@ implementation:
                     if has_val:
                         print(f"  Validation R²: {final_metrics.get('val_r2', 0):.4f}")
                 
-                print(f"\\nOutputs generated (4 files):")
+                print(f"\nOutputs generated (4 files):")
                 print(f"  1. trained_model: {args.trained_model}")
                 print(f"  2. training_metrics: {args.training_metrics}")
                 print(f"  3. trained_model_metadata: {args.trained_model_metadata}")
@@ -533,9 +534,7 @@ implementation:
       - --model_metadata
       - {inputPath: model_metadata}
       - --pca_metadata
-      - {inputPath: pca_metadata}
-      - --original_train_X
-      - {inputPath: original_train_X}
+      - {inputValue: pca_metadata}
       - --enable_pca
       - {inputValue: enable_pca}
       - --model_type
