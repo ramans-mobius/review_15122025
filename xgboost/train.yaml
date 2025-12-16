@@ -1,564 +1,679 @@
-name: Boosting Trainer v2.0
+name: Boosting Training Brick v2.0
+description: Generic training brick for boosting models with GPU/CPU support
 inputs:
-  # Required inputs - CORRECTED DATA TYPES
-  - name: train_X
-    type: Dataset
-    description: "Training features dataset"
-  - name: train_y
-    type: Dataset
-    description: "Training targets dataset"
-  - name: untrained_model
-    type: Model
-    description: "Untrained model from Model Builder"
-  - name: model_metadata
-    type: Data
-    description: "Model metadata from Model Builder"
-  
-  # PCA-related input - CORRECT: Data type not String
-  - name: pca_metadata
-    type: Data
-    description: "PCA metadata JSON file (empty JSON file if PCA not used)"
-    optional: true
-  
-  # Configuration parameters
-  - name: enable_pca
-    type: String
-    description: "Whether PCA is enabled (true/false)"
-    default: "false"
-  - name: model_type
-    type: String
-    description: "classification or regression"
-    default: "classification"
-  - name: early_stopping_rounds
-    type: Integer
-    description: "Early stopping rounds (0 to disable)"
-    default: "10"
-  - name: validation_split
-    type: Float
-    description: "Validation split for early stopping (0-1)"
-    default: "0.1"
-  - name: random_state
-    type: Integer
-    description: "Random seed"
-    default: "42"
-
+  - {name: train_X, type: Dataset, description: "Final training features (after feature selection/PCA)"}
+  - {name: train_y, type: Dataset, description: "Training target labels"}
+  - {name: untrained_model, type: Model, description: "Untrained model object from Model Builder"}
+  - {name: model_metadata, type: Data, description: "Model metadata from Model Builder"}
+  - {name: preprocess_metadata, type: Data, description: "Preprocessing metadata from Feature Selection"}
+  - {name: pca_metadata, type: Data, description: "PCA metadata (optional)", optional: true}
+  - {name: enable_pca, type: String, description: "Whether PCA was enabled", optional: true, default: "false"}
+  - {name: model_type, type: String, description: "classification or regression", optional: true, default: "classification"}
+  - {name: early_stopping_rounds, type: Integer, description: "Early stopping rounds", optional: true, default: "10"}
+  - {name: validation_split, type: Float, description: "Validation split ratio", optional: true, default: "0.1"}
+  - {name: random_state, type: Integer, description: "Random seed", optional: true, default: "42"}
+  - {name: n_jobs, type: Integer, description: "Number of CPU cores to use (-1 for all)", optional: true, default: "-1"}
+  - {name: device, type: String, description: "cpu, cuda, or auto (auto-detect)", optional: true, default: "auto"}
 outputs:
-  # All outputs
-  - name: trained_model
-    type: Model
-    description: "Trained model object (cloudpickle)"
-  - name: training_metrics
-    type: Data
-    description: "JSON with training metrics"
-  - name: trained_model_metadata
-    type: Data
-    description: "Updated metadata with training info"
-  - name: preprocess_metadata
-    type: Data
-    description: "Combined metadata for evaluation brick"
-
+  - {name: trained_model, type: Model, description: "Trained model object (cloudpickle)"}
+  - {name: training_metadata, type: Data, description: "Training metadata JSON"}
+  - {name: validation_metrics, type: Data, description: "Validation metrics JSON"}
+  - {name: feature_importance, type: Data, description: "Feature importance JSON"}
 implementation:
   container:
-    image: python:3.10-slim-bullseye  # Use slim Python image
+    image: kumar2004/ml-base:v1
     command:
       - sh
       - -c
       - |
-        # Install system dependencies first
-        apt-get update && apt-get install -y --no-install-recommends gcc g++ \
-        && rm -rf /var/lib/apt/lists/*
-        
-        # Install Python packages
-        pip install --no-cache-dir \
-          numpy==1.24.3 \
-          pandas==2.0.3 \
-          scikit-learn==1.3.0 \
-          xgboost==1.7.5 \
-          lightgbm==4.1.0 \
-          catboost==1.2 \
-          cloudpickle==3.0.0 \
-          pyarrow==14.0.1
-        
-        # Run the Python script
-        exec python3 -u -c "$(cat << 'EOF'
-        import argparse, os, sys, json, traceback, warnings, cloudpickle, pickle, io, base64, gzip
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, json, traceback, warnings, cloudpickle, subprocess, math, gc
         from datetime import datetime
         import numpy as np
         import pandas as pd
-        from sklearn.metrics import (
-            accuracy_score, precision_score, recall_score, f1_score, 
-            r2_score, mean_squared_error, mean_absolute_error,
-            roc_auc_score, log_loss
-        )
         from sklearn.model_selection import train_test_split
-        from sklearn.utils.class_weight import compute_sample_weight
+        from sklearn.metrics import (
+            accuracy_score, precision_score, recall_score, f1_score,
+            roc_auc_score, log_loss, mean_squared_error, mean_absolute_error, r2_score
+        )
         
+        # Install required packages first (same as build brick)
         print("="*80)
-        print("BOOSTING TRAINER v2.0 - SLIM DOCKER")
+        print("BOOSTING MODEL TRAINER")
         print("="*80)
+        print("Checking and installing required packages...")
         
-        # Import XGBoost with error handling
-        try:
-            import xgboost as xgb
-            print(f"✓ XGBoost {xgb.__version__} loaded")
-        except Exception as e:
-            print(f"✗ XGBoost import failed: {e}")
-            print("[INFO] Installing XGBoost...")
-            import subprocess
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'xgboost==1.7.5'])
-            import xgboost as xgb
-            print(f"✓ XGBoost {xgb.__version__} installed")
+        packages = ['xgboost', 'catboost', 'lightgbm', 'scikit-learn', 'cloudpickle', 'pandas', 'numpy', 'scipy', 'rapidfuzz']
         
-        # Import other ML packages
-        try:
-            import lightgbm
-            print(f"✓ LightGBM {lightgbm.__version__} loaded")
-        except:
-            print("[WARN] LightGBM not available")
+        for package in packages:
+            try:
+                if package == 'scikit-learn':
+                    import sklearn
+                    print(f"✓ scikit-learn {sklearn.__version__} already installed")
+                elif package == 'cloudpickle':
+                    import cloudpickle
+                    print(f"✓ cloudpickle {cloudpickle.__version__} already installed")
+                elif package == 'pandas':
+                    import pandas
+                    print(f"✓ pandas {pandas.__version__} already installed")
+                elif package == 'numpy':
+                    import numpy
+                    print(f"✓ numpy {numpy.__version__} already installed")
+                elif package == 'scipy':
+                    import scipy
+                    print(f"✓ scipy {scipy.__version__} already installed")
+                elif package == 'xgboost':
+                    try:
+                        import xgboost
+                        print(f"✓ xgboost {xgboost.__version__} already installed")
+                    except ImportError:
+                        print("Installing xgboost...")
+                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'xgboost==1.7.6'])
+                elif package == 'catboost':
+                    try:
+                        import catboost
+                        print(f"✓ catboost {catboost.__version__} already installed")
+                    except ImportError:
+                        print("Installing catboost...")
+                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'catboost==1.2.2'])
+                elif package == 'lightgbm':
+                    try:
+                        import lightgbm
+                        print(f"✓ lightgbm {lightgbm.__version__} already installed")
+                    except ImportError:
+                        print("Installing lightgbm...")
+                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'lightgbm==3.3.5'])
+                elif package == 'rapidfuzz':
+                    try:
+                        import rapidfuzz
+                        print(f"✓ rapidfuzz {rapidfuzz.__version__} already installed")
+                    except ImportError:
+                        print("Installing rapidfuzz...")
+                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'rapidfuzz==3.1.1'])
+            except Exception as e:
+                print(f"Warning: Could not install/check {package}: {e}")
         
-        try:
-            import catboost
-            print(f"✓ CatBoost {catboost.__version__} loaded")
-        except:
-            print("[WARN] CatBoost not available")
-        
-        import sklearn
-        print(f"✓ scikit-learn {sklearn.__version__} available")
+        print("All packages installed/verified successfully!")
         
         # Suppress warnings
         warnings.filterwarnings('ignore', category=UserWarning)
         warnings.filterwarnings('ignore', category=FutureWarning)
+        warnings.filterwarnings('ignore', category=DeprecationWarning)
+        
+        # Import after installation
+        try:
+            import xgboost as xgb
+        except ImportError:
+            xgb = None
+        
+        try:
+            import lightgbm as lgb
+        except ImportError:
+            lgb = None
+        
+        try:
+            import catboost
+        except ImportError:
+            catboost = None
+        
+        from sklearn.ensemble import (
+            AdaBoostClassifier, AdaBoostRegressor,
+            GradientBoostingClassifier, GradientBoostingRegressor
+        )
+        from sklearn.experimental import enable_hist_gradient_boosting
+        from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
         
         # ============================================================================
-        # HELPER FUNCTIONS
+        # DEVICE DETECTION AND CONFIGURATION
         # ============================================================================
-        
-        def load_model(model_path):
-            with open(model_path, 'rb') as f:
-                model = cloudpickle.load(f)
+        def detect_and_configure_device(preferred_device="auto", n_jobs=-1):
+            """Detect GPU availability and configure device settings"""
+            device_config = {
+                'xgboost': {'device': 'cpu', 'tree_method': 'hist', 'n_jobs': n_jobs},
+                'lightgbm': {'device': 'cpu', 'n_jobs': n_jobs},
+                'catboost': {'task_type': 'CPU', 'thread_count': -1 if n_jobs == -1 else n_jobs},
+                'has_gpu': False,
+                'device_type': 'cpu'
+            }
             
-            # Fix XGBoost device parameter issue if it exists
-            model_class_name = model.__class__.__name__.lower()
-            if 'xgboost' in model_class_name:
+            # Check for GPU
+            has_gpu = False
+            gpu_reason = ""
+            
+            # Method 1: Check CUDA via PyTorch/torch
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    has_gpu = True
+                    gpu_reason = "PyTorch CUDA available"
+                    print(f"[GPU DETECTION] {gpu_reason}")
+            except ImportError:
+                pass
+            
+            # Method 2: Check nvidia-smi
+            if not has_gpu:
                 try:
-                    # Check if model has device parameter that causes issues
-                    if hasattr(model, 'get_params'):
-                        params = model.get_params()
-                        if 'device' in params:
-                            # Try to safely handle device parameter
-                            try:
-                                # Set device to None or CPU
-                                model.set_params(device=None)
-                                print("[INFO] Fixed XGBoost device parameter")
-                            except:
-                                # If setting fails, try to create new model without device
-                                safe_params = {k: v for k, v in params.items() if k != 'device'}
-                                new_model = model.__class__(**safe_params)
-                                print("[INFO] Created new XGBoost model without device parameter")
-                                return new_model
-                except Exception as e:
-                    print(f"[WARN] Could not fix XGBoost model: {e}")
+                    result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+                    if result.returncode == 0 and 'NVIDIA' in result.stdout:
+                        has_gpu = True
+                        gpu_reason = "nvidia-smi detected NVIDIA GPU"
+                        print(f"[GPU DETECTION] {gpu_reason}")
+                except (subprocess.SubprocessError, FileNotFoundError):
+                    pass
             
-            return model
+            # Method 3: Check CUDA environment variables
+            if not has_gpu:
+                cuda_path = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+                if cuda_path and os.path.exists(cuda_path):
+                    has_gpu = True
+                    gpu_reason = "CUDA environment detected"
+                    print(f"[GPU DETECTION] {gpu_reason}")
+            
+            device_config['has_gpu'] = has_gpu
+            
+            # Apply device preference
+            if preferred_device.lower() == 'auto':
+                use_gpu = has_gpu
+            elif preferred_device.lower() in ['cuda', 'gpu']:
+                use_gpu = True
+                if not has_gpu:
+                    print(f"[WARNING] GPU requested but not detected. Falling back to CPU.")
+                    use_gpu = False
+            else:
+                use_gpu = False
+            
+            if use_gpu:
+                device_config['device_type'] = 'gpu'
+                device_config['xgboost']['device'] = 'cuda'
+                device_config['xgboost']['tree_method'] = 'hist'
+                device_config['lightgbm']['device'] = 'gpu'
+                device_config['catboost']['task_type'] = 'GPU'
+                print(f"[DEVICE CONFIG] Using GPU for training")
+            else:
+                device_config['device_type'] = 'cpu'
+                device_config['xgboost']['device'] = 'cpu'
+                device_config['xgboost']['tree_method'] = 'hist'
+                device_config['xgboost']['n_jobs'] = n_jobs
+                device_config['lightgbm']['device'] = 'cpu'
+                device_config['lightgbm']['n_jobs'] = n_jobs
+                device_config['catboost']['task_type'] = 'CPU'
+                device_config['catboost']['thread_count'] = -1 if n_jobs == -1 else n_jobs
+                print(f"[DEVICE CONFIG] Using CPU for training (n_jobs={n_jobs})")
+            
+            return device_config
         
-        def load_json_file(json_path):
-            if os.path.exists(json_path):
-                with open(json_path, 'r') as f:
-                    return json.load(f)
-            return {}
-        
-        def prepare_data(X, y, model_type, validation_split, random_state):
-            if validation_split > 0 and validation_split < 1:
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, test_size=validation_split, random_state=random_state,
-                    stratify=y if model_type == 'classification' else None
+        # ============================================================================
+        # MODEL CONFIGURATION
+        # ============================================================================
+        def configure_model_for_training(model, device_config, early_stopping_rounds, task):
+            """Configure model with device settings and early stopping"""
+            model_class = model.__class__.__name__.lower()
+            model_params = model.get_params()
+            
+            print(f"[MODEL CONFIG] Configuring {model_class} for training")
+            
+            # XGBoost configuration
+            if 'xgboost' in model_class or (xgb and isinstance(model, (xgb.XGBClassifier, xgb.XGBRegressor))):
+                # Set device parameters
+                model.set_params(
+                    tree_method=device_config['xgboost']['tree_method'],
+                    device=device_config['xgboost']['device'],
+                    n_jobs=device_config['xgboost']['n_jobs']
                 )
-                print(f"[INFO] Created validation split: {X_val.shape[0]} samples ({validation_split*100:.1f}%)")
-                return X_train, y_train, X_val, y_val, True
-            else:
-                print("[INFO] No validation split created")
-                return X, y, None, None, False
-        
-        def train_with_early_stopping(model, X_train, y_train, X_val, y_val, early_stopping_rounds):
-            model_name = model.__class__.__name__.lower()
-            
-            if early_stopping_rounds > 0 and X_val is not None and y_val is not None:
-                print(f"[INFO] Training with early stopping (rounds={early_stopping_rounds})")
                 
-                if 'xgboost' in model_name:
-                    eval_set = [(X_val, y_val)]
-                    model.fit(
-                        X_train, y_train,
-                        eval_set=eval_set,
+                # Early stopping for XGBoost
+                if early_stopping_rounds > 0:
+                    model.set_params(
                         early_stopping_rounds=early_stopping_rounds,
-                        verbose=False
+                        eval_metric='logloss' if task == 'classification' else 'rmse'
                     )
-                elif 'lightgbm' in model_name:
-                    eval_set = [(X_val, y_val)]
-                    model.fit(
-                        X_train, y_train,
-                        eval_set=eval_set,
-                        early_stopping_rounds=early_stopping_rounds,
-                        verbose=False
+                    print(f"[EARLY STOPPING] XGBoost early stopping rounds: {early_stopping_rounds}")
+            
+            # LightGBM configuration
+            elif 'lgbm' in model_class or (lgb and isinstance(model, (lgb.LGBMClassifier, lgb.LGBMRegressor))):
+                # Set device parameters
+                model.set_params(
+                    device=device_config['lightgbm']['device'],
+                    n_jobs=device_config['lightgbm']['n_jobs']
+                )
+                
+                # Early stopping for LightGBM
+                if early_stopping_rounds > 0:
+                    model.set_params(
+                        n_estimators=10000,  # Large number for early stopping
+                        early_stopping_rounds=early_stopping_rounds
                     )
-                elif 'catboost' in model_name:
-                    from catboost import Pool
-                    train_pool = Pool(X_train, y_train)
-                    val_pool = Pool(X_val, y_val)
-                    model.fit(
-                        train_pool,
-                        eval_set=val_pool,
-                        early_stopping_rounds=early_stopping_rounds,
-                        verbose=False
+                    print(f"[EARLY STOPPING] LightGBM early stopping rounds: {early_stopping_rounds}")
+            
+            # CatBoost configuration
+            elif 'catboost' in model_class or (catboost and isinstance(model, (catboost.CatBoostClassifier, catboost.CatBoostRegressor))):
+                # Set device parameters
+                model.set_params(
+                    task_type=device_config['catboost']['task_type'],
+                    thread_count=device_config['catboost']['thread_count']
+                )
+                
+                # Early stopping for CatBoost
+                if early_stopping_rounds > 0:
+                    model.set_params(
+                        iterations=10000,  # Large number for early stopping
+                        early_stopping_rounds=early_stopping_rounds
                     )
-                elif 'histgradientboosting' in model_name:
-                    model.set_params(early_stopping=True, n_iter_no_change=early_stopping_rounds)
-                    model.fit(X_train, y_train)
-                else:
-                    print(f"[INFO] Model doesn't support early stopping, training normally")
-                    model.fit(X_train, y_train)
-            else:
-                model.fit(X_train, y_train)
+                    print(f"[EARLY STOPPING] CatBoost early stopping rounds: {early_stopping_rounds}")
+            
+            # Sklearn models (no GPU support)
+            elif any(term in model_class for term in ['adaboost', 'gradientboosting', 'histgradientboosting']):
+                # Set CPU parameters
+                if 'n_jobs' in model_params:
+                    model.set_params(n_jobs=device_config['xgboost']['n_jobs'])
+                print(f"[MODEL CONFIG] Sklearn model using CPU (n_jobs={device_config['xgboost']['n_jobs']})")
             
             return model
         
-        def compute_metrics(model, X, y_true, model_type, dataset_name="train"):
+        # ============================================================================
+        # TRAINING WITH EARLY STOPPING
+        # ============================================================================
+        def train_with_early_stopping(model, X_train, y_train, X_val, y_val, task, random_state):
+            """Train model with early stopping support"""
+            model_class = model.__class__.__name__.lower()
+            fit_params = {}
+            
+            # Prepare validation data for early stopping
+            eval_set = None
+            if X_val is not None and y_val is not None and len(X_val) > 0:
+                
+                # XGBoost
+                if 'xgboost' in model_class or (xgb and isinstance(model, (xgb.XGBClassifier, xgb.XGBRegressor))):
+                    eval_set = [(X_val, y_val)]
+                    fit_params['eval_set'] = eval_set
+                    fit_params['verbose'] = False
+                    print(f"[TRAINING] XGBoost training with validation set: {X_val.shape[0]} samples")
+                
+                # LightGBM
+                elif 'lgbm' in model_class or (lgb and isinstance(model, (lgb.LGBMClassifier, lgb.LGBMRegressor))):
+                    eval_set = [(X_val, y_val)]
+                    fit_params['eval_set'] = eval_set
+                    fit_params['eval_metric'] = 'binary_logloss' if task == 'classification' else 'l2'
+                    fit_params['callbacks'] = [lgb.early_stopping(stopping_rounds=model.get_params().get('early_stopping_rounds', 10))]
+                    print(f"[TRAINING] LightGBM training with validation set: {X_val.shape[0]} samples")
+                
+                # CatBoost
+                elif 'catboost' in model_class or (catboost and isinstance(model, (catboost.CatBoostClassifier, catboost.CatBoostRegressor))):
+                    eval_set = catboost.Pool(X_val, y_val)
+                    fit_params['eval_set'] = eval_set
+                    fit_params['verbose'] = False
+                    print(f"[TRAINING] CatBoost training with validation set: {X_val.shape[0]} samples")
+                
+                # Sklearn models (custom early stopping simulation)
+                else:
+                    print(f"[TRAINING] {model_class} training with validation set (no built-in early stopping)")
+            
+            # Train the model
+            try:
+                if eval_set:
+                    trained_model = model.fit(X_train, y_train, **fit_params)
+                else:
+                    trained_model = model.fit(X_train, y_train)
+                
+                print(f"[TRAINING] Model training completed successfully")
+                return trained_model
+                
+            except Exception as e:
+                print(f"[ERROR] Training failed: {e}")
+                # Fallback to training without early stopping
+                try:
+                    print("[TRAINING] Attempting fallback training without early stopping")
+                    if 'eval_set' in fit_params:
+                        del fit_params['eval_set']
+                    if 'callbacks' in fit_params:
+                        del fit_params['callbacks']
+                    return model.fit(X_train, y_train, **fit_params)
+                except Exception as e2:
+                    raise RuntimeError(f"Both training attempts failed: {e2}")
+        
+        # ============================================================================
+        # METRICS CALCULATION
+        # ============================================================================
+        def calculate_metrics(model, X, y_true, task, model_name=""):
+            """Calculate performance metrics"""
             metrics = {}
             
             try:
-                y_pred = model.predict(X)
-                
-                if model_type == 'classification':
-                    metrics[f'{dataset_name}_accuracy'] = float(accuracy_score(y_true, y_pred))
-                    metrics[f'{dataset_name}_precision'] = float(precision_score(
-                        y_true, y_pred, average='weighted', zero_division=0
-                    ))
-                    metrics[f'{dataset_name}_recall'] = float(recall_score(
-                        y_true, y_pred, average='weighted', zero_division=0
-                    ))
-                    metrics[f'{dataset_name}_f1'] = float(f1_score(
-                        y_true, y_pred, average='weighted', zero_division=0
-                    ))
+                # Get predictions
+                if task == 'classification':
+                    y_pred = model.predict(X)
+                    y_pred_proba = None
                     
-                    if hasattr(model, 'predict_proba'):
+                    # Try to get probability predictions
+                    try:
+                        if hasattr(model, 'predict_proba'):
+                            y_pred_proba = model.predict_proba(X)
+                    except:
+                        pass
+                    
+                    # Classification metrics
+                    metrics['accuracy'] = float(accuracy_score(y_true, y_pred))
+                    metrics['precision'] = float(precision_score(y_true, y_pred, average='weighted', zero_division=0))
+                    metrics['recall'] = float(recall_score(y_true, y_pred, average='weighted', zero_division=0))
+                    metrics['f1_score'] = float(f1_score(y_true, y_pred, average='weighted', zero_division=0))
+                    
+                    # ROC AUC (if probabilities available)
+                    if y_pred_proba is not None:
                         try:
-                            y_proba = model.predict_proba(X)
-                            n_classes = y_proba.shape[1]
-                            if n_classes == 2:
-                                metrics[f'{dataset_name}_roc_auc'] = float(roc_auc_score(
-                                    y_true, y_proba[:, 1]
-                                ))
-                            else:
-                                metrics[f'{dataset_name}_roc_auc'] = float(roc_auc_score(
-                                    y_true, y_proba, multi_class='ovr', average='weighted'
-                                ))
-                            metrics[f'{dataset_name}_log_loss'] = float(log_loss(y_true, y_proba))
-                        except Exception:
-                            pass
+                            if len(np.unique(y_true)) > 1:
+                                if y_pred_proba.shape[1] == 2:  # Binary classification
+                                    metrics['roc_auc'] = float(roc_auc_score(y_true, y_pred_proba[:, 1]))
+                                else:  # Multi-class
+                                    metrics['roc_auc'] = float(roc_auc_score(y_true, y_pred_proba, multi_class='ovr'))
+                        except:
+                            metrics['roc_auc'] = None
                     
+                    # Log loss (if probabilities available)
+                    if y_pred_proba is not None:
+                        try:
+                            metrics['log_loss'] = float(log_loss(y_true, y_pred_proba))
+                        except:
+                            metrics['log_loss'] = None
+                
                 else:  # regression
-                    metrics[f'{dataset_name}_r2'] = float(r2_score(y_true, y_pred))
-                    metrics[f'{dataset_name}_mse'] = float(mean_squared_error(y_true, y_pred))
-                    metrics[f'{dataset_name}_rmse'] = float(np.sqrt(metrics[f'{dataset_name}_mse']))
-                    metrics[f'{dataset_name}_mae'] = float(mean_absolute_error(y_true, y_pred))
+                    y_pred = model.predict(X)
                     
+                    # Regression metrics
+                    metrics['mse'] = float(mean_squared_error(y_true, y_pred))
+                    metrics['rmse'] = float(np.sqrt(metrics['mse']))
+                    metrics['mae'] = float(mean_absolute_error(y_true, y_pred))
+                    metrics['r2'] = float(r2_score(y_true, y_pred))
+            
             except Exception as e:
-                print(f"[WARN] Could not compute {dataset_name} metrics: {e}")
+                print(f"[WARNING] Error calculating metrics: {e}")
             
             return metrics
         
         # ============================================================================
+        # FEATURE IMPORTANCE EXTRACTION
+        # ============================================================================
+        def extract_feature_importance(model, feature_names):
+            """Extract feature importance from trained model"""
+            importance_data = {}
+            
+            try:
+                model_class = model.__class__.__name__.lower()
+                
+                # XGBoost
+                if 'xgboost' in model_class or (xgb and isinstance(model, (xgb.XGBClassifier, xgb.XGBRegressor))):
+                    if hasattr(model, 'feature_importances_'):
+                        importances = model.feature_importances_
+                        if len(importances) == len(feature_names):
+                            importance_data['gain'] = dict(zip(feature_names, importances.tolist()))
+                        if hasattr(model, 'get_booster'):
+                            try:
+                                fscore = model.get_booster().get_fscore()
+                                importance_data['fscore'] = fscore
+                            except:
+                                pass
+                
+                # LightGBM
+                elif 'lgbm' in model_class or (lgb and isinstance(model, (lgb.LGBMClassifier, lgb.LGBMRegressor))):
+                    if hasattr(model, 'feature_importances_'):
+                        importances = model.feature_importances_
+                        if len(importances) == len(feature_names):
+                            importance_data['gain'] = dict(zip(feature_names, importances.tolist()))
+                
+                # CatBoost
+                elif 'catboost' in model_class or (catboost and isinstance(model, (catboost.CatBoostClassifier, catboost.CatBoostRegressor))):
+                    if hasattr(model, 'get_feature_importance'):
+                        try:
+                            importances = model.get_feature_importance()
+                            if len(importances) == len(feature_names):
+                                importance_data['prediction_values_change'] = dict(zip(feature_names, importances.tolist()))
+                        except:
+                            pass
+                
+                # Sklearn models
+                elif hasattr(model, 'feature_importances_'):
+                    importances = model.feature_importances_
+                    if len(importances) == len(feature_names):
+                        importance_data['gain'] = dict(zip(feature_names, importances.tolist()))
+            
+            except Exception as e:
+                print(f"[WARNING] Error extracting feature importance: {e}")
+            
+            return importance_data
+        
+        # ============================================================================
         # MAIN FUNCTION
         # ============================================================================
-        
         def main():
             parser = argparse.ArgumentParser()
-            
-            # File path inputs (inputPath)
             parser.add_argument('--train_X', type=str, required=True)
             parser.add_argument('--train_y', type=str, required=True)
             parser.add_argument('--untrained_model', type=str, required=True)
             parser.add_argument('--model_metadata', type=str, required=True)
-            parser.add_argument('--pca_metadata', type=str, default="")
-            
-            # Value inputs (inputValue)
-            parser.add_argument('--enable_pca', type=str, default="false")
+            parser.add_argument('--preprocess_metadata', type=str, required=True)
+            parser.add_argument('--pca_metadata', type=str, required=False, default="")
+            parser.add_argument('--enable_pca', type=str, default='false')
             parser.add_argument('--model_type', type=str, default='classification')
             parser.add_argument('--early_stopping_rounds', type=int, default=10)
             parser.add_argument('--validation_split', type=float, default=0.1)
             parser.add_argument('--random_state', type=int, default=42)
-            
-            # Outputs (file paths)
+            parser.add_argument('--n_jobs', type=int, default=-1)
+            parser.add_argument('--device', type=str, default='auto')
             parser.add_argument('--trained_model', type=str, required=True)
-            parser.add_argument('--training_metrics', type=str, required=True)
-            parser.add_argument('--trained_model_metadata', type=str, required=True)
-            parser.add_argument('--preprocess_metadata', type=str, required=True)
-            
+            parser.add_argument('--training_metadata', type=str, required=True)
+            parser.add_argument('--validation_metrics', type=str, required=True)
+            parser.add_argument('--feature_importance', type=str, required=True)
             args = parser.parse_args()
             
             try:
                 print("="*80)
-                print("BOOSTING TRAINER v2.0 - USING python:3.10-slim-bullseye")
+                print("BOOSTING MODEL TRAINING")
                 print("="*80)
                 
-                # Parse parameters
-                enable_pca = args.enable_pca.lower() in ['true', '1', 'yes', 't', 'y']
-                print(f"[INFO] PCA Enabled: {enable_pca}")
-                print(f"[INFO] Model type: {args.model_type}")
-                print(f"[INFO] Early stopping rounds: {args.early_stopping_rounds}")
-                print(f"[INFO] Validation split: {args.validation_split}")
+                # Load data
+                print("[STEP 1/8] Loading training data...")
+                X_train = pd.read_parquet(args.train_X)
+                y_train = pd.read_parquet(args.train_y)
+                print(f"[INFO] Training X shape: {X_train.shape}")
+                print(f"[INFO] Training y shape: {y_train.shape}")
                 
-                # Load PCA metadata from file
-                pca_metadata = {}
-                pca_available = False
-                
-                if args.pca_metadata and os.path.exists(args.pca_metadata):
-                    try:
-                        pca_metadata = load_json_file(args.pca_metadata)
-                        if pca_metadata.get('pca_enabled', False) or 'pca_variant' in pca_metadata:
-                            pca_available = True
-                            print(f"[INFO] PCA metadata loaded from file")
-                            print(f"[INFO] PCA variant: {pca_metadata.get('pca_variant', 'unknown')}")
-                            print(f"[INFO] Components: {pca_metadata.get('n_components_resolved', 'unknown')}")
-                        else:
-                            print(f"[INFO] Empty or invalid PCA metadata file")
-                    except Exception as e:
-                        print(f"[WARN] Could not load PCA metadata file: {e}")
+                # Handle multi-target vs single-target
+                if isinstance(y_train, pd.DataFrame):
+                    target_cols = list(y_train.columns)
+                    print(f"[INFO] Multi-target training: {len(target_cols)} targets")
+                    # Use first target for single model training
+                    y_train_single = y_train.iloc[:, 0]
                 else:
-                    print(f"[INFO] No PCA metadata file provided")
+                    target_cols = ['target']
+                    y_train_single = y_train
                 
-                # Load data from file paths
-                print("[INFO] Loading training data...")
-                X = pd.read_parquet(args.train_X)
-                y_df = pd.read_parquet(args.train_y)
-                print(f"[INFO] Training data shape - X: {X.shape}, y: {y_df.shape}")
+                # Load model
+                print("[STEP 2/8] Loading untrained model...")
+                with open(args.untrained_model, 'rb') as f:
+                    model = cloudpickle.load(f)
                 
-                # Determine if multi-output
-                if isinstance(y_df, pd.DataFrame) and y_df.shape[1] > 1:
-                    print(f"[INFO] Multi-output target detected: {y_df.shape[1]} targets")
-                    y = y_df
-                    multi_output = True
-                    target_cols = list(y.columns)
-                else:
-                    if isinstance(y_df, pd.DataFrame):
-                        y = y_df.iloc[:, 0]
-                        target_cols = [y_df.columns[0]]
-                    else:
-                        y = y_df
-                        target_cols = ['target']
-                    multi_output = False
+                # Load metadata
+                print("[STEP 3/8] Loading metadata...")
+                with open(args.model_metadata, 'r') as f:
+                    model_metadata = json.load(f)
                 
-                # Load model from file (with XGBoost fix)
-                print("[INFO] Loading untrained model...")
-                model = load_model(args.untrained_model)
+                with open(args.preprocess_metadata, 'r') as f:
+                    preprocess_metadata = json.load(f)
                 
-                # Load model metadata from file
-                metadata = load_json_file(args.model_metadata)
+                algorithm = model_metadata.get('algorithm', 'unknown')
+                task = args.model_type.strip().lower()
+                print(f"[INFO] Algorithm: {algorithm}")
+                print(f"[INFO] Task: {task}")
                 
-                model_type = args.model_type.strip().lower()
-                model_name = model.__class__.__name__
-                print(f"[INFO] Model class: {model_name}")
-                print(f"[INFO] XGBoost version: {xgb.__version__}")
-                
-                # Prepare data
-                print("[INFO] Preparing data...")
-                X_train, y_train, X_val, y_val, has_val = prepare_data(
-                    X, y, model_type, args.validation_split, args.random_state
+                # Detect and configure device
+                print("[STEP 4/8] Configuring device...")
+                device_config = detect_and_configure_device(
+                    preferred_device=args.device,
+                    n_jobs=args.n_jobs
                 )
                 
-                # Train model(s)
-                print(f"[INFO] Training {model_name}...")
+                # Configure model for training
+                print("[STEP 5/8] Configuring model...")
+                model = configure_model_for_training(
+                    model, 
+                    device_config, 
+                    args.early_stopping_rounds,
+                    task
+                )
                 
-                if multi_output:
-                    print("[INFO] Training multi-output model...")
-                    trained_models = {}
-                    all_metrics = {}
-                    
-                    for target_col in target_cols:
-                        print(f"[INFO] Training for target: {target_col}")
-                        y_target = y[target_col]
-                        
-                        # Prepare data for this target
-                        X_train_target, y_train_target, X_val_target, y_val_target, has_val_target = prepare_data(
-                            X, y_target, model_type, args.validation_split, args.random_state
+                # Prepare validation split
+                print("[STEP 6/8] Preparing validation data...")
+                X_train_split, X_val, y_train_split, y_val = None, None, None, None
+                
+                if args.validation_split > 0:
+                    if task == 'classification' and len(np.unique(y_train_single)) > 1:
+                        X_train_split, X_val, y_train_split, y_val = train_test_split(
+                            X_train, y_train_single,
+                            test_size=args.validation_split,
+                            stratify=y_train_single,
+                            random_state=args.random_state
                         )
-                        
-                        # Clone model for each target
-                        import copy
-                        model_copy = copy.deepcopy(model)
-                        
-                        # Train with early stopping
-                        trained_model = train_with_early_stopping(
-                            model_copy, X_train_target, y_train_target, X_val_target, y_val_target,
-                            args.early_stopping_rounds
-                        )
-                        
-                        # Compute metrics
-                        metrics = compute_metrics(trained_model, X_train_target, y_train_target, model_type, "train")
-                        if has_val_target:
-                            val_metrics = compute_metrics(trained_model, X_val_target, y_val_target, model_type, "val")
-                            metrics.update(val_metrics)
-                        
-                        trained_models[target_col] = trained_model
-                        all_metrics[target_col] = metrics
-                    
-                    final_model = trained_models
-                    final_metrics = {"targets": all_metrics}
-                    
-                else:
-                    # Single output training
-                    print("[INFO] Training single-output model...")
-                    
-                    # Apply sample weights for classification if needed
-                    if model_type == 'classification' and hasattr(model, 'sample_weight'):
-                        try:
-                            sample_weight = compute_sample_weight(class_weight='balanced', y=y_train)
-                            print("[INFO] Using balanced sample weights")
-                            model.fit(X_train, y_train, sample_weight=sample_weight)
-                        except:
-                            model = train_with_early_stopping(
-                                model, X_train, y_train, X_val, y_val,
-                                args.early_stopping_rounds
-                            )
                     else:
-                        model = train_with_early_stopping(
-                            model, X_train, y_train, X_val, y_val,
-                            args.early_stopping_rounds
+                        X_train_split, X_val, y_train_split, y_val = train_test_split(
+                            X_train, y_train_single,
+                            test_size=args.validation_split,
+                            random_state=args.random_state
                         )
-                    
-                    # Compute metrics
-                    final_metrics = compute_metrics(model, X_train, y_train, model_type, "train")
-                    if has_val:
-                        val_metrics = compute_metrics(model, X_val, y_val, model_type, "val")
-                        final_metrics.update(val_metrics)
-                    
-                    final_model = model
+                    print(f"[INFO] Training split: {X_train_split.shape[0]} samples")
+                    print(f"[INFO] Validation split: {X_val.shape[0]} samples")
+                else:
+                    X_train_split, y_train_split = X_train, y_train_single
+                    print("[INFO] No validation split (validation_split=0)")
                 
-                print("[INFO] Training completed successfully!")
+                # Train model
+                print("[STEP 7/8] Training model...")
+                trained_model = train_with_early_stopping(
+                    model,
+                    X_train_split, y_train_split,
+                    X_val, y_val,
+                    task,
+                    args.random_state
+                )
                 
-                # ============================================================================
-                # CREATE OUTPUTS
-                # ============================================================================
+                # Calculate metrics
+                print("[STEP 8/8] Calculating metrics and saving outputs...")
                 
-                # Create output directories
-                os.makedirs(os.path.dirname(args.trained_model) or ".", exist_ok=True)
-                os.makedirs(os.path.dirname(args.training_metrics) or ".", exist_ok=True)
-                os.makedirs(os.path.dirname(args.trained_model_metadata) or ".", exist_ok=True)
-                os.makedirs(os.path.dirname(args.preprocess_metadata) or ".", exist_ok=True)
+                # Training metrics
+                train_metrics = calculate_metrics(trained_model, X_train_split, y_train_split, task, "train")
                 
-                # 1. Save trained model
-                with open(args.trained_model, 'wb') as f:
-                    cloudpickle.dump(final_model, f)
-                print(f"[INFO] Trained model saved to: {args.trained_model}")
+                # Validation metrics
+                val_metrics = {}
+                if X_val is not None and y_val is not None:
+                    val_metrics = calculate_metrics(trained_model, X_val, y_val, task, "validation")
                 
-                # 2. Create and save training metrics
-                training_info = {
+                # Feature importance
+                feature_names = list(X_train.columns)
+                importance_data = extract_feature_importance(trained_model, feature_names)
+                
+                # Create training metadata
+                training_metadata = {
                     'timestamp': datetime.utcnow().isoformat() + 'Z',
-                    'model_type': model_type,
-                    'multi_output': multi_output,
-                    'pca_enabled': enable_pca,
-                    'pca_metadata_available': pca_available,
-                    'training_samples': len(X),
-                    'features': X.shape[1],
-                    'early_stopping_used': args.early_stopping_rounds > 0,
-                    'early_stopping_rounds': args.early_stopping_rounds,
-                    'validation_split': args.validation_split,
-                    'random_state': args.random_state,
-                    'has_validation': has_val,
-                    'metrics': final_metrics,
-                    'algorithm': metadata.get('algorithm', 'unknown'),
-                    'model_class': model_name,
-                    'xgb_version': xgb.__version__,
-                    'docker_image': 'python:3.10-slim-bullseye'
-                }
-                
-                with open(args.training_metrics, 'w') as f:
-                    json.dump(training_info, f, indent=2)
-                print(f"[INFO] Training metrics saved to: {args.training_metrics}")
-                
-                # 3. Update and save model metadata
-                metadata['training_completed'] = True
-                metadata['training_timestamp'] = datetime.utcnow().isoformat() + 'Z'
-                metadata['training_samples'] = len(X)
-                metadata['multi_output'] = multi_output
-                metadata['pca_enabled'] = enable_pca
-                metadata['target_columns'] = target_cols
-                metadata['model_class_trained'] = model_name
-                metadata['training_params'] = {
-                    'early_stopping_rounds': args.early_stopping_rounds,
-                    'validation_split': args.validation_split,
-                    'random_state': args.random_state
-                }
-                if pca_available:
-                    metadata['pca_metadata'] = pca_metadata
-                
-                with open(args.trained_model_metadata, 'w') as f:
-                    json.dump(metadata, f, indent=2)
-                print(f"[INFO] Updated metadata saved to: {args.trained_model_metadata}")
-                
-                # 4. Create preprocess metadata
-                preprocess_meta = {
-                    'timestamp': datetime.utcnow().isoformat() + 'Z',
-                    'model_type': model_type,
-                    'pca_enabled': enable_pca,
-                    'pca_metadata_available': pca_available,
-                    'multi_output': multi_output,
-                    'target_columns': target_cols,
-                    'n_targets': len(target_cols),
-                    'final_shape': {
-                        'rows': len(X),
-                        'cols': X.shape[1],
-                        'n_targets': len(target_cols)
-                    },
-                    'algorithm': metadata.get('algorithm', 'unknown'),
-                    'training_completed': True,
-                    'feature_type': 'pca_components' if enable_pca else 'original_features',
+                    'algorithm': algorithm,
+                    'model_type': task,
+                    'device_config': device_config,
                     'training_params': {
                         'early_stopping_rounds': args.early_stopping_rounds,
                         'validation_split': args.validation_split,
-                        'random_state': args.random_state
+                        'random_state': args.random_state,
+                        'n_jobs': args.n_jobs,
+                        'device': args.device
                     },
-                    'pca_metadata': pca_metadata if pca_available else None
+                    'data_info': {
+                        'training_samples': int(X_train.shape[0]),
+                        'features': int(X_train.shape[1]),
+                        'validation_samples': int(X_val.shape[0]) if X_val is not None else 0,
+                        'feature_names': feature_names[:50]  # First 50 features
+                    },
+                    'model_info': {
+                        'model_class': trained_model.__class__.__name__,
+                        'is_fitted': hasattr(trained_model, 'fit'),
+                        'model_params': trained_model.get_params() if hasattr(trained_model, 'get_params') else {}
+                    }
                 }
                 
-                with open(args.preprocess_metadata, 'w') as f:
-                    json.dump(preprocess_meta, f, indent=2)
-                print(f"[INFO] Preprocess metadata saved to: {args.preprocess_metadata}")
+                # Validation metrics JSON
+                validation_metrics_data = {
+                    'training_metrics': train_metrics,
+                    'validation_metrics': val_metrics,
+                    'timestamp': datetime.utcnow().isoformat() + 'Z'
+                }
                 
-                # ============================================================================
-                # FINAL SUMMARY
-                # ============================================================================
+                # Feature importance JSON
+                feature_importance_data = {
+                    'algorithm': algorithm,
+                    'feature_names': feature_names,
+                    'importance': importance_data,
+                    'top_features': []
+                }
                 
+                # Extract top features
+                if 'gain' in importance_data:
+                    sorted_features = sorted(importance_data['gain'].items(), key=lambda x: x[1], reverse=True)
+                    top_features = sorted_features[:20]
+                    feature_importance_data['top_features'] = [
+                        {'feature': feat, 'importance': float(imp)} 
+                        for feat, imp in top_features
+                    ]
+                
+                # Create output directories
+                os.makedirs(os.path.dirname(args.trained_model) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.training_metadata) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.validation_metrics) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.feature_importance) or ".", exist_ok=True)
+                
+                # Save outputs
+                print("[SAVING] Saving trained model...")
+                with open(args.trained_model, 'wb') as f:
+                    cloudpickle.dump(trained_model, f)
+                
+                print("[SAVING] Saving training metadata...")
+                with open(args.training_metadata, 'w') as f:
+                    json.dump(training_metadata, f, indent=2)
+                
+                print("[SAVING] Saving validation metrics...")
+                with open(args.validation_metrics, 'w') as f:
+                    json.dump(validation_metrics_data, f, indent=2)
+                
+                print("[SAVING] Saving feature importance...")
+                with open(args.feature_importance, 'w') as f:
+                    json.dump(feature_importance_data, f, indent=2)
+                
+                # Print summary
                 print(f"{'='*80}")
                 print("TRAINING COMPLETE - SUMMARY")
                 print(f"{'='*80}")
-                print(f"Algorithm: {metadata.get('algorithm', 'unknown')}")
-                print(f"Task: {model_type}")
-                print(f"PCA Enabled: {enable_pca}")
-                print(f"Model Class: {model_name}")
-                print(f"XGBoost Version: {xgb.__version__}")
-                print(f"Docker Image: python:3.10-slim-bullseye")
-                print(f"Training samples: {len(X)}")
-                print(f"Features: {X.shape[1]}")
-                print(f"Multi-output: {multi_output}")
-                if multi_output:
-                    print(f"Targets: {len(target_cols)}")
+                print(f"Algorithm: {algorithm}")
+                print(f"Device: {device_config['device_type'].upper()}")
+                print(f"Training samples: {X_train.shape[0]}")
+                print(f"Features: {X_train.shape[1]}")
+                print(f"Validation samples: {X_val.shape[0] if X_val is not None else 0}")
                 
-                print(f"\\nMetrics Summary:")
-                if model_type == 'classification':
-                    print(f"  Training Accuracy: {final_metrics.get('train_accuracy', 0):.4f}")
-                    if has_val:
-                        print(f"  Validation Accuracy: {final_metrics.get('val_accuracy', 0):.4f}")
+                if task == 'classification':
+                    if 'accuracy' in train_metrics:
+                        print(f"Training Accuracy: {train_metrics['accuracy']:.4f}")
+                    if 'accuracy' in val_metrics:
+                        print(f"Validation Accuracy: {val_metrics['accuracy']:.4f}")
                 else:
-                    print(f"  Training R²: {final_metrics.get('train_r2', 0):.4f}")
-                    if has_val:
-                        print(f"  Validation R²: {final_metrics.get('val_r2', 0):.4f}")
+                    if 'r2' in train_metrics:
+                        print(f"Training R²: {train_metrics['r2']:.4f}")
+                    if 'r2' in val_metrics:
+                        print(f"Validation R²: {val_metrics['r2']:.4f}")
                 
-                print(f"\\nOutputs generated (4 files):")
+                print(f"\\nOutputs:")
                 print(f"  1. trained_model: {args.trained_model}")
-                print(f"  2. training_metrics: {args.training_metrics}")
-                print(f"  3. trained_model_metadata: {args.trained_model_metadata}")
-                print(f"  4. preprocess_metadata: {args.preprocess_metadata}")
+                print(f"  2. training_metadata: {args.training_metadata}")
+                print(f"  3. validation_metrics: {args.validation_metrics}")
+                print(f"  4. feature_importance: {args.feature_importance}")
+                print(f"{'='*80}")
+                print("SUCCESS: Model training completed!")
                 print(f"{'='*80}")
                 
             except Exception as e:
@@ -568,8 +683,6 @@ implementation:
         
         if __name__ == "__main__":
             main()
-        EOF
-        )"
     args:
       - --train_X
       - {inputPath: train_X}
@@ -579,6 +692,8 @@ implementation:
       - {inputPath: untrained_model}
       - --model_metadata
       - {inputPath: model_metadata}
+      - --preprocess_metadata
+      - {inputPath: preprocess_metadata}
       - --pca_metadata
       - {inputPath: pca_metadata}
       - --enable_pca
@@ -591,11 +706,15 @@ implementation:
       - {inputValue: validation_split}
       - --random_state
       - {inputValue: random_state}
+      - --n_jobs
+      - {inputValue: n_jobs}
+      - --device
+      - {inputValue: device}
       - --trained_model
       - {outputPath: trained_model}
-      - --training_metrics
-      - {outputPath: training_metrics}
-      - --trained_model_metadata
-      - {outputPath: trained_model_metadata}
-      - --preprocess_metadata
-      - {outputPath: preprocess_metadata}
+      - --training_metadata
+      - {outputPath: training_metadata}
+      - --validation_metrics
+      - {outputPath: validation_metrics}
+      - --feature_importance
+      - {outputPath: feature_importance}
