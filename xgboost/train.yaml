@@ -1,25 +1,24 @@
-name: Boosting Trainer v1.6
+name: Boosting Trainer v1.7
 inputs:
-  # Required inputs
+  # Required inputs - CORRECTED DATA TYPES
   - name: train_X
     type: Dataset
-    description: "Training features as string (parquet content)"
+    description: "Training features dataset"
   - name: train_y
     type: Dataset
-    description: "Training targets as string (parquet content)"
+    description: "Training targets dataset"
   - name: untrained_model
     type: Model
-    description: "Untrained model as string (cloudpickle content)"
+    description: "Untrained model from Model Builder"
   - name: model_metadata
-    type: String
-    description: "Model metadata as JSON string"
+    type: Data
+    description: "Model metadata from Model Builder"
   
-  # PCA-related input
+  # PCA-related input - CORRECT: Data type not String
   - name: pca_metadata
-    type: String
-    description: "PCA metadata as JSON string (empty if PCA not used)"
+    type: Data
+    description: "PCA metadata JSON file (empty JSON file if PCA not used)"
     optional: true
-    default: "{}"
   
   # Configuration parameters
   - name: enable_pca
@@ -70,7 +69,7 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, os, sys, json, traceback, warnings, cloudpickle, pickle, io, base64
+        import argparse, os, sys, json, traceback, warnings, cloudpickle, pickle, io, base64, gzip
         from datetime import datetime
         import numpy as np
         import pandas as pd
@@ -83,7 +82,7 @@ implementation:
         from sklearn.utils.class_weight import compute_sample_weight
         
         print("="*80)
-        print("BOOSTING TRAINER v1.6 - ALL INPUT VALUES")
+        print("BOOSTING TRAINER v1.7 - CORRECT DATA TYPES")
         print("="*80)
         
         # Install required packages
@@ -112,55 +111,25 @@ implementation:
         warnings.filterwarnings('ignore', category=FutureWarning)
         
         # ============================================================================
-        # HELPER FUNCTIONS FOR STRING INPUTS
+        # HELPER FUNCTIONS
         # ============================================================================
         
-        def parse_dataframe_from_string(data_str):
-            """Parse DataFrame from string content"""
-            try:
-                # Try to decode if base64 encoded
-                if len(data_str) > 1000 and '=' in data_str[-2:]:
-                    try:
-                        data_bytes = base64.b64decode(data_str)
-                        return pd.read_parquet(io.BytesIO(data_bytes))
-                    except:
-                        pass
-                
-                # Try direct parquet parsing
-                try:
-                    return pd.read_parquet(io.BytesIO(data_str.encode('latin-1')))
-                except:
-                    # Try JSON parsing as fallback
-                    return pd.read_json(io.StringIO(data_str))
-            except Exception as e:
-                raise ValueError(f"Failed to parse DataFrame from string: {e}")
+        def load_model(model_path):
+            """Load model from file path"""
+            with open(model_path, 'rb') as f:
+                return cloudpickle.load(f)
         
-        def parse_model_from_string(model_str):
-            """Parse model from string content"""
-            try:
-                # Try to decode if base64 encoded
-                if len(model_str) > 1000 and '=' in model_str[-2:]:
-                    try:
-                        model_bytes = base64.b64decode(model_str)
-                        return cloudpickle.loads(model_bytes)
-                    except:
-                        pass
-                
-                # Try direct parsing
-                return cloudpickle.loads(model_str.encode('latin-1'))
-            except Exception as e:
-                raise ValueError(f"Failed to parse model from string: {e}")
+        def load_json_file(json_path):
+            """Load JSON from file path"""
+            if os.path.exists(json_path):
+                with open(json_path, 'r') as f:
+                    return json.load(f)
+            return {}
         
-        def parse_json_from_string(json_str):
-            """Parse JSON from string content"""
-            if not json_str or json_str.strip() == "":
-                return {}
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError as e:
-                print(f"[WARN] Could not parse JSON string: {e}")
-                print(f"[WARN] String preview: {json_str[:200]}...")
-                return {}
+        def load_gzipped_pickle(file_path):
+            """Load gzipped pickle file"""
+            with gzip.open(file_path, 'rb') as f:
+                return cloudpickle.load(f)
         
         def prepare_data(X, y, model_type, validation_split, random_state):
             if validation_split > 0 and validation_split < 1:
@@ -269,16 +238,14 @@ implementation:
         def main():
             parser = argparse.ArgumentParser()
             
-            # All inputs as strings
+            # File path inputs (inputPath)
             parser.add_argument('--train_X', type=str, required=True)
             parser.add_argument('--train_y', type=str, required=True)
             parser.add_argument('--untrained_model', type=str, required=True)
             parser.add_argument('--model_metadata', type=str, required=True)
+            parser.add_argument('--pca_metadata', type=str, default="")
             
-            # PCA metadata as JSON string
-            parser.add_argument('--pca_metadata', type=str, default="{}")
-            
-            # Parameters
+            # Value inputs (inputValue)
             parser.add_argument('--enable_pca', type=str, default="false")
             parser.add_argument('--model_type', type=str, default='classification')
             parser.add_argument('--early_stopping_rounds', type=int, default=10)
@@ -295,7 +262,7 @@ implementation:
             
             try:
                 print("="*80)
-                print("BOOSTING TRAINER v1.6 - PROCESSING STRING INPUTS")
+                print("BOOSTING TRAINER v1.7 - WITH CORRECT DATA TYPES")
                 print("="*80)
                 
                 # Parse parameters
@@ -305,30 +272,29 @@ implementation:
                 print(f"[INFO] Early stopping rounds: {args.early_stopping_rounds}")
                 print(f"[INFO] Validation split: {args.validation_split}")
                 
-                # Parse PCA metadata from string
-                pca_metadata = parse_json_from_string(args.pca_metadata)
+                # Load PCA metadata from file
+                pca_metadata = {}
                 pca_available = False
                 
-                if pca_metadata and ('pca_enabled' in pca_metadata or 'pca_variant' in pca_metadata):
-                    pca_available = True
-                    print(f"[INFO] PCA metadata parsed successfully")
-                    print(f"[INFO] PCA variant: {pca_metadata.get('pca_variant', 'unknown')}")
-                    print(f"[INFO] Components: {pca_metadata.get('n_components_resolved', 'unknown')}")
+                if args.pca_metadata and os.path.exists(args.pca_metadata):
+                    try:
+                        pca_metadata = load_json_file(args.pca_metadata)
+                        if pca_metadata.get('pca_enabled', False) or 'pca_variant' in pca_metadata:
+                            pca_available = True
+                            print(f"[INFO] PCA metadata loaded from file")
+                            print(f"[INFO] PCA variant: {pca_metadata.get('pca_variant', 'unknown')}")
+                            print(f"[INFO] Components: {pca_metadata.get('n_components_resolved', 'unknown')}")
+                        else:
+                            print(f"[INFO] Empty or invalid PCA metadata file")
+                    except Exception as e:
+                        print(f"[WARN] Could not load PCA metadata file: {e}")
                 else:
-                    print(f"[INFO] No PCA metadata found in string")
+                    print(f"[INFO] No PCA metadata file provided")
                 
-                # Load data from strings
-                print("[INFO] Loading training data from strings...")
-                try:
-                    X = parse_dataframe_from_string(args.train_X)
-                    y_df = parse_dataframe_from_string(args.train_y)
-                except Exception as e:
-                    print(f"[ERROR] Failed to parse DataFrame from strings: {e}")
-                    # Fallback: try to read as file paths
-                    print("[INFO] Trying fallback to file paths...")
-                    X = pd.read_parquet(args.train_X)
-                    y_df = pd.read_parquet(args.train_y)
-                
+                # Load data from file paths
+                print("[INFO] Loading training data...")
+                X = pd.read_parquet(args.train_X)
+                y_df = pd.read_parquet(args.train_y)
                 print(f"[INFO] Training data shape - X: {X.shape}, y: {y_df.shape}")
                 
                 # Determine if multi-output
@@ -346,19 +312,12 @@ implementation:
                         target_cols = ['target']
                     multi_output = False
                 
-                # Load model from string
-                print("[INFO] Loading untrained model from string...")
-                try:
-                    model = parse_model_from_string(args.untrained_model)
-                except Exception as e:
-                    print(f"[ERROR] Failed to parse model from string: {e}")
-                    # Fallback: try to read as file path
-                    print("[INFO] Trying fallback to file path...")
-                    with open(args.untrained_model, 'rb') as f:
-                        model = cloudpickle.load(f)
+                # Load model from file
+                print("[INFO] Loading untrained model...")
+                model = load_model(args.untrained_model)
                 
-                # Parse model metadata from string
-                metadata = parse_json_from_string(args.model_metadata)
+                # Load model metadata from file
+                metadata = load_json_file(args.model_metadata)
                 
                 model_type = args.model_type.strip().lower()
                 model_name = model.__class__.__name__
@@ -570,15 +529,15 @@ implementation:
             main()
     args:
       - --train_X
-      - {inputValue: train_X}
+      - {inputPath: train_X}
       - --train_y
-      - {inputValue: train_y}
+      - {inputPath: train_y}
       - --untrained_model
-      - {inputValue: untrained_model}
+      - {inputPath: untrained_model}
       - --model_metadata
-      - {inputValue: model_metadata}
+      - {inputPath: model_metadata}
       - --pca_metadata
-      - {inputValue: pca_metadata}
+      - {inputPath: pca_metadata}
       - --enable_pca
       - {inputValue: enable_pca}
       - --model_type
