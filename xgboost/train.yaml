@@ -1,4 +1,4 @@
-name: Boosting Trainer v1.8
+name: Boosting Trainer v2.0
 inputs:
   # Required inputs - CORRECTED DATA TYPES
   - name: train_X
@@ -59,16 +59,28 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/ml-base:v1
+    image: python:3.10-slim-bullseye  # Use slim Python image
     command:
       - sh
       - -c
       - |
-        exec "$0" "$@"
-      - python3
-      - -u
-      - -c
-      - |
+        # Install system dependencies first
+        apt-get update && apt-get install -y --no-install-recommends gcc g++ \
+        && rm -rf /var/lib/apt/lists/*
+        
+        # Install Python packages
+        pip install --no-cache-dir \
+          numpy==1.24.3 \
+          pandas==2.0.3 \
+          scikit-learn==1.3.0 \
+          xgboost==1.7.5 \
+          lightgbm==4.1.0 \
+          catboost==1.2 \
+          cloudpickle==3.0.0 \
+          pyarrow==14.0.1
+        
+        # Run the Python script
+        exec python3 -u -c "$(cat << 'EOF'
         import argparse, os, sys, json, traceback, warnings, cloudpickle, pickle, io, base64, gzip
         from datetime import datetime
         import numpy as np
@@ -82,29 +94,36 @@ implementation:
         from sklearn.utils.class_weight import compute_sample_weight
         
         print("="*80)
-        print("BOOSTING TRAINER v1.7 - CORRECT DATA TYPES")
+        print("BOOSTING TRAINER v2.0 - SLIM DOCKER")
         print("="*80)
         
-        # Install required packages
-        print("[INFO] Checking/installing required packages...")
+        # Import XGBoost with error handling
         try:
-            import subprocess
-            import importlib
-            
-            # Check and install packages
-            for package in ['xgboost', 'catboost', 'lightgbm']:
-                try:
-                    importlib.import_module(package)
-                    print(f"✓ {package} already installed")
-                except ImportError:
-                    print(f"Installing {package}...")
-                    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', package])
-            
-            import sklearn
-            print(f"✓ scikit-learn {sklearn.__version__} available")
-            
+            import xgboost as xgb
+            print(f"✓ XGBoost {xgb.__version__} loaded")
         except Exception as e:
-            print(f"[WARN] Package installation check failed: {e}")
+            print(f"✗ XGBoost import failed: {e}")
+            print("[INFO] Installing XGBoost...")
+            import subprocess
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'xgboost==1.7.5'])
+            import xgboost as xgb
+            print(f"✓ XGBoost {xgb.__version__} installed")
+        
+        # Import other ML packages
+        try:
+            import lightgbm
+            print(f"✓ LightGBM {lightgbm.__version__} loaded")
+        except:
+            print("[WARN] LightGBM not available")
+        
+        try:
+            import catboost
+            print(f"✓ CatBoost {catboost.__version__} loaded")
+        except:
+            print("[WARN] CatBoost not available")
+        
+        import sklearn
+        print(f"✓ scikit-learn {sklearn.__version__} available")
         
         # Suppress warnings
         warnings.filterwarnings('ignore', category=UserWarning)
@@ -116,17 +135,37 @@ implementation:
         
         def load_model(model_path):
             with open(model_path, 'rb') as f:
-                return cloudpickle.load(f)
+                model = cloudpickle.load(f)
+            
+            # Fix XGBoost device parameter issue if it exists
+            model_class_name = model.__class__.__name__.lower()
+            if 'xgboost' in model_class_name:
+                try:
+                    # Check if model has device parameter that causes issues
+                    if hasattr(model, 'get_params'):
+                        params = model.get_params()
+                        if 'device' in params:
+                            # Try to safely handle device parameter
+                            try:
+                                # Set device to None or CPU
+                                model.set_params(device=None)
+                                print("[INFO] Fixed XGBoost device parameter")
+                            except:
+                                # If setting fails, try to create new model without device
+                                safe_params = {k: v for k, v in params.items() if k != 'device'}
+                                new_model = model.__class__(**safe_params)
+                                print("[INFO] Created new XGBoost model without device parameter")
+                                return new_model
+                except Exception as e:
+                    print(f"[WARN] Could not fix XGBoost model: {e}")
+            
+            return model
         
         def load_json_file(json_path):
             if os.path.exists(json_path):
                 with open(json_path, 'r') as f:
                     return json.load(f)
             return {}
-        
-        def load_gzipped_pickle(file_path):
-            with gzip.open(file_path, 'rb') as f:
-                return cloudpickle.load(f)
         
         def prepare_data(X, y, model_type, validation_split, random_state):
             if validation_split > 0 and validation_split < 1:
@@ -259,7 +298,7 @@ implementation:
             
             try:
                 print("="*80)
-                print("BOOSTING TRAINER v1.7 - WITH CORRECT DATA TYPES")
+                print("BOOSTING TRAINER v2.0 - USING python:3.10-slim-bullseye")
                 print("="*80)
                 
                 # Parse parameters
@@ -309,7 +348,7 @@ implementation:
                         target_cols = ['target']
                     multi_output = False
                 
-                # Load model from file
+                # Load model from file (with XGBoost fix)
                 print("[INFO] Loading untrained model...")
                 model = load_model(args.untrained_model)
                 
@@ -319,6 +358,7 @@ implementation:
                 model_type = args.model_type.strip().lower()
                 model_name = model.__class__.__name__
                 print(f"[INFO] Model class: {model_name}")
+                print(f"[INFO] XGBoost version: {xgb.__version__}")
                 
                 # Prepare data
                 print("[INFO] Preparing data...")
@@ -427,7 +467,9 @@ implementation:
                     'has_validation': has_val,
                     'metrics': final_metrics,
                     'algorithm': metadata.get('algorithm', 'unknown'),
-                    'model_class': model_name
+                    'model_class': model_name,
+                    'xgb_version': xgb.__version__,
+                    'docker_image': 'python:3.10-slim-bullseye'
                 }
                 
                 with open(args.training_metrics, 'w') as f:
@@ -494,6 +536,8 @@ implementation:
                 print(f"Task: {model_type}")
                 print(f"PCA Enabled: {enable_pca}")
                 print(f"Model Class: {model_name}")
+                print(f"XGBoost Version: {xgb.__version__}")
+                print(f"Docker Image: python:3.10-slim-bullseye")
                 print(f"Training samples: {len(X)}")
                 print(f"Features: {X.shape[1]}")
                 print(f"Multi-output: {multi_output}")
@@ -524,6 +568,8 @@ implementation:
         
         if __name__ == "__main__":
             main()
+        EOF
+        )"
     args:
       - --train_X
       - {inputPath: train_X}
