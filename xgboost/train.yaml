@@ -1,4 +1,4 @@
-name: Boosting Training Brick v2.1
+name: Boosting Training Brick v2.2
 description: Generic training brick for boosting models - FIXED with all dependencies
 inputs:
   - {name: train_X, type: Dataset, description: "Final training features (after feature selection/PCA)"}
@@ -113,10 +113,7 @@ implementation:
         # 2. CORE TRAINING FUNCTION - FIXES XGBoost 1.6+ feature_types BUG
         # ============================================================================
         def train_model_safely(model, X_train, y_train, X_val=None, y_val=None):
-            """
-            Universal training function that handles the XGBoost 1.6+ feature_types bug
-            and provides fallbacks for all model types.
-            """
+           
             model_class_name = model.__class__.__name__.lower()
             print(f"[TRAINING] Model type: {model.__class__.__name__}")
             print(f"[TRAINING] Training on {X_train.shape[0]} samples")
@@ -181,7 +178,7 @@ implementation:
         # 3. METRICS & FEATURE IMPORTANCE FUNCTIONS
         # ============================================================================
         def calculate_model_metrics(model, X, y_true, task_type):
-            """Calculate metrics for classification or regression."""
+            
             metrics = {}
             try:
                 y_pred = model.predict(X)
@@ -216,7 +213,6 @@ implementation:
             return metrics
 
         def extract_feature_importance(model, feature_names):
-            """Extract feature importance from trained model."""
             importance_data = {}
             try:
                 # Universal method for models with feature_importances_
@@ -415,7 +411,7 @@ implementation:
                     json.dump(feature_importance_data, f, indent=2)
 
                 # ===== FINAL SUMMARY =====
-                print("\n" + "="*80)
+                print("\\n" + "="*80)
                 print("TRAINING COMPLETE - SUMMARY")
                 print("="*80)
                 print(f"Algorithm: {algorithm}")
@@ -435,7 +431,7 @@ implementation:
                     if val_metrics.get('r2'):
                         print(f"Validation R²: {val_metrics['r2']:.4f}")
 
-                print("\nOutputs saved:")
+                print("\\nOutputs saved:")
                 print(f"  ✓ trained_model: {args.trained_model}")
                 print(f"  ✓ training_metadata: {args.training_metadata}")
                 print(f"  ✓ validation_metrics: {args.validation_metrics}")
@@ -445,7 +441,7 @@ implementation:
                 print("="*80)
 
             except Exception as e:
-                print("\n" + "="*80)
+                print("\\n" + "="*80)
                 print("ERROR: Training failed!")
                 print("="*80)
                 print(f"Error: {e}")
