@@ -1,10 +1,27 @@
-name: Boosting Model Builder v1.4
+name: Boosting Model Builder v1.0
+description: Builds boosting models (xgboost, catboost, lightgbm, adaboost, gradient_boosting, hist_gradient_boosting)
 inputs:
-  - {name: config_json, type: String, description: "JSON string with model configuration. Must contain 'algorithm' key (xgboost, catboost, lightgbm, adaboost, gradient_boosting, hist_gradient_boosting)"}
-  - {name: model_type, type: String, description: "classification or regression", optional: true, default: "classification"}
+  - name: config_json
+    type: String
+    description: "JSON string with model configuration. Must contain 'algorithm' key"
+  - name: model_type
+    type: String
+    description: "classification or regression"
+    default: "classification"
 outputs:
-  - {name: untrained_model, type: Model, description: "Untrained model object (cloudpickle)"}
-  - {name: model_metadata, type: Data, description: "JSON metadata about the model configuration"}
+  - name: untrained_model
+    type: Model
+    description: "Untrained model object (cloudpickle)"
+  - name: model_metadata
+    type: Data
+    description: "JSON metadata about the model configuration"
+  - name: config_updated
+    type: String
+    description: "Updated configuration JSON string"
+  - name: model_info_out
+    type: String
+    description: "Model information JSON string"
+
 implementation:
   container:
     image: kumar2004/ml-base:v1
@@ -12,98 +29,59 @@ implementation:
       - sh
       - -c
       - |
-        set -e
-        
-        echo "Starting Boosting Model Builder..."
-        echo "Checking and installing required packages..."
-        
-        # First check what packages are missing
-        missing_packages=$(python3 -c "
-        import importlib
-        import sys
-        
-        packages_to_check = ['xgboost', 'lightgbm', 'catboost']
-        missing = []
-        
-        for pkg in packages_to_check:
-            try:
-                importlib.import_module(pkg)
-                print(f'✓ {pkg} already installed')
-            except ImportError:
-                print(f'✗ {pkg} not found')
-                missing.append(pkg)
-        
-        if missing:
-            print(' '.join(missing))
-        ")
-        
-        # Check if we have missing packages
-        last_line=$(echo "$missing_packages" | tail -n1)
-        
-        # If last line contains package names, we need to install them
-        if [[ "$last_line" == *"xgboost"* ]] || [[ "$last_line" == *"lightgbm"* ]] || [[ "$last_line" == *"catboost"* ]]; then
-            echo "Installing missing packages: $last_line"
-            
-            # Install each missing package
-            if [[ "$last_line" == *"xgboost"* ]]; then
-                echo "Installing XGBoost..."
-                pip install --no-cache-dir xgboost==1.6.2
-            fi
-            
-            if [[ "$last_line" == *"lightgbm"* ]]; then
-                echo "Installing LightGBM..."
-                pip install --no-cache-dir lightgbm==3.3.5
-            fi
-            
-            if [[ "$last_line" == *"catboost"* ]]; then
-                echo "Installing CatBoost..."
-                pip install --no-cache-dir catboost==1.2
-            fi
-            
-            # Also install numpy, pandas, cloudpickle if not present
-            pip install --no-cache-dir \
-                numpy==1.21.6 \
-                pandas==1.3.5 \
-                cloudpickle==2.2.1
-            
-            echo "Verifying installations..."
-            python3 -c "
-            try:
-                import xgboost
-                print('✓ XGBoost', xgboost.__version__)
-            except ImportError:
-                print('✗ XGBoost failed to install')
-                
-            try:
-                import lightgbm
-                print('✓ LightGBM', lightgbm.__version__)
-            except ImportError:
-                print('✗ LightGBM failed to install')
-                
-            try:
-                import catboost
-                print('✓ CatBoost', catboost.__version__)
-            except ImportError:
-                print('✗ CatBoost failed to install')
-                
-            try:
-                import sklearn
-                print('✓ scikit-learn', sklearn.__version__)
-            except ImportError:
-                print('✗ scikit-learn not found')
-            "
-        else
-            echo "All required packages are already installed!"
-        fi
-        
-        echo "Package installation complete"
-        
-        # Now run the main Python script
-        exec python3 -u -c "
-        import argparse, os, sys, json, traceback, warnings, cloudpickle
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, json, traceback, warnings, cloudpickle, subprocess
         from datetime import datetime
         import numpy as np
         import pandas as pd
+        
+        # Install required packages first
+        print("Installing boosting packages...")
+        packages = ['xgboost', 'catboost', 'lightgbm', 'scikit-learn', 'cloudpickle', 'pandas', 'numpy']
+        
+        for package in packages:
+            try:
+                if package == 'scikit-learn':
+                    import sklearn
+                    print(f"✓ scikit-learn {sklearn.__version__} already installed")
+                elif package == 'cloudpickle':
+                    import cloudpickle
+                    print(f"✓ cloudpickle {cloudpickle.__version__} already installed")
+                elif package == 'pandas':
+                    import pandas
+                    print(f"✓ pandas {pandas.__version__} already installed")
+                elif package == 'numpy':
+                    import numpy
+                    print(f"✓ numpy {numpy.__version__} already installed")
+                elif package == 'xgboost':
+                    try:
+                        import xgboost
+                        print(f"✓ xgboost {xgboost.__version__} already installed")
+                    except ImportError:
+                        print("Installing xgboost...")
+                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'xgboost==1.6.2'])
+                elif package == 'catboost':
+                    try:
+                        import catboost
+                        print(f"✓ catboost {catboost.__version__} already installed")
+                    except ImportError:
+                        print("Installing catboost...")
+                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'catboost==1.2'])
+                elif package == 'lightgbm':
+                    try:
+                        import lightgbm
+                        print(f"✓ lightgbm {lightgbm.__version__} already installed")
+                    except ImportError:
+                        print("Installing lightgbm...")
+                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'lightgbm==3.3.5'])
+            except Exception as e:
+                print(f"Warning: Could not install/check {package}: {e}")
+        
+        print("All packages installed/verified successfully!")
         
         # Suppress warnings for cleaner output
         warnings.filterwarnings('ignore', category=UserWarning)
@@ -113,14 +91,7 @@ implementation:
         # XGBOOST MODEL BUILDER
         # ============================================================================
         def build_xgboost_model(config, task):
-            try:
-                import xgboost as xgb
-                XGB_INSTALLED = True
-            except ImportError:
-                XGB_INSTALLED = False
-            
-            if not XGB_INSTALLED:
-                raise ImportError(\"xgboost is not installed. Please install with: pip install xgboost\")
+            import xgboost as xgb
             
             # Base parameters with intelligent defaults
             base_params = {
@@ -173,14 +144,7 @@ implementation:
         # CATBOOST MODEL BUILDER
         # ============================================================================
         def build_catboost_model(config, task):
-            try:
-                from catboost import CatBoostClassifier, CatBoostRegressor
-                CATBOOST_INSTALLED = True
-            except ImportError:
-                CATBOOST_INSTALLED = False
-            
-            if not CATBOOST_INSTALLED:
-                raise ImportError(\"catboost is not installed. Please install with: pip install catboost\")
+            from catboost import CatBoostClassifier, CatBoostRegressor
             
             # CatBoost specific defaults
             base_params = {
@@ -239,14 +203,7 @@ implementation:
         # LIGHTGBM MODEL BUILDER
         # ============================================================================
         def build_lightgbm_model(config, task):
-            try:
-                import lightgbm as lgb
-                LGBM_INSTALLED = True
-            except ImportError:
-                LGBM_INSTALLED = False
-            
-            if not LGBM_INSTALLED:
-                raise ImportError(\"lightgbm is not installed. Please install with: pip install lightgbm\")
+            import lightgbm as lgb
             
             # LightGBM defaults
             base_params = {
@@ -384,14 +341,7 @@ implementation:
         # HIST GRADIENT BOOSTING MODEL BUILDER
         # ============================================================================
         def build_hist_gradient_boosting_model(config, task):
-            try:
-                from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-                HISTGB_INSTALLED = True
-            except ImportError:
-                HISTGB_INSTALLED = False
-            
-            if not HISTGB_INSTALLED:
-                raise ImportError(\"HistGradientBoosting requires scikit-learn >= 0.21. Install with: pip install -U scikit-learn\")
+            from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
             
             # HistGradientBoosting defaults
             base_params = {
@@ -437,30 +387,32 @@ implementation:
             parser.add_argument('--model_type', type=str, default='classification')
             parser.add_argument('--untrained_model', type=str, required=True)
             parser.add_argument('--model_metadata', type=str, required=True)
+            parser.add_argument('--config_updated', type=str, required=True)
+            parser.add_argument('--model_info_out', type=str, required=True)
             args = parser.parse_args()
             
             try:
-                print(\"=\"*80)
-                print(\"BOOSTING MODEL BUILDER v1.1\")
-                print(\"=\"*80)
+                print("="*80)
+                print("BOOSTING MODEL BUILDER")
+                print("="*80)
                 
                 # Parse configuration
                 try:
                     config = json.loads(args.config_json)
                 except json.JSONDecodeError as e:
-                    raise ValueError(f\"Invalid JSON in config_json: {e}\")
+                    raise ValueError(f"Invalid JSON in config_json: {e}")
                 
                 task = args.model_type.strip().lower()
                 if task not in ['classification', 'regression']:
-                    raise ValueError(f\"model_type must be 'classification' or 'regression', got: {task}\")
+                    raise ValueError(f"model_type must be 'classification' or 'regression', got: {task}")
                 
                 # Validate required fields
                 if 'algorithm' not in config:
-                    raise ValueError(\"config_json must contain 'algorithm' key\")
+                    raise ValueError("config_json must contain 'algorithm' key")
                 
                 algorithm = config['algorithm'].lower().strip()
-                print(f\"[INFO] Building {algorithm} model for {task} task\")
-                print(f\"[INFO] Configuration keys: {list(config.keys())}\")
+                print(f"Building {algorithm} model for {task} task")
+                print(f"Configuration keys: {list(config.keys())}")
                 
                 # Build model based on algorithm
                 algorithm_map = {
@@ -478,14 +430,14 @@ implementation:
                 
                 if algorithm not in algorithm_map:
                     available = list(algorithm_map.keys())
-                    raise ValueError(f\"Unsupported algorithm: {algorithm}. Available: {available}\")
+                    raise ValueError(f"Unsupported algorithm: {algorithm}. Available: {available}")
                 
                 try:
                     model, algo_name = algorithm_map[algorithm](config, task)
                 except ImportError as e:
-                    raise ImportError(f\"Failed to import required library for {algorithm}: {e}\")
+                    raise ImportError(f"Failed to import required library for {algorithm}: {e}")
                 except Exception as e:
-                    raise ValueError(f\"Failed to build {algorithm} model: {e}\")
+                    raise ValueError(f"Failed to build {algorithm} model: {e}")
                 
                 # Get model parameters for metadata
                 try:
@@ -493,7 +445,7 @@ implementation:
                 except:
                     model_params = {}
                 
-                # Create comprehensive metadata
+                # Create comprehensive metadata (original output)
                 metadata = {
                     'timestamp': datetime.utcnow().isoformat() + 'Z',
                     'algorithm': algo_name,
@@ -509,31 +461,77 @@ implementation:
                     )
                 }
                 
+                # Create model_info_out (matching working ModelBuilder format)
+                model_info = {
+                    'algorithm': algo_name,
+                    'task': task,
+                    'parameters': config,
+                    'status': 'initialized',
+                    'model_type': f"{algo_name} for {task}",
+                    'is_fitted': False,
+                    'model_class': model.__class__.__name__,
+                    'supports_early_stopping': metadata['supports_early_stopping'],
+                    'parameter_count': len(model_params)
+                }
+                
+                # Create config_updated (matching working ModelBuilder format)
+                config_updated = {
+                    'model': {
+                        'algorithm': algo_name,
+                        'task': task,
+                        'built': True,
+                        'fitted': False,
+                        'parameters': config,
+                        'model_type': f"{algo_name} for {task}",
+                        'supports_early_stopping': metadata['supports_early_stopping']
+                    },
+                    'pipeline': {
+                        'task': task,
+                        'status': 'model_built',
+                        'timestamp': datetime.utcnow().isoformat() + 'Z'
+                    },
+                    'original_config': config
+                }
+                
+                # Create parent directories for outputs
+                os.makedirs(os.path.dirname(args.untrained_model) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.model_metadata) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.config_updated) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.model_info_out) or ".", exist_ok=True)
+                
                 # Save untrained model
-                os.makedirs(os.path.dirname(args.untrained_model) or '.', exist_ok=True)
                 with open(args.untrained_model, 'wb') as f:
                     cloudpickle.dump(model, f)
-                print(f\"[INFO] Untrained model saved to: {args.untrained_model}\")
-                print(f\"[INFO] Model size: {os.path.getsize(args.untrained_model):,} bytes\")
+                print(f"Untrained model saved to: {args.untrained_model}")
+                print(f"Model size: {os.path.getsize(args.untrained_model):,} bytes")
                 
-                # Save metadata
-                os.makedirs(os.path.dirname(args.model_metadata) or '.', exist_ok=True)
+                # Save model_metadata (original output)
                 with open(args.model_metadata, 'w') as f:
                     json.dump(metadata, f, indent=2)
-                print(f\"[INFO] Model metadata saved to: {args.model_metadata}\")
+                print(f"Model metadata saved to: {args.model_metadata}")
+                
+                # Save config_updated (new output)
+                with open(args.config_updated, 'w') as f:
+                    json.dump(config_updated, f, indent=2)
+                print(f"Updated configuration saved to: {args.config_updated}")
+                
+                # Save model_info_out (new output)
+                with open(args.model_info_out, 'w') as f:
+                    json.dump(model_info, f, indent=2)
+                print(f"Model info saved to: {args.model_info_out}")
                 
                 # Print summary
-                print(f\"{'='*80}\")
-                print(\"MODEL BUILT SUCCESSFULLY\")
-                print(f\"{'='*80}\")
-                print(f\"Algorithm: {algo_name}\")
-                print(f\"Task: {task}\")
-                print(f\"Model class: {model.__class__.__name__}\")
-                print(f\"Parameters configured: {len(model_params)}\")
-                print(f\"Supports early stopping: {metadata['supports_early_stopping']}\")
+                print(f"{'='*80}")
+                print("MODEL BUILT SUCCESSFULLY")
+                print(f"{'='*80}")
+                print(f"Algorithm: {algo_name}")
+                print(f"Task: {task}")
+                print(f"Model class: {model.__class__.__name__}")
+                print(f"Parameters configured: {len(model_params)}")
+                print(f"Supports early stopping: {metadata['supports_early_stopping']}")
                 
                 # Print key parameters
-                print(\"\\nKey Parameters:\")
+                print("\nKey Parameters:")
                 key_params = ['n_estimators', 'max_depth', 'learning_rate', 'random_state', 
                              'subsample', 'colsample_bytree', 'num_leaves', 'iterations',
                              'max_iter', 'loss', 'objective']
@@ -542,18 +540,22 @@ implementation:
                     if param in model_params:
                         value = model_params[param]
                         if value is not None:
-                            print(f\"  {param}: {value}\")
+                            print(f"  {param}: {value}")
                 
-                print(f\"{'='*80}\")
+                print(f"\nOutputs generated:")
+                print(f"  1. untrained_model: {args.untrained_model}")
+                print(f"  2. model_metadata: {args.model_metadata}")
+                print(f"  3. config_updated: {args.config_updated}")
+                print(f"  4. model_info_out: {args.model_info_out}")
+                print(f"{'='*80}")
                 
             except Exception as e:
-                print(f\"ERROR: {e}\", file=sys.stderr)
+                print(f"ERROR: {e}", file=sys.stderr)
                 traceback.print_exc()
                 sys.exit(1)
         
-        if __name__ == \"__main__\":
+        if __name__ == "__main__":
             main()
-        "
     args:
       - --config_json
       - {inputValue: config_json}
@@ -563,3 +565,7 @@ implementation:
       - {outputPath: untrained_model}
       - --model_metadata
       - {outputPath: model_metadata}
+      - --config_updated
+      - {outputPath: config_updated}
+      - --model_info_out
+      - {outputPath: model_info_out}
