@@ -1,4 +1,4 @@
-name: Boosting Model Builder v1.1
+name: Boosting Model Builder v1.2
 inputs:
   - {name: config_json, type: String, description: "JSON string with model configuration. Must contain 'algorithm' key (xgboost, catboost, lightgbm, adaboost, gradient_boosting, hist_gradient_boosting)"}
   - {name: model_type, type: String, description: "classification or regression", optional: true, default: "classification"}
@@ -9,10 +9,106 @@ implementation:
   container:
     image: kumar2004/ml-base:v1
     command:
-      - python3
-      - -u
+      - sh
       - -c
       - |
+        # Function to check if package is installed
+        check_package() {
+          python3 -c "import $1" 2>/dev/null
+          if [ \$? -eq 0 ]; then
+            echo "✓ $1 is already installed"
+            return 0
+          else
+            echo "✗ $1 is NOT installed"
+            return 1
+          fi
+        }
+        
+        echo "================================================================"
+        echo "CHECKING REQUIRED PACKAGES..."
+        echo "================================================================"
+        
+        # List of packages to check/install
+        packages="xgboost lightgbm catboost sklearn"
+        
+        # Check each package
+        missing_packages=""
+        for pkg in \$packages; do
+          if ! check_package "\$pkg"; then
+            missing_packages="\$missing_packages \$pkg"
+          fi
+        done
+        
+        # Install missing packages
+        if [ -n "\$missing_packages" ]; then
+          echo ""
+          echo "Installing missing packages: \$missing_packages"
+          echo "================================================================"
+          
+          pip install --no-cache-dir --upgrade pip
+          
+          # Map package names to pip install names
+          if [[ "\$missing_packages" == *"xgboost"* ]]; then
+            echo "Installing XGBoost..."
+            pip install --no-cache-dir xgboost==1.6.2
+          fi
+          
+          if [[ "\$missing_packages" == *"lightgbm"* ]]; then
+            echo "Installing LightGBM..."
+            pip install --no-cache-dir lightgbm==3.3.5
+          fi
+          
+          if [[ "\$missing_packages" == *"catboost"* ]]; then
+            echo "Installing CatBoost..."
+            pip install --no-cache-dir catboost==1.2
+          fi
+          
+          if [[ "\$missing_packages" == *"sklearn"* ]]; then
+            echo "Installing scikit-learn..."
+            pip install --no-cache-dir scikit-learn==1.0.2
+          fi
+          
+          # Install core dependencies that might be needed
+          echo "Ensuring core dependencies..."
+          pip install --no-cache-dir \
+            numpy>=1.21.0 \
+            pandas>=1.3.0 \
+            scipy>=1.7.0 \
+            cloudpickle>=2.0.0
+          
+          echo "================================================================"
+          echo "INSTALLATION COMPLETE"
+          echo "================================================================"
+        else
+          echo ""
+          echo "================================================================"
+          echo "ALL REQUIRED PACKAGES ARE ALREADY INSTALLED!"
+          echo "================================================================"
+        fi
+        
+        # Verify all packages are now available
+        echo ""
+        echo "FINAL VERIFICATION..."
+        echo "================================================================"
+        python3 -c "
+        import sys
+        packages = ['xgboost', 'lightgbm', 'catboost', 'sklearn']
+        for pkg in packages:
+            try:
+                if pkg == 'sklearn':
+                    import sklearn
+                    print(f'✓ sklearn {sklearn.__version__} available')
+                else:
+                    __import__(pkg)
+                    print(f'✓ {pkg} available')
+            except ImportError as e:
+                print(f'✗ ERROR: {pkg} not available: {e}')
+                sys.exit(1)
+        print('✓ All packages verified successfully!')
+        "
+        
+        # Now run the main Python script
+        python3 -u -c "
         import argparse, os, sys, json, traceback, warnings, cloudpickle
         from datetime import datetime
         import numpy as np
@@ -466,6 +562,7 @@ implementation:
         
         if __name__ == "__main__":
             main()
+        "
     args:
       - --config_json
       - {inputValue: config_json}
