@@ -1,4 +1,4 @@
-name: Boosting Trainer v1.4
+name: Boosting Trainer v1.5
 inputs:
   # Required inputs
   - name: train_X
@@ -115,12 +115,10 @@ implementation:
         # ============================================================================
         
         def load_model(model_path):
-            """Load model from cloudpickle"""
             with open(model_path, 'rb') as f:
                 return cloudpickle.load(f)
         
         def prepare_data(X, y, model_type, validation_split, random_state):
-            """Split data into train/validation sets"""
             if validation_split > 0 and validation_split < 1:
                 X_train, X_val, y_train, y_val = train_test_split(
                     X, y, test_size=validation_split, random_state=random_state,
@@ -133,7 +131,6 @@ implementation:
                 return X, y, None, None, False
         
         def train_with_early_stopping(model, X_train, y_train, X_val, y_val, early_stopping_rounds):
-            """Train model with early stopping if supported"""
             model_name = model.__class__.__name__.lower()
             
             if early_stopping_rounds > 0 and X_val is not None and y_val is not None:
@@ -177,7 +174,6 @@ implementation:
             return model
         
         def compute_metrics(model, X, y_true, model_type, dataset_name="train"):
-            """Compute metrics for model evaluation"""
             metrics = {}
             
             try:
@@ -500,7 +496,7 @@ implementation:
                 if multi_output:
                     print(f"Targets: {len(target_cols)}")
                 
-                print(f"\nMetrics Summary:")
+                print(f"\\nMetrics Summary:")
                 if model_type == 'classification':
                     print(f"  Training Accuracy: {final_metrics.get('train_accuracy', 0):.4f}")
                     if has_val:
@@ -510,7 +506,7 @@ implementation:
                     if has_val:
                         print(f"  Validation R²: {final_metrics.get('val_r2', 0):.4f}")
                 
-                print(f"\nOutputs generated (4 files):")
+                print(f"\\nOutputs generated (4 files):")
                 print(f"  1. trained_model: {args.trained_model}")
                 print(f"  2. training_metrics: {args.training_metrics}")
                 print(f"  3. trained_model_metadata: {args.trained_model_metadata}")
