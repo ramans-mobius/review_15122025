@@ -1,4 +1,4 @@
-name: Boosting Model Builder v1.0
+name: Boosting Model Builder v1.1
 description: Builds boosting models (xgboost, catboost, lightgbm, adaboost, gradient_boosting, hist_gradient_boosting)
 inputs:
   - name: config_json
@@ -531,7 +531,7 @@ implementation:
                 print(f"Supports early stopping: {metadata['supports_early_stopping']}")
                 
                 # Print key parameters
-                print("\nKey Parameters:")
+                print("\\nKey Parameters:")
                 key_params = ['n_estimators', 'max_depth', 'learning_rate', 'random_state', 
                              'subsample', 'colsample_bytree', 'num_leaves', 'iterations',
                              'max_iter', 'loss', 'objective']
