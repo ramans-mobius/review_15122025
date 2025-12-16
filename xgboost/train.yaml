@@ -1,4 +1,4 @@
-name: Boosting Trainer v2.1
+name: Boosting Trainer v2.2
 description: "Unified boosting trainer with all outputs from both Boosting Trainer v1.2 and Trainer bricks"
 inputs:
   - name: train_X
@@ -29,22 +29,21 @@ inputs:
     type: String
     description: "classification or regression"
     optional: true
-    default: "classification"
   - name: early_stopping_rounds
     type: Integer
     description: "Early stopping rounds (0 to disable)"
     optional: true
-    default: "10"
+    default: 10
   - name: validation_split
     type: Float
     description: "Validation split for early stopping (0-1)"
     optional: true
-    default: "0.1"
+    default: 0.1
   - name: random_state
     type: Integer
     description: "Random seed"
     optional: true
-    default: "42"
+    default: 42
 
 outputs:
   # Original Boosting Trainer v1.2 outputs
@@ -150,7 +149,6 @@ implementation:
                 return cloudpickle.load(f)
         
         def prepare_data_for_training(X, y, model_type, validation_split, random_state, test_X=None, test_y=None):
-            """Prepare data for training with optional validation split"""
             has_test_data = test_X is not None and test_y is not None
             
             if has_test_data:
@@ -177,7 +175,6 @@ implementation:
             return X_train, y_train, X_val, y_val, has_val
         
         def train_with_early_stopping(model, X_train, y_train, X_val, y_val, early_stopping_rounds, model_type):
-            """Train model with early stopping if supported"""
             model_name = model.__class__.__name__.lower()
             
             if early_stopping_rounds > 0 and X_val is not None and y_val is not None:
@@ -221,7 +218,6 @@ implementation:
             return model
         
         def compute_metrics(model, X, y_true, model_type, dataset_name="train"):
-            """Compute metrics for model evaluation"""
             metrics = {}
             
             try:
@@ -276,7 +272,6 @@ implementation:
             return metrics
         
         def get_feature_importances(model, feature_names=None):
-            """Extract feature importances from model"""
             importances = []
             
             if hasattr(model, 'feature_importances_'):
@@ -305,7 +300,6 @@ implementation:
             return importances
         
         def get_epoch_data(model, X_train, y_train, X_val, y_val, model_type, n_estimators=100):
-            """Create epoch data for training history"""
             train_metrics = compute_metrics(model, X_train, y_train, model_type, "train")
             val_metrics = compute_metrics(model, X_val, y_val, model_type, "val") if X_val is not None else {}
             
@@ -704,7 +698,7 @@ implementation:
                 if multi_output:
                     print(f"Targets: {len(target_cols)}")
                 
-                print(f"\nOutputs generated (8 files):")
+                print(f"\\nOutputs generated (8 files):")
                 print(f"  1. trained_model: {args.trained_model}")
                 print(f"  2. training_metrics: {args.training_metrics}")
                 print(f"  3. trained_model_metadata: {args.trained_model_metadata}")
