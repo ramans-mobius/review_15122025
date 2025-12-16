@@ -1,4 +1,4 @@
-name: Boosting Training Brick v2.5
+name: Boosting Training Brick v2.6
 description: Generic training brick for boosting models with GPU/CPU support
 inputs:
   - {name: train_X, type: Dataset, description: "Final training features (after feature selection/PCA)"}
@@ -447,7 +447,7 @@ implementation:
                     if 'r2' in val_metrics:
                         print(f"Validation R²: {val_metrics['r2']:.4f}")
                 
-                print(f"\nOutputs generated:")
+                print(f"\\nOutputs generated:")
                 print(f"  1. trained_model: {args.trained_model}")
                 print(f"  2. training_metadata: {args.training_metadata}")
                 print(f"  3. validation_metrics: {args.validation_metrics}")
