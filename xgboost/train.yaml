@@ -1,4 +1,4 @@
-name: Boosting Training Brick v2.1
+name: Boosting Training Brick v2.2
 description: Generic training brick for boosting models with GPU/CPU support
 inputs:
   - {name: train_X, type: Dataset, description: "Final training features (after feature selection/PCA)"}
@@ -335,7 +335,7 @@ implementation:
         # ============================================================================
         # METRICS CALCULATION
         # ============================================================================
-        def calculate_metrics(model, X, y_true, task, model_name="")
+        def calculate_metrics(model, X, y_true, task, model_name=""):
             metrics = {}
             
             try:
