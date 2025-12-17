@@ -1,0 +1,357 @@
+name: Trainer
+description: Trains boosting model using unified configuration with enhanced schema outputs
+inputs:
+  - name: processed_train_X
+    type: Dataset
+    description: 'Preprocessed training features'
+  - name: processed_train_y
+    type: Dataset
+    description: 'Preprocessed training target'
+  - name: config_str
+    type: String
+    description: 'Unified configuration JSON string'
+outputs:
+  - name: trained_model
+    type: Model
+  - name: training_history
+    type: String
+  - name: model_coefficients
+    type: String
+  - name: epoch_loss
+    type: String
+  - name: schema_training_metrics
+    type: String
+    description: 'Training metrics formatted specifically for schema updates'
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v38-gpu
+    command:
+      - sh
+      - -c
+      - |
+        python3 -m pip install --quiet xgboost catboost lightgbm
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import sys, os, pickle, json, pandas as pd, numpy as np
+        from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, log_loss
+        from sklearn.ensemble import GradientBoostingRegressor, AdaBoostRegressor, GradientBoostingClassifier, AdaBoostClassifier
+        from sklearn.model_selection import cross_val_score, train_test_split
+        import argparse
+
+        print("STARTING UNIFIED BOOSTING TRAINER")
+
+        # Import optional packages
+        try:
+            from xgboost import XGBRegressor, XGBClassifier
+            print("XGBoost available")
+        except ImportError:
+            XGBRegressor, XGBClassifier = None, None
+            print("XGBoost not available")
+        try:
+            from catboost import CatBoostRegressor, CatBoostClassifier
+            print("CatBoost available")
+        except ImportError:
+            CatBoostRegressor, CatBoostClassifier = None, None
+            print("CatBoost not available")
+        try:
+            from lightgbm import LGBMRegressor, LGBMClassifier
+            print("LightGBM available")
+        except ImportError:
+            LGBMRegressor, LGBMClassifier = None, None
+            print("LightGBM not available")
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--processed_train_X', type=str, required=True)
+        parser.add_argument('--processed_train_y', type=str, required=True)
+        parser.add_argument('--config_str', type=str, required=True)
+        parser.add_argument('--trained_model', type=str, required=True)
+        parser.add_argument('--training_history', type=str, required=True)
+        parser.add_argument('--model_coefficients', type=str, required=True)
+        parser.add_argument('--epoch_loss', type=str, required=True)
+        parser.add_argument('--schema_training_metrics', type=str, required=True)
+        args = parser.parse_args()
+
+        # Load preprocessed training data
+        with open(args.processed_train_X, 'rb') as f:
+            train_X_dict = pickle.load(f)
+        with open(args.processed_train_y, 'rb') as f:
+            train_y_dict = pickle.load(f)
+        
+        # Extract data
+        X_train_full = train_X_dict['X']
+        y_train_full = train_y_dict['y']
+        feature_names = train_X_dict['feature_names']
+        target_name = train_y_dict['target_name']
+        task_type = train_y_dict['task_type']
+        
+        # Load config
+        config = json.loads(args.config_str)
+        model_config = config.get('model', {})
+        training_config = config.get('training', {})
+        algorithm = model_config.get('algorithm', 'GradientBoosting')
+        task = config.get('pipeline', {}).get('task', 'classification')
+        parameters = model_config.get('parameters', {})
+
+        print(f'Training {algorithm} for {task} on {X_train_full.shape[0]} samples')
+        print(f'Training data shape: {X_train_full.shape}')
+        print(f'Target: {target_name}')
+        print(f'Unique classes in y_train: {np.unique(y_train_full)}')
+        print(f'Number of classes: {len(np.unique(y_train_full))}')
+
+        # Create a validation split from training data
+        # This is for evaluation during training, not for final testing
+        val_size = training_config.get('validation_size', 0.2)
+        random_state = training_config.get('random_state', 42)
+        
+        if task == 'classification' and len(np.unique(y_train_full)) > 1:
+            stratify = y_train_full
+        else:
+            stratify = None
+            
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train_full, y_train_full, 
+            test_size=val_size, 
+            random_state=random_state,
+            stratify=stratify
+        )
+        
+        print(f'Train/Validation split: {len(X_train)} train, {len(X_val)} validation')
+
+        # Algorithm mapping
+        algorithm_map = {
+            'regression': {
+                'GradientBoosting': GradientBoostingRegressor,
+                'AdaBoost': AdaBoostRegressor,
+                'XGBoost': XGBRegressor if XGBRegressor else None,
+                'CatBoost': CatBoostRegressor if CatBoostRegressor else None,
+                'LightGBM': LGBMRegressor if LGBMRegressor else None
+            },
+            'classification': {
+                'GradientBoosting': GradientBoostingClassifier,
+                'AdaBoost': AdaBoostClassifier,
+                'XGBoost': XGBClassifier if XGBClassifier else None,
+                'CatBoost': CatBoostClassifier if CatBoostClassifier else None,
+                'LightGBM': LGBMClassifier if LGBMClassifier else None
+            }
+        }
+
+        if algorithm not in algorithm_map[task] or algorithm_map[task][algorithm] is None:
+            available = list(algorithm_map[task].keys())
+            raise ValueError(f'Algorithm {algorithm} not available for {task}. Available: {available}')
+
+        model_class = algorithm_map[task][algorithm]
+
+        # Set default parameters
+        default_params = {
+            'GradientBoosting': {'n_estimators': 100, 'learning_rate': 0.1, 'max_depth': 3, 'random_state': 42},
+            'AdaBoost': {'n_estimators': 50, 'learning_rate': 1.0, 'random_state': 42},
+            'XGBoost': {'n_estimators': 100, 'learning_rate': 0.1, 'max_depth': 6, 'random_state': 42},
+            'CatBoost': {'iterations': 100, 'learning_rate': 0.1, 'depth': 6, 'random_state': 42, 'verbose': False},
+            'LightGBM': {'n_estimators': 100, 'learning_rate': 0.1, 'max_depth': -1, 'random_state': 42}
+        }
+
+        final_params = {**default_params.get(algorithm, {}), **parameters}
+        
+        # For XGBoost classification, handle multi-class properly
+        if algorithm == 'XGBoost' and task == 'classification':
+            n_classes = len(np.unique(y_train))
+            if n_classes > 2:
+                final_params['objective'] = 'multi:softprob'
+                final_params['eval_metric'] = 'mlogloss'
+            else:
+                final_params['objective'] = 'binary:logistic'
+                final_params['eval_metric'] = 'logloss'
+
+        print(f'Training with parameters: {final_params}')
+
+        # Train model
+        model = model_class(**final_params)
+        model.fit(X_train, y_train)
+        print("Model training completed successfully")
+
+        # Predictions on training and validation sets
+        y_pred_train = model.predict(X_train)
+        y_pred_val = model.predict(X_val)
+
+        # Calculate metrics based on task
+        if task == 'regression':
+            train_metrics = {
+                'r2_score': float(r2_score(y_train, y_pred_train)),
+                'mae': float(mean_absolute_error(y_train, y_pred_train)),
+                'rmse': float(np.sqrt(mean_squared_error(y_train, y_pred_train))),
+                'mse': float(mean_squared_error(y_train, y_pred_train))
+            }
+            val_metrics = {
+                'r2_score': float(r2_score(y_val, y_pred_val)),
+                'mae': float(mean_absolute_error(y_val, y_pred_val)),
+                'rmse': float(np.sqrt(mean_squared_error(y_val, y_pred_val))),
+                'mse': float(mean_squared_error(y_val, y_pred_val))
+            }
+            # Calculate loss values for schema
+            train_loss = train_metrics['mse']
+            val_loss = val_metrics['mse']
+            train_accuracy = train_metrics['r2_score']
+            val_accuracy = val_metrics['r2_score']
+        else:
+            # Classification metrics
+            n_classes = len(np.unique(y_train))
+            
+            train_metrics = {
+                'accuracy': float(accuracy_score(y_train, y_pred_train)),
+                'precision': float(precision_score(y_train, y_pred_train, average='weighted', zero_division=0)),
+                'recall': float(recall_score(y_train, y_pred_train, average='weighted', zero_division=0)),
+                'f1_score': float(f1_score(y_train, y_pred_train, average='weighted', zero_division=0))
+            }
+            val_metrics = {
+                'accuracy': float(accuracy_score(y_val, y_pred_val)),
+                'precision': float(precision_score(y_val, y_pred_val, average='weighted', zero_division=0)),
+                'recall': float(recall_score(y_val, y_pred_val, average='weighted', zero_division=0)),
+                'f1_score': float(f1_score(y_val, y_pred_val, average='weighted', zero_division=0))
+            }
+            
+            # Calculate loss values for schema
+            if hasattr(model, 'predict_proba'):
+                y_pred_proba_train = model.predict_proba(X_train)
+                y_pred_proba_val = model.predict_proba(X_val)
+                train_loss = float(log_loss(y_train, y_pred_proba_train))
+                val_loss = float(log_loss(y_val, y_pred_proba_val))
+                
+                # Handle ROC AUC for multi-class classification
+                try:
+                    if n_classes == 2:
+                        # Binary classification
+                        train_metrics['roc_auc'] = float(roc_auc_score(y_train, y_pred_proba_train[:, 1]))
+                        val_metrics['roc_auc'] = float(roc_auc_score(y_val, y_pred_proba_val[:, 1]))
+                    else:
+                        # Multi-class classification
+                        train_metrics['roc_auc'] = float(roc_auc_score(y_train, y_pred_proba_train, multi_class='ovr', average='weighted'))
+                        val_metrics['roc_auc'] = float(roc_auc_score(y_val, y_pred_proba_val, multi_class='ovr', average='weighted'))
+                except Exception as e:
+                    print(f"ROC AUC calculation failed: {e}")
+                    train_metrics['roc_auc'] = 0.0
+                    val_metrics['roc_auc'] = 0.0
+            else:
+                # If model doesn't have predict_proba, use simple accuracy-based loss
+                train_loss = 1 - train_metrics['accuracy']
+                val_loss = 1 - val_metrics['accuracy']
+                train_metrics['roc_auc'] = 0.0
+                val_metrics['roc_auc'] = 0.0
+            
+            train_accuracy = train_metrics['accuracy']
+            val_accuracy = val_metrics['accuracy']
+
+        # Create epoch data (simplified for now)
+        n_estimators = final_params.get('n_estimators', final_params.get('iterations', 100))
+        epoch_data = [{
+            'epoch': n_estimators,
+            'loss': train_loss,
+            'accuracy': train_accuracy,
+            'validation_loss': val_loss,
+            'validation_accuracy': val_accuracy
+        }]
+
+        # Feature importances
+        if hasattr(model, 'feature_importances_'):
+            importances = model.feature_importances_
+            coefficients_data = []
+            for name, importance in zip(feature_names, importances):
+                coefficients_data.append({
+                    'feature': name,
+                    'importance': float(importance),
+                    'importance_percent': float(importance * 100)
+                })
+        else:
+            coefficients_data = [{'feature': name, 'importance': 0, 'importance_percent': 0} for name in feature_names]
+
+        # Enhanced training history for schema compatibility
+        history = {
+            'algorithm': algorithm,
+            'task': task,
+            'target_name': target_name,
+            'parameters': final_params,
+            'train_metrics': train_metrics,
+            'validation_metrics': val_metrics,
+            'feature_importances': coefficients_data,
+            'training_samples': len(X_train),
+            'validation_samples': len(X_val),
+            'total_samples': len(X_train_full),
+            'feature_names': feature_names,
+            'n_classes': n_classes if task == 'classification' else None,
+            # Schema-compatible fields
+            'epoch': n_estimators,
+            'loss': train_loss,
+            'accuracy': train_accuracy,
+            'validation_loss': val_loss,
+            'validation_accuracy': val_accuracy,
+            'custom_metrics': val_metrics
+        }
+
+        # Create schema-specific metrics
+        schema_metrics = {
+            'epoch': n_estimators,
+            'loss': train_loss,
+            'accuracy': train_accuracy,
+            'validation_loss': val_loss,
+            'validation_accuracy': val_accuracy,
+            # Include individual metrics
+            'test_accuracy': val_metrics['accuracy'],
+            'test_precision': val_metrics.get('precision', 0),
+            'test_recall': val_metrics.get('recall', 0),
+            'test_f1_score': val_metrics.get('f1_score', 0),
+            'test_roc_auc': val_metrics.get('roc_auc', 0),
+            'algorithm': algorithm,
+            'task': task,
+            'target_name': target_name,
+            'n_estimators': n_estimators,
+            'feature_count': len(feature_names),
+            'train_samples': len(X_train),
+            'validation_samples': len(X_val)
+        }
+
+        # Save outputs
+        os.makedirs(os.path.dirname(args.trained_model) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.training_history) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.model_coefficients) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.epoch_loss) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.schema_training_metrics) or ".", exist_ok=True)
+        
+        with open(args.trained_model, 'wb') as f:
+            pickle.dump(model, f)
+        with open(args.training_history, 'w') as f:
+            json.dump(history, f, indent=2)
+        with open(args.epoch_loss, 'w') as f:
+            json.dump(epoch_data, f, indent=2)
+        with open(args.schema_training_metrics, 'w') as f:
+            json.dump(schema_metrics, f, indent=2)
+        coefficients_df = pd.DataFrame(coefficients_data)
+        with open(args.model_coefficients, 'w') as f:
+            coefficients_df.to_csv(f, index=False)
+        
+        print(f"Training completed for {task}")
+        print(f"Target: {target_name}")
+        print(f"Number of classes: {n_classes if task == 'classification' else 'N/A'}")
+        print(f"Final training loss: {train_loss:.4f}, accuracy: {train_accuracy:.4f}")
+        print(f"Final validation loss: {val_loss:.4f}, accuracy: {val_accuracy:.4f}")
+        print(f"Validation metrics: {val_metrics}")
+        print(f"Schema metrics saved: {schema_metrics}")
+    args:
+      - --processed_train_X
+      - {inputPath: processed_train_X}
+      - --processed_train_y
+      - {inputPath: processed_train_y}
+      - --config_str
+      - {inputValue: config_str}
+      - --trained_model
+      - {outputPath: trained_model}
+      - --training_history
+      - {outputPath: training_history}
+      - --model_coefficients
+      - {outputPath: model_coefficients}
+      - --epoch_loss
+      - {outputPath: epoch_loss}
+      - --schema_training_metrics
+      - {outputPath: schema_training_metrics}
