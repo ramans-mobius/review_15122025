@@ -1,9 +1,9 @@
-name: Images Load Data
+name: Image Load Data
 description: Downloads ZIP file from CDN containing UI component images, analyzes contents, and prepares train/test datasets.
 inputs:
-  - {name: cdn_url, type: String, description: 'CDN URL to download ZIP file (use %24%24 for $$)'}
-  - {name: train_split, type: Float, description: 'Train split ratio (default 0.7)'}
-  - {name: shuffle_seed, type: Integer, description: 'Random seed for shuffling'}
+  - {name: cdn_url, type: String, description: 'CDN URL to download ZIP file'}
+  - {name: train_split, type: Float, default: '0.7', description: 'Train split ratio'}
+  - {name: shuffle_seed, type: Integer, default: '42', description: 'Random seed for shuffling'}
 outputs:
   - {name: train_x, type: Artifact, description: 'Training images data'}
   - {name: train_y, type: Artifact, description: 'Training labels'}
@@ -13,15 +13,33 @@ outputs:
   - {name: zip_analysis_report, type: Artifact, description: 'Detailed ZIP file contents analysis'}
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v38-gpu
-    command:
-      - sh
+    image: gurpreetgandhi/nesy-factory:v19
+    command: 
+      - python
       - -c
       - |
-        python -c "
-        import sys, os, pickle, json, base64, io, zipfile, numpy as np, textwrap, datetime
+        import argparse
+        import sys
+        import os
+        
+        # Parse arguments
+        parser = argparse.ArgumentParser(description='Load UI Components Dataset')
+        parser.add_argument('--cdn_url', type=str, required=True)
+        parser.add_argument('--train_split', type=float, default=0.7)
+        parser.add_argument('--shuffle_seed', type=int, default=42)
+        parser.add_argument('--train_x_path', type=str, required=True)
+        parser.add_argument('--train_y_path', type=str, required=True)
+        parser.add_argument('--test_x_path', type=str, required=True)
+        parser.add_argument('--test_y_path', type=str, required=True)
+        parser.add_argument('--dataset_info_path', type=str, required=True)
+        parser.add_argument('--zip_analysis_path', type=str, required=True)
+        
+        # Parse from sys.argv
+        args = parser.parse_args()
+        
+        # Now run the actual script
+        import pickle, json, base64, io, zipfile, numpy as np, textwrap, datetime
         from collections import Counter, defaultdict
-        from torch.utils.data import random_split
         import torch
         import requests
         from urllib.parse import unquote
@@ -32,97 +50,9 @@ implementation:
         warnings.filterwarnings('ignore', category=UserWarning)
         
         print('Starting dataset download and analysis...')
-        
-        # Get args
-        cdn_url = sys.argv[1]
-        train_split = float(sys.argv[2])
-        shuffle_seed = int(sys.argv[3])
-        train_x_path = sys.argv[4]
-        train_y_path = sys.argv[5]
-        test_x_path = sys.argv[6]
-        test_y_path = sys.argv[7]
-        dataset_info_path = sys.argv[8]
-        zip_analysis_path = sys.argv[9]
-        
-        print(f'CDN URL: {cdn_url}')
-        print(f'Train split: {train_split}')
-        print(f'Shuffle seed: {shuffle_seed}')
-        
-        # Download and extract function with analysis
-        def analyze_zip_contents(zip_file):
-          
-            all_files = zip_file.namelist()
-            analysis = {
-                'total_files': len(all_files),
-                'file_types': defaultdict(int),
-                'folder_structure': defaultdict(list),
-                'png_files': [],
-                'non_png_files': [],
-                'corrupted_files': [],
-                'image_metadata': [],
-                'class_distribution_raw': defaultdict(int),
-                'hierarchy': defaultdict(lambda: defaultdict(list))
-            }
-            
-            # Analyze file types
-            for file_path in all_files:
-                # Determine file type
-                if file_path.lower().endswith('.png'):
-                    analysis['file_types']['png'] += 1
-                    analysis['png_files'].append(file_path)
-                    
-                    # Try to get image metadata
-                    try:
-                        with zip_file.open(file_path) as img_file:
-                            img_data = img_file.read()
-                            img = Image.open(io.BytesIO(img_data))
-                            analysis['image_metadata'].append({
-                                'path': file_path,
-                                'size': len(img_data),
-                                'format': img.format,
-                                'mode': img.mode,
-                                'width': img.width,
-                                'height': img.height,
-                                'class': file_path.split('/')[1] if len(file_path.split('/')) >= 3 else 'unknown'
-                            })
-                            img.close()
-                    except Exception as e:
-                        analysis['corrupted_files'].append({
-                            'path': file_path,
-                            'error': str(e)
-                        })
-                elif file_path.lower().endswith('.txt'):
-                    analysis['file_types']['txt'] += 1
-                    analysis['non_png_files'].append(file_path)
-                elif file_path.lower().endswith('.json'):
-                    analysis['file_types']['json'] += 1
-                    analysis['non_png_files'].append(file_path)
-                elif file_path.lower().endswith('.xml'):
-                    analysis['file_types']['xml'] += 1
-                    analysis['non_png_files'].append(file_path)
-                elif file_path.endswith('/'):
-                    analysis['file_types']['directory'] += 1
-                else:
-                    ext = os.path.splitext(file_path)[1].lower()
-                    if ext:
-                        analysis['file_types'][ext[1:]] += 1
-                    else:
-                        analysis['file_types']['no_extension'] += 1
-                    analysis['non_png_files'].append(file_path)
-                
-                # Analyze folder structure
-                parts = file_path.split('/')
-                for i in range(1, len(parts)):
-                    folder = '/'.join(parts[:i]) + '/'
-                    analysis['folder_structure'][folder].append(file_path)
-                
-                # Analyze class distribution from path
-                if len(parts) >= 3 and parts[0] == 'Classification_dataset':
-                    class_name = parts[1]
-                    analysis['class_distribution_raw'][class_name] += 1
-                    analysis['hierarchy'][parts[0]][class_name].append(file_path)
-            
-            return analysis
+        print(f'CDN URL: {args.cdn_url}')
+        print(f'Train split: {args.train_split}')
+        print(f'Shuffle seed: {args.shuffle_seed}')
         
         def download_and_extract_zip(url):
             decoded_url = unquote(url)
@@ -138,111 +68,41 @@ implementation:
             filenames = []
             
             with zipfile.ZipFile(zip_content, 'r') as zip_file:
-                # Analyze ZIP contents
-                zip_analysis = analyze_zip_contents(zip_file)
-                
-                # Process PNG files for dataset
-                png_files = [f for f in zip_analysis['png_files'] 
-                           if len(f.split('/')) >= 3 and f.split('/')[0] == 'Classification_dataset']
-                
-                print(f'Found {len(png_files)} valid PNG files for dataset')
+                all_files = zip_file.namelist()
+                png_files = [f for f in all_files if f.lower().endswith('.png')]
+                print(f'Found {len(png_files)} PNG files out of {len(all_files)} total files')
                 
                 for file_path in png_files:
                     parts = file_path.split('/')
-                    label = parts[1]
-                    
-                    try:
-                        with zip_file.open(file_path) as image_file:
-                            image_data = image_file.read()
-                            base64_image = base64.b64encode(image_data).decode('utf-8')
-                            
-                            images.append(base64_image)
-                            labels.append(label)
-                            filenames.append(file_path)
-                    except Exception as e:
-                        print(f'Warning: Could not read {file_path}: {e}')
+                    if len(parts) >= 3 and parts[0] == 'Classification_dataset':
+                        label = parts[1]
+                        
+                        try:
+                            with zip_file.open(file_path) as image_file:
+                                image_data = image_file.read()
+                                base64_image = base64.b64encode(image_data).decode('utf-8')
+                                
+                                images.append(base64_image)
+                                labels.append(label)
+                                filenames.append(file_path)
+                        except Exception as e:
+                            print(f'Warning: Could not read {file_path}: {e}')
             
-            return images, labels, filenames, zip_analysis
+            return images, labels, filenames, all_files
 
         # Download and process
-        all_images, all_labels, all_filenames, zip_analysis = download_and_extract_zip(cdn_url)
+        all_images, all_labels, all_filenames, all_files = download_and_extract_zip(args.cdn_url)
         
         if not all_images:
             raise Exception('No valid images found in ZIP file')
-
-        # Create detailed analysis report
-        def create_analysis_report(zip_analysis, all_labels):
-            report = {
-                'timestamp': datetime.datetime.now().isoformat(),
-                'summary': {
-                    'total_files_in_zip': zip_analysis['total_files'],
-                    'valid_dataset_images': len(all_images),
-                    'total_classes': len(set(all_labels)),
-                    'file_type_breakdown': dict(zip_analysis['file_types']),
-                    'folder_count': len(zip_analysis['folder_structure']),
-                    'corrupted_files': len(zip_analysis['corrupted_files'])
-                },
-                'folder_analysis': {
-                    'top_level_folders': list(set([f.split('/')[0] for f in zip_analysis['png_files'] if '/' in f])),
-                    'folder_depth_distribution': defaultdict(int),
-                    'folder_sizes': {}
-                },
-                'image_analysis': {
-                    'total_png_files': len(zip_analysis['png_files']),
-                    'image_dimensions': defaultdict(int),
-                    'image_modes': defaultdict(int),
-                    'size_distribution': {
-                        'min': min([img['size'] for img in zip_analysis['image_metadata']]) if zip_analysis['image_metadata'] else 0,
-                        'max': max([img['size'] for img in zip_analysis['image_metadata']]) if zip_analysis['image_metadata'] else 0,
-                        'avg': np.mean([img['size'] for img in zip_analysis['image_metadata']]) if zip_analysis['image_metadata'] else 0
-                    }
-                },
-                'class_details': {
-                    'classes_present': sorted(list(set(all_labels))),
-                    'class_distribution': dict(Counter(all_labels)),
-                    'samples_per_class_min': min(Counter(all_labels).values()) if all_labels else 0,
-                    'samples_per_class_max': max(Counter(all_labels).values()) if all_labels else 0,
-                    'samples_per_class_avg': np.mean(list(Counter(all_labels).values())) if all_labels else 0
-                },
-                'hierarchy_structure': dict(zip_analysis['hierarchy']),
-                'detailed_file_list': {
-                    'png_files_sample': zip_analysis['png_files'][:20] if len(zip_analysis['png_files']) > 20 else zip_analysis['png_files'],
-                    'non_png_files_sample': zip_analysis['non_png_files'][:10] if len(zip_analysis['non_png_files']) > 10 else zip_analysis['non_png_files'],
-                    'corrupted_files': zip_analysis['corrupted_files'][:5] if len(zip_analysis['corrupted_files']) > 5 else zip_analysis['corrupted_files']
-                },
-                'quality_metrics': {
-                    'valid_for_training_ratio': len(all_images) / zip_analysis['total_files'] if zip_analysis['total_files'] > 0 else 0,
-                    'class_balance_score': min(Counter(all_labels).values()) / max(Counter(all_labels).values()) if all_labels and max(Counter(all_labels).values()) > 0 else 0,
-                    'avg_image_size_kb': np.mean([img['size'] / 1024 for img in zip_analysis['image_metadata']]) if zip_analysis['image_metadata'] else 0
-                }
-            }
-            
-            # Calculate folder depth
-            for file_path in zip_analysis['png_files']:
-                depth = len([p for p in file_path.split('/') if p])
-                report['folder_analysis']['folder_depth_distribution'][depth] += 1
-            
-            # Calculate folder sizes
-            for folder, files in zip_analysis['folder_structure'].items():
-                if folder:
-                    report['folder_analysis']['folder_sizes'][folder] = len(files)
-            
-            # Analyze image dimensions
-            for img_meta in zip_analysis['image_metadata']:
-                dim_key = f\"{img_meta['width']}x{img_meta['height']}\"
-                report['image_analysis']['image_dimensions'][dim_key] += 1
-                report['image_analysis']['image_modes'][img_meta['mode']] += 1
-            
-            return report
         
-        # Create the analysis report
-        analysis_report = create_analysis_report(zip_analysis, all_labels)
+        print(f'Successfully extracted {len(all_images)} images with labels')
         
         # Create dataset info
         unique_labels = sorted(list(set(all_labels)))
         label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
         label_indices = [label_to_idx[label] for label in all_labels]
-
+        
         dataset_info = {
             'total_samples': len(all_images),
             'classes': unique_labels,
@@ -250,132 +110,82 @@ implementation:
             'label_to_idx': label_to_idx,
             'idx_to_label': {idx: label for label, idx in label_to_idx.items()},
             'output_dim': len(unique_labels),
-            'train_split_ratio': train_split,
-            'shuffle_seed': shuffle_seed,
-            'filenames': all_filenames,
-            'zip_summary': analysis_report['summary']
+            'train_split_ratio': args.train_split,
+            'shuffle_seed': args.shuffle_seed,
+            'filenames': all_filenames
         }
-
-        # Print comprehensive summary
-        print('\\n' + '='*80)
-        print('ZIP FILE ANALYSIS SUMMARY')
-        print('='*80)
-        print(f\"Total files in ZIP: {analysis_report['summary']['total_files_in_zip']}\")
-        print(f\"Valid dataset images: {analysis_report['summary']['valid_dataset_images']}\")
-        print(f\"File types: {', '.join([f'{k}: {v}' for k, v in analysis_report['summary']['file_type_breakdown'].items()])}\")
-        print(f\"\\nClasses present ({len(analysis_report['class_details']['classes_present'])} total):\")
-        for cls in analysis_report['class_details']['classes_present']:
-            count = analysis_report['class_details']['class_distribution'][cls]
-            print(f\"  - {cls}: {count} samples\")
-        print(f\"\\nImage dimensions found: {len(analysis_report['image_analysis']['image_dimensions'])} unique sizes\")
-        print(f\"Average image size: {analysis_report['quality_metrics']['avg_image_size_kb']:.2f} KB\")
-        print(f\"Class balance score: {analysis_report['quality_metrics']['class_balance_score']:.3f}\")
-        print('='*80 + '\\n')
-
+        
+        print(f'Dataset: {len(all_images)} samples, {len(unique_labels)} classes: {unique_labels}')
+        
+        # Create simple analysis report
+        zip_analysis = {
+            'total_files': len(all_files),
+            'image_files': len(all_images),
+            'other_files': len(all_files) - len(all_images),
+            'classes_present': unique_labels,
+            'class_distribution': dict(Counter(all_labels)),
+            'download_timestamp': datetime.datetime.now().isoformat(),
+            'cdn_url': args.cdn_url
+        }
+        
         # Split data
         indices = list(range(len(all_images)))
-        rng = np.random.RandomState(shuffle_seed)
+        rng = np.random.RandomState(args.shuffle_seed)
         rng.shuffle(indices)
         
-        train_size = int(train_split * len(all_images))
+        train_size = int(args.train_split * len(all_images))
         train_indices = indices[:train_size]
         test_indices = indices[train_size:]
         
-        # Split data
-        train_x = [all_images[i] for i in train_indices]
-        train_y = [label_indices[i] for i in train_indices]
-        train_filenames = [all_filenames[i] for i in train_indices]
-        
-        test_x = [all_images[i] for i in test_indices]
-        test_y = [label_indices[i] for i in test_indices]
-        test_filenames = [all_filenames[i] for i in test_indices]
-        
-        # Create enhanced train/test data structures
+        # Create train data
         train_data = {
-            'images': train_x,
-            'labels': train_y,
+            'images': [all_images[i] for i in train_indices],
+            'labels': [label_indices[i] for i in train_indices],
             'label_names': [all_labels[i] for i in train_indices],
-            'filenames': train_filenames,
-            'original_indices': train_indices
+            'filenames': [all_filenames[i] for i in train_indices]
         }
         
+        # Create test data
         test_data = {
-            'images': test_x,
-            'labels': test_y,
+            'images': [all_images[i] for i in test_indices],
+            'labels': [label_indices[i] for i in test_indices],
             'label_names': [all_labels[i] for i in test_indices],
-            'filenames': test_filenames,
-            'original_indices': test_indices
+            'filenames': [all_filenames[i] for i in test_indices]
         }
-
+        
         # Save outputs
-        os.makedirs(os.path.dirname(train_x_path) or '.', exist_ok=True)
-        with open(train_x_path, 'wb') as f:
+        os.makedirs(os.path.dirname(args.train_x_path) or '.', exist_ok=True)
+        with open(args.train_x_path, 'wb') as f:
             pickle.dump(train_data, f)
-
-        os.makedirs(os.path.dirname(train_y_path) or '.', exist_ok=True)
-        with open(train_y_path, 'wb') as f:
-            pickle.dump(train_y, f)
-
-        os.makedirs(os.path.dirname(test_x_path) or '.', exist_ok=True)
-        with open(test_x_path, 'wb') as f:
+        
+        os.makedirs(os.path.dirname(args.train_y_path) or '.', exist_ok=True)
+        with open(args.train_y_path, 'wb') as f:
+            pickle.dump(train_data['labels'], f)
+        
+        os.makedirs(os.path.dirname(args.test_x_path) or '.', exist_ok=True)
+        with open(args.test_x_path, 'wb') as f:
             pickle.dump(test_data, f)
-
-        os.makedirs(os.path.dirname(test_y_path) or '.', exist_ok=True)
-        with open(test_y_path, 'wb') as f:
-            pickle.dump(test_y, f)
-
-        os.makedirs(os.path.dirname(dataset_info_path) or '.', exist_ok=True)
-        with open(dataset_info_path, 'wb') as f:
+        
+        os.makedirs(os.path.dirname(args.test_y_path) or '.', exist_ok=True)
+        with open(args.test_y_path, 'wb') as f:
+            pickle.dump(test_data['labels'], f)
+        
+        os.makedirs(os.path.dirname(args.dataset_info_path) or '.', exist_ok=True)
+        with open(args.dataset_info_path, 'wb') as f:
             pickle.dump(dataset_info, f)
-
-        os.makedirs(os.path.dirname(zip_analysis_path) or '.', exist_ok=True)
-        with open(zip_analysis_path, 'wb') as f:
-            pickle.dump(analysis_report, f)
-
-        # Also save a readable text version
-        text_report_path = os.path.join(os.path.dirname(zip_analysis_path), 'zip_analysis_readable.txt')
-        with open(text_report_path, 'w') as f:
-            f.write('ZIP FILE ANALYSIS REPORT\\n')
-            f.write('='*80 + '\\n\\n')
-            
-            f.write('SUMMARY\\n')
-            f.write('-'*40 + '\\n')
-            for key, value in analysis_report['summary'].items():
-                f.write(f'{key.replace(\"_\", \" \").title()}: {value}\\n')
-            
-            f.write('\\nCLASS DETAILS\\n')
-            f.write('-'*40 + '\\n')
-            f.write(f'Total Classes: {len(analysis_report[\"class_details\"][\"classes_present\"])}\\n')
-            f.write('Classes Present:\\n')
-            for cls in analysis_report['class_details']['classes_present']:
-                count = analysis_report['class_details']['class_distribution'][cls]
-                f.write(f'  - {cls}: {count} samples\\n')
-            
-            f.write('\\nIMAGE ANALYSIS\\n')
-            f.write('-'*40 + '\\n')
-            for key, value in analysis_report['image_analysis'].items():
-                if isinstance(value, dict):
-                    f.write(f'{key.replace(\"_\", \" \").title()}:\\n')
-                    for k, v in value.items():
-                        f.write(f'  {k}: {v}\\n')
-                else:
-                    f.write(f'{key.replace(\"_\", \" \").title()}: {value}\\n')
-            
-            f.write('\\nQUALITY METRICS\\n')
-            f.write('-'*40 + '\\n')
-            for key, value in analysis_report['quality_metrics'].items():
-                if isinstance(value, float):
-                    f.write(f'{key.replace(\"_\", \" \").title()}: {value:.3f}\\n')
-                else:
-                    f.write(f'{key.replace(\"_\", \" \").title()}: {value}\\n')
-
-        print('Dataset loading complete!')
-        print(f'Train samples: {len(train_x)}')
-        print(f'Test samples: {len(test_x)}')
-        print(f'Train labels distribution: {Counter(train_data[\"label_names\"])}')
-        print(f'Test labels distribution: {Counter(test_data[\"label_names\"])}')
-        print(f'Analysis report saved with {len(analysis_report[\"class_details\"][\"classes_present\"])} classes analyzed')
-        " "$0" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+        
+        os.makedirs(os.path.dirname(args.zip_analysis_path) or '.', exist_ok=True)
+        with open(args.zip_analysis_path, 'wb') as f:
+            pickle.dump(zip_analysis, f)
+        
+        print('\\n' + '='*80)
+        print('DATASET LOADING COMPLETE')
+        print('='*80)
+        print(f'Train samples: {len(train_data[\"images\"])}')
+        print(f'Test samples: {len(test_data[\"images\"])}')
+        print(f'Classes: {len(unique_labels)}')
+        print(f'Class distribution: {dict(Counter(all_labels))}')
+        print('='*80)
     args:
       - {inputValue: cdn_url}
       - {inputValue: train_split}
