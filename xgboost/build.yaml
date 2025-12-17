@@ -1,4 +1,4 @@
-name: Boosting Model Builder v1.3
+name: Boosting Model Builder v1.4
 description: Builds boosting models with smart library detection
 inputs:
   - name: config_json
@@ -101,7 +101,7 @@ implementation:
         
         # Install missing boosting libraries
         if missing_boosting:
-            print(f"\nInstalling missing libraries: {missing_boosting}")
+            print(f"\\nInstalling missing libraries: {missing_boosting}")
             for lib in missing_boosting:
                 try:
                     if lib == 'xgboost':
