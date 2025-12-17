@@ -257,20 +257,20 @@ implementation:
         }
 
         # Print comprehensive summary
-        print('\n' + '='*80)
+        print('\\n' + '='*80)
         print('ZIP FILE ANALYSIS SUMMARY')
         print('='*80)
         print(f\"Total files in ZIP: {analysis_report['summary']['total_files_in_zip']}\")
         print(f\"Valid dataset images: {analysis_report['summary']['valid_dataset_images']}\")
         print(f\"File types: {', '.join([f'{k}: {v}' for k, v in analysis_report['summary']['file_type_breakdown'].items()])}\")
-        print(f\"\nClasses present ({len(analysis_report['class_details']['classes_present'])} total):\")
+        print(f\"\\nClasses present ({len(analysis_report['class_details']['classes_present'])} total):\")
         for cls in analysis_report['class_details']['classes_present']:
             count = analysis_report['class_details']['class_distribution'][cls]
             print(f\"  - {cls}: {count} samples\")
-        print(f\"\nImage dimensions found: {len(analysis_report['image_analysis']['image_dimensions'])} unique sizes\")
+        print(f\"\\nImage dimensions found: {len(analysis_report['image_analysis']['image_dimensions'])} unique sizes\")
         print(f\"Average image size: {analysis_report['quality_metrics']['avg_image_size_kb']:.2f} KB\")
         print(f\"Class balance score: {analysis_report['quality_metrics']['class_balance_score']:.3f}\")
-        print('='*80 + '\n')
+        print('='*80 + '\\n')
 
         # Split data
         indices = list(range(len(all_images)))
@@ -335,39 +335,39 @@ implementation:
         # Also save a readable text version
         text_report_path = os.path.join(os.path.dirname(zip_analysis_path), 'zip_analysis_readable.txt')
         with open(text_report_path, 'w') as f:
-            f.write('ZIP FILE ANALYSIS REPORT\n')
-            f.write('='*80 + '\n\n')
+            f.write('ZIP FILE ANALYSIS REPORT\\n')
+            f.write('='*80 + '\\n\\n')
             
-            f.write('SUMMARY\n')
-            f.write('-'*40 + '\n')
+            f.write('SUMMARY\\n')
+            f.write('-'*40 + '\\n')
             for key, value in analysis_report['summary'].items():
-                f.write(f'{key.replace(\"_\", \" \").title()}: {value}\n')
+                f.write(f'{key.replace(\"_\", \" \").title()}: {value}\\n')
             
-            f.write('\nCLASS DETAILS\n')
-            f.write('-'*40 + '\n')
-            f.write(f'Total Classes: {len(analysis_report[\"class_details\"][\"classes_present\"])}\n')
-            f.write('Classes Present:\n')
+            f.write('\\nCLASS DETAILS\\n')
+            f.write('-'*40 + '\\n')
+            f.write(f'Total Classes: {len(analysis_report[\"class_details\"][\"classes_present\"])}\\n')
+            f.write('Classes Present:\\n')
             for cls in analysis_report['class_details']['classes_present']:
                 count = analysis_report['class_details']['class_distribution'][cls]
-                f.write(f'  - {cls}: {count} samples\n')
+                f.write(f'  - {cls}: {count} samples\\n')
             
-            f.write('\nIMAGE ANALYSIS\n')
-            f.write('-'*40 + '\n')
+            f.write('\\nIMAGE ANALYSIS\\n')
+            f.write('-'*40 + '\\n')
             for key, value in analysis_report['image_analysis'].items():
                 if isinstance(value, dict):
-                    f.write(f'{key.replace(\"_\", \" \").title()}:\n')
+                    f.write(f'{key.replace(\"_\", \" \").title()}:\\n')
                     for k, v in value.items():
                         f.write(f'  {k}: {v}\\n')
                 else:
-                    f.write(f'{key.replace(\"_\", \" \").title()}: {value}\n')
+                    f.write(f'{key.replace(\"_\", \" \").title()}: {value}\\n')
             
-            f.write('\nQUALITY METRICS\n')
+            f.write('\\nQUALITY METRICS\\n')
             f.write('-'*40 + '\\n')
             for key, value in analysis_report['quality_metrics'].items():
                 if isinstance(value, float):
-                    f.write(f'{key.replace(\"_\", \" \").title()}: {value:.3f}\n')
+                    f.write(f'{key.replace(\"_\", \" \").title()}: {value:.3f}\\n')
                 else:
-                    f.write(f'{key.replace(\"_\", \" \").title()}: {value}\n')
+                    f.write(f'{key.replace(\"_\", \" \").title()}: {value}\\n')
 
         print('Dataset loading complete!')
         print(f'Train samples: {len(train_x)}')
