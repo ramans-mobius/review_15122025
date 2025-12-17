@@ -10,12 +10,17 @@ inputs:
   - name: config_str
     type: String
     description: 'Unified configuration JSON string'
+  - name: target_column
+    type: String
+    description: 'Name of the target column (if not specified in config)'
 outputs:
-  - name: train_data
+  - name: train_X
     type: Dataset
-  - name: test_data
+  - name: train_y
     type: Dataset
-  - name: target_data
+  - name: test_X
+    type: Dataset
+  - name: test_y
     type: Dataset
   - name: data_info
     type: String
@@ -43,9 +48,11 @@ implementation:
         parser.add_argument('--api_url', type=str, required=True)
         parser.add_argument('--access_token', type=str, required=True)
         parser.add_argument('--config_str', type=str, required=True)
-        parser.add_argument('--train_data', type=str, required=True)
-        parser.add_argument('--test_data', type=str, required=True)
-        parser.add_argument('--target_data', type=str, required=True)
+        parser.add_argument('--target_column', type=str, required=True)
+        parser.add_argument('--train_X', type=str, required=True)
+        parser.add_argument('--train_y', type=str, required=True)
+        parser.add_argument('--test_X', type=str, required=True)
+        parser.add_argument('--test_y', type=str, required=True)
         parser.add_argument('--data_info', type=str, required=True)
         args = parser.parse_args()
 
@@ -57,8 +64,11 @@ implementation:
         pipeline_config = config.get('pipeline', {})
         training_config = config.get('training', {})
 
-        # Extract settings
-        target_column = pipeline_config.get('target_column', '')
+        # Extract settings - use input target_column if provided, otherwise check config
+        target_column = args.target_column
+        if not target_column or target_column == '':
+            target_column = pipeline_config.get('target_column', '')
+            
         task_type = pipeline_config.get('task', 'auto')
         test_size = training_config.get('test_size', 0.2)
         random_state = training_config.get('random_state', 42)
@@ -216,17 +226,30 @@ implementation:
         
         print(f"DEBUG: After missing value handling - Train NaN: {X_train.isna().sum().sum()}, Test NaN: {X_test.isna().sum().sum()}")
         
-        # Prepare output data
-        train_dict = {
-            'X': X_train.values, 
-            'y': y_train, 
+        # Prepare output data - separate X and y
+        train_X_dict = {
+            'X': X_train.values,
             'feature_names': X.columns.tolist(),
             'config': config
         }
-        test_dict = {
-            'X': X_test.values, 
-            'y': y_test, 
+        
+        train_y_dict = {
+            'y': y_train.values,
+            'target_name': target_column,
+            'task_type': task_type,
+            'config': config
+        }
+        
+        test_X_dict = {
+            'X': X_test.values,
             'feature_names': X.columns.tolist(),
+            'config': config
+        }
+        
+        test_y_dict = {
+            'y': y_test.values,
+            'target_name': target_column,
+            'task_type': task_type,
             'config': config
         }
         
@@ -235,6 +258,7 @@ implementation:
             'original_samples': len(df),
             'final_samples': len(X),
             'features_count': len(X.columns),
+            'feature_names': X.columns.tolist(),
             'task_type': task_type,
             'target_column': target_column,
             'target_statistics': {
@@ -248,29 +272,38 @@ implementation:
             },
             'train_samples': len(X_train),
             'test_samples': len(X_test),
+            'train_X_shape': X_train.shape,
+            'train_y_shape': y_train.shape,
+            'test_X_shape': X_test.shape,
+            'test_y_shape': y_test.shape,
             'all_columns_original': list(df.columns),
             'all_columns_final': list(df_numeric.columns),
-            'data_leakage_prevention': 'enabled',  # Track that we fixed leakage
+            'data_leakage_prevention': 'enabled',
             'missing_value_strategy': 'train_based_imputation'
         }
 
         # Save datasets
-        os.makedirs(os.path.dirname(args.train_data) or ".", exist_ok=True)
-        os.makedirs(os.path.dirname(args.test_data) or ".", exist_ok=True)
-        os.makedirs(os.path.dirname(args.target_data) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.train_X) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.train_y) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.test_X) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.test_y) or ".", exist_ok=True)
         os.makedirs(os.path.dirname(args.data_info) or ".", exist_ok=True)
         
-        with open(args.train_data, "wb") as f:
-            pickle.dump(train_dict, f)
-        with open(args.test_data, "wb") as f:
-            pickle.dump(test_dict, f)
-        with open(args.target_data, "wb") as f:
-            pickle.dump(y_test, f)
+        with open(args.train_X, "wb") as f:
+            pickle.dump(train_X_dict, f)
+        with open(args.train_y, "wb") as f:
+            pickle.dump(train_y_dict, f)
+        with open(args.test_X, "wb") as f:
+            pickle.dump(test_X_dict, f)
+        with open(args.test_y, "wb") as f:
+            pickle.dump(test_y_dict, f)
         with open(args.data_info, "w") as f:
             json.dump(data_info, f, indent=2)
         
         print(f"Data loading complete: {len(X_train)} train, {len(X_test)} test samples")
         print(f"Target: {target_column}, Task: {task_type}, Features: {len(X.columns)}")
+        print(f"Output shapes: train_X={X_train.shape}, train_y={y_train.shape}")
+        print(f"Output shapes: test_X={X_test.shape}, test_y={y_test.shape}")
         print("DATA LEAKAGE PREVENTION: Applied proper train/test separation for missing value handling")
             
     args:
@@ -280,11 +313,15 @@ implementation:
       - {inputPath: access_token}
       - --config_str
       - {inputValue: config_str}
-      - --train_data
-      - {outputPath: train_data}
-      - --test_data
-      - {outputPath: test_data}
-      - --target_data
-      - {outputPath: target_data}
+      - --target_column
+      - {inputValue: target_column}
+      - --train_X
+      - {outputPath: train_X}
+      - --train_y
+      - {outputPath: train_y}
+      - --test_X
+      - {outputPath: test_X}
+      - --test_y
+      - {outputPath: test_y}
       - --data_info
       - {outputPath: data_info}
