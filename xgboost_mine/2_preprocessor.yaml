@@ -163,20 +163,20 @@ implementation:
                 self.target_encoder = target_encoder
             
             def transform_features(self, X):
-                """Transform features only"""
+
                 X_transformed = X.copy()
                 for name, transformer in self.steps:
                     X_transformed = transformer.transform(X_transformed)
                 return X_transformed
             
             def transform_target(self, y):
-                """Transform target variable (for classification only)"""
+            
                 if self.target_encoder is not None and hasattr(self.target_encoder, 'transform'):
                     return self.target_encoder.transform(y)
                 return y
             
             def inverse_transform_target(self, y_encoded):
-                """Inverse transform target variable (for classification only)"""
+               
                 if self.target_encoder is not None and hasattr(self.target_encoder, 'inverse_transform'):
                     return self.target_encoder.inverse_transform(y_encoded)
                 return y_encoded
