@@ -5,7 +5,7 @@ inputs:
     type: String
     description: 'API URL to fetch JSON data'
   - name: access_token
-    type: string
+    type: String
     description: 'Bearer access token for API auth'
   - name: config_str
     type: String
