@@ -13,7 +13,7 @@ outputs:
   - {name: zip_analysis_report, type: Artifact, description: 'Detailed ZIP file contents analysis'}
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v19
+    image: gurpreetgandhi/nesy-factory:v38-gpu
     command:
       - sh
       - -c
