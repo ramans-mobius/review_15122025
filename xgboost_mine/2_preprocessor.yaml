@@ -1,25 +1,31 @@
 name: Preprocessor
-description: Preprocesses data using unified configuration
+description: Preprocesses training data and creates a preprocessing pipeline
 inputs:
-  - name: train_data
+  - name: train_X
     type: Dataset
-  - name: test_data
+    description: 'Training features'
+  - name: train_y
     type: Dataset
-  - name: target_data
-    type: Dataset
+    description: 'Training target'
   - name: config_str
     type: String
     description: 'Unified configuration JSON string'
 outputs:
-  - name: processed_data
+  - name: processed_train_X
     type: Dataset
+    description: 'Preprocessed training features'
+  - name: processed_train_y
+    type: Dataset
+    description: 'Preprocessed training target'
   - name: preprocessing_pipeline
     type: Model
+    description: 'Fitted preprocessing pipeline for transforming data'
   - name: feature_info
     type: String
+    description: 'Feature information and preprocessing details'
   - name: weight_out
     type: String
-    description: "Preprocessing configuration and feature weights as JSON string"
+    description: 'Preprocessing configuration and feature weights as JSON string'
 
 implementation:
   container:
@@ -34,38 +40,40 @@ implementation:
       - -c
       - |
         import argparse, os, pickle, numpy as np, json
-        from sklearn.preprocessing import StandardScaler, MinMaxScaler
+        from sklearn.preprocessing import StandardScaler, MinMaxScaler, LabelEncoder, RobustScaler
         from sklearn.feature_selection import SelectKBest, f_classif, f_regression
+        import pandas as pd
 
         parser = argparse.ArgumentParser()
-        parser.add_argument('--train_data', type=str, required=True)
-        parser.add_argument('--test_data', type=str, required=True)
-        parser.add_argument('--target_data', type=str, required=True)
+        parser.add_argument('--train_X', type=str, required=True)
+        parser.add_argument('--train_y', type=str, required=True)
         parser.add_argument('--config_str', type=str, required=True)
-        parser.add_argument('--processed_data', type=str, required=True)
+        parser.add_argument('--processed_train_X', type=str, required=True)
+        parser.add_argument('--processed_train_y', type=str, required=True)
         parser.add_argument('--preprocessing_pipeline', type=str, required=True)
         parser.add_argument('--feature_info', type=str, required=True)
         parser.add_argument('--weight_out', type=str, required=True)
         args = parser.parse_args()
 
-        # Load data and config
-        with open(args.train_data, 'rb') as f:
-            train_dict = pickle.load(f)
-        with open(args.test_data, 'rb') as f:
-            test_dict = pickle.load(f)
-        with open(args.target_data, 'rb') as f:
-            y_test_original = pickle.load(f)
+        # Load training data
+        with open(args.train_X, 'rb') as f:
+            train_X_dict = pickle.load(f)
+        with open(args.train_y, 'rb') as f:
+            train_y_dict = pickle.load(f)
         
+        # Extract data
+        X_train = train_X_dict['X']
+        y_train = train_y_dict['y']
+        feature_names = train_X_dict['feature_names']
+        target_name = train_y_dict.get('target_name', 'target')
+        task_type = train_y_dict.get('task_type', 'classification')
+        
+        # Load config
         config = json.loads(args.config_str)
         preprocessing_config = config.get('preprocessing', {})
-        pipeline_config = config.get('pipeline', {})
-        
-        X_train, y_train = train_dict['X'], train_dict['y']
-        X_test, y_test = test_dict['X'], test_dict['y']
-        feature_names = train_dict['feature_names']
-        task_type = pipeline_config.get('task', 'classification')
         
         print(f'Preprocessing: {X_train.shape[1]} features, task={task_type}')
+        print(f'Target name: {target_name}')
 
         # Extract preprocessing settings
         scaling = preprocessing_config.get('scaling', 'standard')
@@ -75,25 +83,39 @@ implementation:
         # Apply preprocessing
         preprocessing_steps = []
         X_train_processed = X_train.copy()
-        X_test_processed = X_test.copy()
         current_feature_names = feature_names.copy()
         feature_scores = None
         feature_weights = None
 
-        # Handle missing values
+        # Handle missing values in features
         if np.isnan(X_train_processed).any():
             X_train_processed = np.nan_to_num(X_train_processed)
-            X_test_processed = np.nan_to_num(X_test_processed)
+            print(f'Handled missing values in features: {np.isnan(X_train).sum()} NaN values replaced')
+
+        # Preprocess target variable (only for classification)
+        y_train_processed = y_train.copy()
+        if task_type == 'classification' and not isinstance(y_train_processed[0], (int, np.integer)):
+            print(f'Preprocessing target variable for classification (encoding labels)...')
+            le = LabelEncoder()
+            y_train_processed = le.fit_transform(y_train_processed)
+            target_encoder = le
+        else:
+            target_encoder = None
+        
+        print(f'Target unique values: {len(np.unique(y_train_processed))}')
 
         # Feature scaling
         if scaling != 'none':
             if scaling == 'standard':
                 scaler = StandardScaler()
-            else:
+            elif scaling == 'minmax':
                 scaler = MinMaxScaler()
+            elif scaling == 'robust':
+                scaler = RobustScaler()
+            else:
+                scaler = StandardScaler()  # default
             
             X_train_processed = scaler.fit_transform(X_train_processed)
-            X_test_processed = scaler.transform(X_test_processed)
             preprocessing_steps.append(('scaler', scaler))
             print(f'Applied {scaling} scaling')
 
@@ -101,16 +123,19 @@ implementation:
         if feature_selection != 'none':
             k = k_features
             if k == 'auto':
-                k = min(50, X_train_processed.shape[1])
+                # Auto-select k based on data size
+                n_samples, n_features = X_train_processed.shape
+                k = min(50, n_features, max(1, int(n_samples / 10)))
             
             if k != 'all' and X_train_processed.shape[1] > k:
+                # Choose appropriate scoring function based on task
                 if task_type == 'classification':
-                    selector = SelectKBest(score_func=f_classif, k=k)
+                    score_func = f_classif
                 else:
-                    selector = SelectKBest(score_func=f_regression, k=k)
+                    score_func = f_regression
                 
-                X_train_processed = selector.fit_transform(X_train_processed, y_train)
-                X_test_processed = selector.transform(X_test_processed)
+                selector = SelectKBest(score_func=score_func, k=k)
+                X_train_processed = selector.fit_transform(X_train_processed, y_train_processed)
                 
                 if hasattr(selector, 'get_support'):
                     selected_mask = selector.get_support()
@@ -129,52 +154,70 @@ implementation:
                                 feature_weights = np.ones_like(valid_scores)
                 
                 preprocessing_steps.append(('feature_selector', selector))
-                print(f'Applied feature selection: {X_train_processed.shape[1]} features')
+                print(f'Applied feature selection: selected {X_train_processed.shape[1]} out of {len(feature_names)} features')
 
-        # Create DataWrapper object
-        class DataWrapper:
-            def __init__(self, data_dict):
-                self.__dict__.update(data_dict)
-        
-        processed_data_dict = {
-            'X_train': X_train_processed, 
-            'y_train': y_train,
-            'X_test': X_test_processed, 
-            'y_test': y_test,
-            'feature_names': current_feature_names,
-            'config': config,
-            'dataset_info': {
-                'dataset_name': 'Processed_Dataset',
-                'problem_type': task_type,
-                'num_features': len(current_feature_names),
-                'preprocessing_steps': [step[0] for step in preprocessing_steps]
-            }
-        }
-        
-        data_wrapper = DataWrapper(processed_data_dict)
-        
-        # Create preprocessing pipeline
+        # Create preprocessing pipeline class
         class PreprocessingPipeline:
-            def __init__(self, steps):
+            def __init__(self, steps, target_encoder=None):
                 self.steps = steps
+                self.target_encoder = target_encoder
             
-            def transform(self, X):
+            def transform_features(self, X):
+                """Transform features only"""
                 X_transformed = X.copy()
                 for name, transformer in self.steps:
                     X_transformed = transformer.transform(X_transformed)
                 return X_transformed
+            
+            def transform_target(self, y):
+                """Transform target variable (for classification only)"""
+                if self.target_encoder is not None and hasattr(self.target_encoder, 'transform'):
+                    return self.target_encoder.transform(y)
+                return y
+            
+            def inverse_transform_target(self, y_encoded):
+                """Inverse transform target variable (for classification only)"""
+                if self.target_encoder is not None and hasattr(self.target_encoder, 'inverse_transform'):
+                    return self.target_encoder.inverse_transform(y_encoded)
+                return y_encoded
+
+        preprocessing_pipeline = PreprocessingPipeline(preprocessing_steps, target_encoder)
+
+        # Prepare processed outputs
+        processed_train_X_dict = {
+            'X': X_train_processed,
+            'feature_names': current_feature_names,
+            'config': config,
+            'preprocessing_info': {
+                'scaling_applied': scaling,
+                'feature_selection_applied': feature_selection,
+                'original_feature_count': len(feature_names)
+            }
+        }
         
-        preprocessing_pipeline = PreprocessingPipeline(preprocessing_steps)
-        
+        processed_train_y_dict = {
+            'y': y_train_processed,
+            'target_name': target_name,
+            'task_type': task_type,
+            'config': config,
+            'target_encoder_info': {
+                'encoder_used': target_encoder is not None,
+                'original_classes': len(np.unique(y_train)) if task_type == 'classification' else None
+            }
+        }
+
         # Feature information
         feature_info = {
             'original_features': len(feature_names),
             'final_features': len(current_feature_names),
             'feature_names': current_feature_names,
             'task_type': task_type,
+            'target_name': target_name,
             'preprocessing_applied': [step[0] for step in preprocessing_steps],
             'train_shape': X_train_processed.shape,
-            'test_shape': X_test_processed.shape
+            'scaling_method': scaling,
+            'feature_selection_method': feature_selection,
+            'k_features_selected': X_train_processed.shape[1]
         }
 
         # Create weight output configuration
@@ -183,8 +226,10 @@ implementation:
             'preprocessing_config': {
                 'scaling': scaling,
                 'feature_selection': feature_selection,
-                'k_features': k_features,
-                'task_type': task_type
+                'k_features': k_features if k_features != 'auto' else 'auto',
+                'actual_k_selected': X_train_processed.shape[1],
+                'task_type': task_type,
+                'target_name': target_name
             },
             'feature_info': {
                 'original_feature_count': len(feature_names),
@@ -195,21 +240,35 @@ implementation:
             },
             'dataset_stats': {
                 'train_samples': X_train_processed.shape[0],
-                'test_samples': X_test_processed.shape[0],
-                'feature_dimension': X_train_processed.shape[1]
+                'feature_dimension': X_train_processed.shape[1],
+                'target_distribution': {
+                    'unique_values': int(len(np.unique(y_train_processed))),
+                    'min': float(np.min(y_train_processed)),
+                    'max': float(np.max(y_train_processed)),
+                    'mean': float(np.mean(y_train_processed)),
+                    'std': float(np.std(y_train_processed))
+                }
             },
             'preprocessing_steps': [step[0] for step in preprocessing_steps],
-            'original_config': config
+            'original_config': config,
+            'pipeline_capabilities': {
+                'can_transform_features': True,
+                'can_transform_target': target_encoder is not None,
+                'can_inverse_transform_target': target_encoder is not None
+            }
         }
 
         # Save outputs
-        os.makedirs(os.path.dirname(args.processed_data) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.processed_train_X) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.processed_train_y) or ".", exist_ok=True)
         os.makedirs(os.path.dirname(args.preprocessing_pipeline) or ".", exist_ok=True)
         os.makedirs(os.path.dirname(args.feature_info) or ".", exist_ok=True)
         os.makedirs(os.path.dirname(args.weight_out) or ".", exist_ok=True)
         
-        with open(args.processed_data, 'wb') as f:
-            pickle.dump(data_wrapper, f)
+        with open(args.processed_train_X, 'wb') as f:
+            pickle.dump(processed_train_X_dict, f)
+        with open(args.processed_train_y, 'wb') as f:
+            pickle.dump(processed_train_y_dict, f)
         with open(args.preprocessing_pipeline, 'wb') as f:
             pickle.dump(preprocessing_pipeline, f)
         with open(args.feature_info, 'w') as f:
@@ -218,19 +277,21 @@ implementation:
             json.dump(weight_config, f, indent=2)
         
         print('Preprocessing complete')
+        print(f'Original features: {len(feature_names)}')
         print(f'Final features: {len(current_feature_names)}')
-        print(f'Weight config saved with {len(current_feature_names)} features')
+        print(f'Training samples: {X_train_processed.shape[0]}')
+        print(f'Target preprocessing: {"Label encoding applied" if target_encoder else "No encoding needed"}')
     args:
-      - --train_data
-      - {inputPath: train_data}
-      - --test_data
-      - {inputPath: test_data}
-      - --target_data
-      - {inputPath: target_data}
+      - --train_X
+      - {inputPath: train_X}
+      - --train_y
+      - {inputPath: train_y}
       - --config_str
       - {inputValue: config_str}
-      - --processed_data
-      - {outputPath: processed_data}
+      - --processed_train_X
+      - {outputPath: processed_train_X}
+      - --processed_train_y
+      - {outputPath: processed_train_y}
       - --preprocessing_pipeline
       - {outputPath: preprocessing_pipeline}
       - --feature_info
