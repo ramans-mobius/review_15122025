@@ -20,21 +20,27 @@ implementation:
       - sh
       - -c
       - |
-        # Install ALL dependencies upfront
-        echo "=== INSTALLING ALL DEPENDENCIES ==="
-        apt-get update && apt-get install -y --no-install-recommends \
-            wget curl gcc g++ git ca-certificates \
-            && rm -rf /var/lib/apt/lists/*
-
-        pip install --no-cache-dir --upgrade pip
-
-        # Install all required packages (same as training brick)
-        pip install --no-cache-dir \
+        # Install ONLY the missing packages WITHOUT upgrading pip or numpy
+        echo "=== INSTALLING ONLY MISSING PACKAGES ==="
+        
+        # Check what numpy version is already installed
+        python3 -c "import numpy; print(f'Existing numpy version: {numpy.__version__}')"
+        
+        # Install only the boosting libraries with --no-deps to avoid numpy conflicts
+        pip install --no-cache-dir --no-deps \
             xgboost==1.6.2 \
-            lightgbm==3.3.5 \
+            lightgbm==3.3.5
+        
+        # For catboost, we need to install dependencies but not upgrade numpy
+        # First get numpy version
+        NUMPY_VERSION=$(python3 -c "import numpy; print(numpy.__version__)")
+        
+        # Install catboost with specific numpy version pinned
+        pip install --no-cache-dir \
+            "numpy==${NUMPY_VERSION}" \
             catboost==1.2
-
-        echo "=== ALL PACKAGES INSTALLED SUCCESSFULLY ==="
+        
+        echo "=== PACKAGES INSTALLED SUCCESSFULLY ==="
 
         # Run the evaluation script
         exec "$0" "$@"
