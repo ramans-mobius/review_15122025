@@ -1,5 +1,5 @@
-name: Evaluate Model v16
-description: Evaluate trained models for kumar2004/ml-base:v1
+name: Evaluate Model (Python 3.9)
+description: Evaluation brick in clean Python 3.9 environment
 inputs:
   - {name: X_test, type: Dataset, description: "Path to test feature file"}
   - {name: y_test, type: Dataset, description: "Path to test target file"}
@@ -16,59 +16,49 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/ml-base:v1
+    image: python:3.9-slim
     command:
+      - sh
+      - -c
+      - |
+        # Update system and install dependencies
+        apt-get update && apt-get install -y --no-install-recommends \
+            gcc g++ wget curl ca-certificates \
+            && rm -rf /var/lib/apt/lists/*
+        
+        # Upgrade pip
+        pip install --no-cache-dir --upgrade pip
+        
+        # Install all required packages with compatible versions
+        pip install --no-cache-dir \
+            numpy==1.24.3 \
+            pandas==1.5.3 \
+            scikit-learn==1.3.0 \
+            scipy==1.10.1 \
+            cloudpickle==2.2.1 \
+            joblib==1.3.2 \
+            pyarrow \
+            xgboost==1.6.2 \
+            lightgbm==3.3.5 \
+            catboost==1.2
+        
+        echo "=== ALL PACKAGES INSTALLED SUCCESSFULLY ==="
+        
+        # Run the evaluation script
+        exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
-        import argparse, os, sys, json, traceback, gzip, importlib.util
+        import argparse, os, sys, json, traceback, warnings
         from datetime import datetime
         import pandas as pd, numpy as np, joblib
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, r2_score, mean_squared_error, mean_absolute_error, confusion_matrix, roc_auc_score
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, r2_score, mean_squared_error, mean_absolute_error
         
         print("="*80)
-        print("EVALUATION BRICK - LIBRARY CHECK")
+        print("EVALUATION BRICK - PYTHON 3.9")
         print("="*80)
-        
-        # Function to check if library is available
-        def is_library_available(library_name):
-            try:
-                spec = importlib.util.find_spec(library_name)
-                return spec is not None
-            except Exception:
-                return False
-        
-        # Check boosting libraries
-        XGB_AVAILABLE = is_library_available('xgboost')
-        LGB_AVAILABLE = is_library_available('lightgbm')
-        CB_AVAILABLE = is_library_available('catboost')
-        
         print(f"Python {sys.version}")
-        if XGB_AVAILABLE:
-            try:
-                import xgboost as xgb
-                print(f"✓ XGBoost {xgb.__version__}")
-            except Exception:
-                XGB_AVAILABLE = False
-                print("✗ XGBoost import failed")
-        
-        if LGB_AVAILABLE:
-            try:
-                import lightgbm as lgb
-                print(f"✓ LightGBM {lgb.__version__}")
-            except Exception:
-                LGB_AVAILABLE = False
-                print("✗ LightGBM import failed")
-        
-        if CB_AVAILABLE:
-            try:
-                import catboost as cb
-                print(f"✓ CatBoost {cb.__version__}")
-            except Exception:
-                CB_AVAILABLE = False
-                print("✗ CatBoost import failed")
-        
         print("="*80)
         
         # Helper functions
@@ -78,30 +68,31 @@ implementation:
                 os.makedirs(d, exist_ok=True)
         
         def load_pickle_any(path):
+           
             if not os.path.exists(path):
                 raise FileNotFoundError(f"File not found: {path}")
             
-            # Try joblib first (most reliable)
+            # Try joblib first
             try:
                 return joblib.load(path)
             except Exception as e1:
                 print(f"[INFO] joblib.load failed: {str(e1)[:100]}")
+            
+            # Try cloudpickle
+            try:
+                import cloudpickle
+                with open(path, "rb") as f:
+                    return cloudpickle.load(f)
+            except Exception as e2:
+                print(f"[INFO] cloudpickle.load failed: {str(e2)[:100]}")
             
             # Try regular pickle
             try:
                 import pickle
                 with open(path, "rb") as f:
                     return pickle.load(f)
-            except Exception as e2:
-                print(f"[INFO] pickle.load failed: {str(e2)[:100]}")
-            
-            # Try gzipped pickle
-            try:
-                import pickle
-                with gzip.open(path, "rb") as f:
-                    return pickle.load(f)
             except Exception as e3:
-                print(f"[INFO] gzipped pickle.load failed: {str(e3)[:100]}")
+                print(f"[INFO] pickle.load failed: {str(e3)[:100]}")
             
             raise ValueError(f"Could not load pickle from {path}")
         
@@ -159,28 +150,6 @@ implementation:
                 pre = load_pickle_any(args.preprocessor)
                 print("[INFO] Preprocessor loaded")
                 
-                # Load feature selector if exists
-                fs = None
-                if args.feature_selector and os.path.exists(args.feature_selector):
-                    print("[INFO] Loading feature selector...")
-                    fs = load_pickle_any(args.feature_selector)
-                    print("[INFO] Feature selector loaded")
-                
-                # Load PCA if exists
-                pca_obj = None
-                if args.pca and os.path.exists(args.pca):
-                    print("[INFO] Loading PCA...")
-                    pca_obj = load_pickle_any(args.pca)
-                    if pca_obj is None:
-                        print("[INFO] PCA is None (passthrough)")
-                    else:
-                        print(f"[INFO] PCA loaded: {type(pca_obj).__name__}")
-                
-                # Load model
-                print("[INFO] Loading model...")
-                model = load_pickle_any(args.model_pickle)
-                print(f"[INFO] Model loaded: {type(model).__name__}")
-                
                 # Apply preprocessor
                 print("[INFO] Applying preprocessor...")
                 if hasattr(pre, 'transform'):
@@ -190,23 +159,32 @@ implementation:
                     print(f"[INFO] After preprocessing: {X_processed.shape}")
                 else:
                     X_processed = X_raw.copy()
-                    print("[INFO] Preprocessor has no transform method, using raw features")
+                    print("[INFO] Preprocessor has no transform method")
                 
-                # Apply feature selector
-                if fs is not None and hasattr(fs, 'transform'):
-                    print("[INFO] Applying feature selector...")
-                    X_processed = fs.transform(X_processed)
-                    print(f"[INFO] After feature selection: {X_processed.shape}")
+                # Load and apply feature selector if exists
+                if args.feature_selector and os.path.exists(args.feature_selector):
+                    print("[INFO] Loading feature selector...")
+                    fs = load_pickle_any(args.feature_selector)
+                    if hasattr(fs, 'transform'):
+                        X_processed = fs.transform(X_processed)
+                        print(f"[INFO] After feature selection: {X_processed.shape}")
                 
-                # Apply PCA
-                if pca_obj is not None and hasattr(pca_obj, 'transform'):
-                    print("[INFO] Applying PCA...")
-                    X_processed = pca_obj.transform(X_processed)
-                    if not isinstance(X_processed, pd.DataFrame):
-                        n_components = X_processed.shape[1] if X_processed.ndim > 1 else 1
-                        columns = [f"PC{i+1}" for i in range(n_components)]
-                        X_processed = pd.DataFrame(X_processed, columns=columns)
-                    print(f"[INFO] After PCA: {X_processed.shape}")
+                # Load and apply PCA if exists
+                if args.pca and os.path.exists(args.pca):
+                    print("[INFO] Loading PCA...")
+                    pca_obj = load_pickle_any(args.pca)
+                    if pca_obj is not None and hasattr(pca_obj, 'transform'):
+                        X_processed = pca_obj.transform(X_processed)
+                        if not isinstance(X_processed, pd.DataFrame):
+                            n_components = X_processed.shape[1] if X_processed.ndim > 1 else 1
+                            columns = [f"PC{i+1}" for i in range(n_components)]
+                            X_processed = pd.DataFrame(X_processed, columns=columns)
+                        print(f"[INFO] After PCA: {X_processed.shape}")
+                
+                # Load model
+                print("[INFO] Loading model...")
+                model = load_pickle_any(args.model_pickle)
+                print(f"[INFO] Model loaded: {type(model).__name__}")
                 
                 # Make predictions
                 print("[INFO] Making predictions...")
@@ -220,7 +198,6 @@ implementation:
                 # Handle multi-output predictions
                 if y_pred.ndim == 2 and y_pred.shape[1] > 1:
                     print(f"[INFO] Multi-output predictions: {y_pred.shape[1]} outputs")
-                    # For multi-output, create separate columns
                     pred_cols = [f"y_pred_{i}" for i in range(y_pred.shape[1])]
                     pred_df = pd.DataFrame(y_pred, columns=pred_cols)
                     
@@ -308,7 +285,8 @@ implementation:
                     row.update({
                         "model_class": type(model).__name__,
                         "timestamp": datetime.utcnow().isoformat() + 'Z',
-                        "samples_evaluated": len(output_df)
+                        "samples_evaluated": len(output_df),
+                        "python_version": sys.version.split()[0]
                     })
                 
                 # Save outputs
@@ -326,6 +304,7 @@ implementation:
                 print("="*80)
                 print(f"Samples evaluated: {len(output_df)}")
                 print(f"Metrics calculated: {len(metrics_rows)}")
+                print(f"Model: {type(model).__name__}")
                 print(f"Outputs saved:")
                 print(f"  ✓ metrics: {args.metrics_json}")
                 print(f"  ✓ predictions: {args.predictions}")
