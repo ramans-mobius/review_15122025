@@ -1,5 +1,5 @@
-name: Boosting Training Brick v1.0
-description: Training brick for kumar2004/ml-base:v1
+name: Boosting Training Brick (Python 3.9)
+description: Training brick in clean Python 3.9 environment
 inputs:
   - {name: train_X, type: Dataset, description: "Final training features"}
   - {name: train_y, type: Dataset, description: "Training target labels"}
@@ -22,76 +22,64 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/ml-base:v1
+    image: python:3.9-slim
     command:
+      - sh
+      - -c
+      - |
+        # Update system and install dependencies
+        apt-get update && apt-get install -y --no-install-recommends \
+            gcc g++ wget curl ca-certificates \
+            && rm -rf /var/lib/apt/lists/*
+        
+        # Upgrade pip
+        pip install --no-cache-dir --upgrade pip
+        
+        # Install all required packages with compatible versions
+        pip install --no-cache-dir \
+            numpy==1.24.3 \
+            pandas==1.5.3 \
+            scikit-learn==1.3.0 \
+            scipy==1.10.1 \
+            cloudpickle==2.2.1 \
+            joblib==1.3.2 \
+            pyarrow \
+            xgboost==1.6.2 \
+            lightgbm==3.3.5 \
+            catboost==1.2
+        
+        echo "=== ALL PACKAGES INSTALLED SUCCESSFULLY ==="
+        
+        # Run the training script
+        exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
-        import argparse, os, sys, json, traceback, warnings, importlib.util
+        import argparse, os, sys, json, traceback, warnings, cloudpickle
         from datetime import datetime
         import numpy as np
         import pandas as pd
         from sklearn.model_selection import train_test_split
         from sklearn.metrics import (
             accuracy_score, precision_score, recall_score, f1_score,
-            roc_auc_score, log_loss, mean_squared_error, mean_absolute_error, r2_score
+            roc_auc_score, mean_squared_error, mean_absolute_error, r2_score
         )
         import joblib
         
         print("="*80)
-        print("TRAINING BRICK - LIBRARY CHECK")
+        print("TRAINING BRICK - PYTHON 3.9")
         print("="*80)
         
-        # Function to check if library is available
-        def is_library_available(library_name):
-            try:
-                spec = importlib.util.find_spec(library_name)
-                return spec is not None
-            except Exception:
-                return False
+        # Import boosting libraries
+        import xgboost as xgb
+        import lightgbm as lgb
+        import catboost as cb
         
-        # Check what's available
-        boosting_libs = ['xgboost', 'lightgbm', 'catboost']
-        available_libs = {}
-        
-        for lib in boosting_libs:
-            if is_library_available(lib):
-                available_libs[lib] = True
-                print(f"✓ {lib} available")
-            else:
-                available_libs[lib] = False
-                print(f"✗ {lib} not available")
-        
-        # Import what's available
-        XGB_AVAILABLE = available_libs.get('xgboost', False)
-        LGB_AVAILABLE = available_libs.get('lightgbm', False)
-        CB_AVAILABLE = available_libs.get('catboost', False)
-        
-        if XGB_AVAILABLE:
-            try:
-                import xgboost as xgb
-                print(f"✓ XGBoost {xgb.__version__} loaded")
-            except Exception:
-                XGB_AVAILABLE = False
-                print("⚠ XGBoost import failed")
-        
-        if LGB_AVAILABLE:
-            try:
-                import lightgbm as lgb
-                print(f"✓ LightGBM {lgb.__version__} loaded")
-            except Exception:
-                LGB_AVAILABLE = False
-                print("⚠ LightGBM import failed")
-        
-        if CB_AVAILABLE:
-            try:
-                import catboost as cb
-                print(f"✓ CatBoost {cb.__version__} loaded")
-            except Exception:
-                CB_AVAILABLE = False
-                print("⚠ CatBoost import failed")
-        
+        print(f"Python {sys.version}")
+        print(f"XGBoost {xgb.__version__}")
+        print(f"LightGBM {lgb.__version__}")
+        print(f"CatBoost {cb.__version__}")
         print("="*80)
         
         # Suppress warnings
@@ -101,10 +89,11 @@ implementation:
         # TRAINING FUNCTION
         # ============================================================================
         def train_model_safely(model, X_train, y_train, X_val=None, y_val=None):
+         
             model_class_name = model.__class__.__name__.lower()
             
             # XGBoost training
-            if XGB_AVAILABLE and 'xgboost' in model_class_name:
+            if 'xgboost' in model_class_name:
                 try:
                     fit_params = {}
                     if X_val is not None and y_val is not None and len(X_val) > 0:
@@ -116,7 +105,7 @@ implementation:
                     return model.fit(X_train, y_train)
             
             # LightGBM training
-            elif LGB_AVAILABLE and 'lgbm' in model_class_name:
+            elif 'lgbm' in model_class_name:
                 try:
                     fit_params = {}
                     if X_val is not None and y_val is not None and len(X_val) > 0:
@@ -128,7 +117,7 @@ implementation:
                     return model.fit(X_train, y_train)
             
             # CatBoost training
-            elif CB_AVAILABLE and 'catboost' in model_class_name:
+            elif 'catboost' in model_class_name:
                 try:
                     fit_params = {}
                     if X_val is not None and y_val is not None and len(X_val) > 0:
@@ -147,6 +136,7 @@ implementation:
         # METRICS FUNCTION
         # ============================================================================
         def calculate_model_metrics(model, X, y_true, task_type):
+        
             metrics = {}
             try:
                 y_pred = model.predict(X)
@@ -179,6 +169,41 @@ implementation:
                 print(f"[METRICS WARNING] {str(e)[:80]}")
             
             return metrics
+        
+        # ============================================================================
+        # FEATURE IMPORTANCE
+        # ============================================================================
+        def extract_feature_importance(model, feature_names):
+            
+            importance_data = {}
+            try:
+                # Universal method for models with feature_importances_
+                if hasattr(model, 'feature_importances_'):
+                    importances = model.feature_importances_
+                    if len(importances) == len(feature_names):
+                        importance_data['gain'] = dict(zip(feature_names, importances.tolist()))
+                
+                # XGBoost specific
+                if hasattr(model, 'get_booster'):
+                    try:
+                        fscore = model.get_booster().get_fscore()
+                        importance_data['fscore'] = fscore
+                    except:
+                        pass
+                
+                # CatBoost specific
+                if hasattr(model, 'get_feature_importance'):
+                    try:
+                        importances = model.get_feature_importance()
+                        if len(importances) == len(feature_names):
+                            importance_data['prediction_values_change'] = dict(zip(feature_names, importances.tolist()))
+                    except:
+                        pass
+            
+            except Exception as e:
+                print(f"[IMPORTANCE WARNING] {str(e)[:80]}")
+            
+            return importance_data
         
         # ============================================================================
         # MAIN FUNCTION
@@ -256,7 +281,11 @@ implementation:
                 if X_val is not None and y_val is not None:
                     val_metrics = calculate_model_metrics(trained_model, X_val, y_val, task)
                 
-                print("[STEP 6] Saving outputs...")
+                print("[STEP 6] Extracting feature importance...")
+                feature_names = list(X_train.columns)
+                importance_data = extract_feature_importance(trained_model, feature_names)
+                
+                print("[STEP 7] Saving outputs...")
                 # Create directories
                 os.makedirs(os.path.dirname(args.trained_model) or ".", exist_ok=True)
                 os.makedirs(os.path.dirname(args.training_metadata) or ".", exist_ok=True)
@@ -269,16 +298,16 @@ implementation:
                 # Training metadata
                 training_metadata = {
                     'timestamp': datetime.utcnow().isoformat() + 'Z',
-                    'model_class': trained_model.__class__.__name__,
+                    'algorithm': trained_model.__class__.__name__,
+                    'model_type': task,
                     'data_info': {
                         'training_samples': int(X_train.shape[0]),
                         'features': int(X_train.shape[1]),
                         'validation_samples': int(X_val.shape[0]) if X_val is not None else 0
                     },
-                    'available_libraries': {
-                        'xgboost': XGB_AVAILABLE,
-                        'lightgbm': LGB_AVAILABLE,
-                        'catboost': CB_AVAILABLE
+                    'model_info': {
+                        'model_class': trained_model.__class__.__name__,
+                        'is_fitted': True
                     }
                 }
                 
@@ -289,12 +318,24 @@ implementation:
                     'timestamp': datetime.utcnow().isoformat() + 'Z'
                 }
                 
-                # Feature importance (simplified)
+                # Feature importance
                 feature_importance_data = {
-                    'feature_names': list(X_train.columns),
                     'algorithm': trained_model.__class__.__name__,
-                    'note': 'Feature importance extraction depends on model type'
+                    'feature_names': feature_names,
+                    'importance': importance_data,
+                    'top_features': []
                 }
+                
+                # Get top 10 features if available
+                if 'gain' in importance_data:
+                    try:
+                        sorted_features = sorted(importance_data['gain'].items(), key=lambda x: x[1], reverse=True)[:10]
+                        feature_importance_data['top_features'] = [
+                            {'feature': feat, 'importance': float(imp)}
+                            for feat, imp in sorted_features
+                        ]
+                    except:
+                        pass
                 
                 # Save JSON files
                 with open(args.training_metadata, 'w') as f:
