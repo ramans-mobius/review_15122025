@@ -40,7 +40,8 @@ implementation:
             pyarrow \
             xgboost==1.6.2 \
             lightgbm==3.3.5 \
-            catboost==1.2
+            catboost==1.2 \
+            rapidfuzz
         
         echo "=== ALL PACKAGES INSTALLED SUCCESSFULLY ==="
         
