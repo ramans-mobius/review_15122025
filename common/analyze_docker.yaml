@@ -1,0 +1,472 @@
+name: ML Library Compatibility Analyzer
+description: Analyzes libraries in docker image and checks compatibility of XGBoost, LightGBM, and CatBoost
+inputs:
+  - name: docker_image
+    type: String
+    description: "Docker image to analyze"
+    default: "kumar2004/ml-base:v1"
+  - name: test_installation
+    type: Boolean
+    description: "Whether to test installation of compatible versions"
+    default: false
+outputs:
+  - name: base_libraries_report
+    type: Data
+    description: "Report of existing libraries and versions"
+  - name: compatibility_report
+    type: Data
+    description: "Compatibility analysis report"
+  - name: recommended_versions
+    type: Data
+    description: "JSON with recommended compatible versions"
+  - name: installation_test_results
+    type: Data
+    description: "Results of compatibility test installation"
+
+implementation:
+  container:
+    image: kumar2004/ml-base:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, json, subprocess, platform, re, warnings
+        from datetime import datetime
+        from packaging import version
+        
+        print("="*80)
+        print("ML LIBRARY COMPATIBILITY ANALYZER")
+        print("="*80)
+        
+        # ============================================================================
+        # MAIN FUNCTION
+        # ============================================================================
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--docker_image', type=str, default='kumar2004/ml-base:v1')
+            parser.add_argument('--test_installation', type=str, default='false')
+            parser.add_argument('--base_libraries_report', type=str, required=True)
+            parser.add_argument('--compatibility_report', type=str, required=True)
+            parser.add_argument('--recommended_versions', type=str, required=True)
+            parser.add_argument('--installation_test_results', type=str, required=True)
+            args = parser.parse_args()
+            
+            test_install = args.test_installation.lower() == 'true'
+            
+            try:
+                print(f"Analyzing image: {args.docker_image}")
+                print(f"Test installation: {test_install}")
+                print("="*80)
+                
+                # ========================================================================
+                # STEP 1: Analyze existing libraries in the base image
+                # ========================================================================
+                print("\\n1. ANALYZING EXISTING LIBRARIES...")
+                
+                def get_package_version(package_name):
+                    try:
+                        # Try to import and get version
+                        if package_name == 'sklearn':
+                            import sklearn
+                            return sklearn.__version__
+                        elif package_name == 'joblib':
+                            import joblib
+                            return joblib.__version__
+                        elif package_name == 'scipy':
+                            import scipy
+                            return scipy.__version__
+                        elif package_name == 'matplotlib':
+                            import matplotlib
+                            return matplotlib.__version__
+                        elif package_name == 'seaborn':
+                            import seaborn
+                            return seaborn.__version__
+                        elif package_name == 'plotly':
+                            import plotly
+                            return plotly.__version__
+                        elif package_name == 'statsmodels':
+                            import statsmodels
+                            return statsmodels.__version__
+                        else:
+                            # Generic approach
+                            result = subprocess.run(
+                                [sys.executable, '-c', f'import {package_name}; print({package_name}.__version__)'],
+                                capture_output=True,
+                                text=True,
+                                check=False
+                            )
+                            if result.returncode == 0:
+                                return result.stdout.strip()
+                            return 'Not installed'
+                    except Exception as e:
+                        return 'Not installed'
+                
+                # System information
+                system_info = {
+                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'python_version': sys.version,
+                    'platform': platform.platform(),
+                    'python_executable': sys.executable,
+                    'docker_image': args.docker_image
+                }
+                
+                # Check core ML libraries
+                core_libraries = [
+                    'numpy', 'pandas', 'scipy', 'sklearn', 'joblib',
+                    'matplotlib', 'seaborn', 'plotly', 'statsmodels'
+                ]
+                
+                core_versions = {}
+                for lib in core_libraries:
+                    ver = get_package_version(lib)
+                    core_versions[lib] = ver
+                    print(f"  {lib:20s}: {ver}")
+                
+                # Check target ML libraries
+                ml_libraries = ['xgboost', 'lightgbm', 'catboost']
+                ml_versions = {}
+                for lib in ml_libraries:
+                    ver = get_package_version(lib)
+                    ml_versions[lib] = ver
+                    print(f"  {lib:20s}: {ver}")
+                
+                # Get pip list
+                try:
+                    pip_result = subprocess.run(
+                        [sys.executable, '-m', 'pip', 'list', '--format=json'],
+                        capture_output=True,
+                        text=True
+                    )
+                    pip_list = json.loads(pip_result.stdout) if pip_result.returncode == 0 else []
+                except:
+                    pip_list = []
+                
+                # Create base libraries report
+                base_report = {
+                    'system_info': system_info,
+                    'core_libraries': core_versions,
+                    'ml_libraries': ml_versions,
+                    'pip_packages': pip_list
+                }
+                
+                # ========================================================================
+                # STEP 2: Generate compatibility analysis
+                # ========================================================================
+                print("\\n2. GENERATING COMPATIBILITY ANALYSIS...")
+                
+                # Extract Python version
+                python_version_str = sys.version.split()[0]
+                python_ver = version.parse(python_version_str)
+                
+                # Extract numpy version if available
+                numpy_version_str = core_versions.get('numpy', 'Not installed')
+                numpy_ver = None
+                if numpy_version_str != 'Not installed':
+                    # Clean version string
+                    numpy_version_str_clean = re.sub(r'[^0-9.]', '', numpy_version_str.split('+')[0])
+                    numpy_ver = version.parse(numpy_version_str_clean)
+                
+                # Compatibility analysis
+                compatibility = {
+                    'python_version': python_version_str,
+                    'numpy_version': numpy_version_str if numpy_ver else 'Unknown',
+                    'analysis_timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'recommendations': {},
+                    'compatibility_status': {}
+                }
+                
+                # XGBoost compatibility recommendations
+                xgb_compat = {
+                    'min_version': '1.6.0',
+                    'max_version': '1.7.5',
+                    'recommended': '1.6.2',
+                    'rationale': '',
+                    'notes': 'Matches model builder configuration'
+                }
+                
+                if numpy_ver:
+                    if numpy_ver >= version.parse('1.21.0'):
+                        xgb_compat['recommended'] = '1.7.3'
+                        xgb_compat['rationale'] = 'Optimized for newer numpy >= 1.21'
+                    elif numpy_ver >= version.parse('1.19.0'):
+                        xgb_compat['recommended'] = '1.6.2'
+                        xgb_compat['rationale'] = 'Stable with numpy 1.19-1.20'
+                    else:
+                        xgb_compat['min_version'] = '1.5.0'
+                        xgb_compat['recommended'] = '1.5.2'
+                        xgb_compat['rationale'] = 'Compatible with legacy numpy < 1.19'
+                
+                compatibility['recommendations']['xgboost'] = xgb_compat
+                print(f"  XGBoost: Recommended {xgb_compat['recommended']} ({xgb_compat['rationale']})")
+                
+                # LightGBM compatibility recommendations
+                lgb_compat = {
+                    'min_version': '3.3.0',
+                    'max_version': '4.0.0',
+                    'recommended': '3.3.5',
+                    'rationale': '',
+                    'notes': 'Matches model builder configuration'
+                }
+                
+                if numpy_ver:
+                    if numpy_ver >= version.parse('1.21.0'):
+                        lgb_compat['recommended'] = '3.3.5'
+                        lgb_compat['rationale'] = 'Fully compatible with numpy >= 1.21'
+                    elif numpy_ver >= version.parse('1.19.0'):
+                        lgb_compat['recommended'] = '3.3.5'
+                        lgb_compat['rationale'] = 'Stable with numpy 1.19-1.20'
+                    else:
+                        lgb_compat['min_version'] = '3.2.0'
+                        lgb_compat['recommended'] = '3.2.1'
+                        lgb_compat['rationale'] = 'Compatible with legacy numpy < 1.19'
+                
+                compatibility['recommendations']['lightgbm'] = lgb_compat
+                print(f"  LightGBM: Recommended {lgb_compat['recommended']} ({lgb_compat['rationale']})")
+                
+                # CatBoost compatibility recommendations
+                cb_compat = {
+                    'min_version': '1.0.0',
+                    'max_version': '1.2.5',
+                    'recommended': '1.2.2',
+                    'rationale': '',
+                    'notes': 'Close to model builder configuration (1.2.5)'
+                }
+                
+                if python_ver >= version.parse('3.9.0'):
+                    cb_compat['recommended'] = '1.2.5'
+                    cb_compat['rationale'] = 'Optimized for Python 3.9+'
+                elif python_ver >= version.parse('3.8.0'):
+                    cb_compat['recommended'] = '1.2.2'
+                    cb_compat['rationale'] = 'Stable for Python 3.8-3.9'
+                else:
+                    cb_compat['recommended'] = '1.2.0'
+                    cb_compat['rationale'] = 'Compatible with older Python'
+                
+                compatibility['recommendations']['catboost'] = cb_compat
+                print(f"  CatBoost: Recommended {cb_compat['recommended']} ({cb_compat['rationale']})")
+                
+                # Check current installations compatibility
+                for lib_name in ml_libraries:
+                    current_version = ml_versions.get(lib_name, 'Not installed')
+                    if current_version != 'Not installed':
+                        try:
+                            current_ver = version.parse(re.sub(r'[^0-9.]', '', current_version.split('+')[0]))
+                            min_ver = version.parse(compatibility['recommendations'][lib_name]['min_version'])
+                            max_ver = version.parse(compatibility['recommendations'][lib_name]['max_version'])
+                            
+                            if min_ver <= current_ver <= max_ver:
+                                compatibility['compatibility_status'][lib_name] = {
+                                    'status': 'COMPATIBLE',
+                                    'current_version': current_version,
+                                    'message': f'Version {current_version} is within compatible range'
+                                }
+                            else:
+                                compatibility['compatibility_status'][lib_name] = {
+                                    'status': 'INCOMPATIBLE',
+                                    'current_version': current_version,
+                                    'message': f'Version {current_version} is outside compatible range {min_ver}-{max_ver}'
+                                }
+                        except Exception as e:
+                            compatibility['compatibility_status'][lib_name] = {
+                                'status': 'UNKNOWN',
+                                'current_version': current_version,
+                                'message': f'Could not parse version: {str(e)}'
+                            }
+                    else:
+                        compatibility['compatibility_status'][lib_name] = {
+                            'status': 'NOT_INSTALLED',
+                            'current_version': 'Not installed',
+                            'message': f'{lib_name} is not installed in base image'
+                        }
+                
+                # Generate installation commands
+                install_commands = {
+                    'individual_commands': {
+                        'xgboost': f'pip install xgboost=={compatibility["recommendations"]["xgboost"]["recommended"]}',
+                        'lightgbm': f'pip install lightgbm=={compatibility["recommendations"]["lightgbm"]["recommended"]}',
+                        'catboost': f'pip install catboost=={compatibility["recommendations"]["catboost"]["recommended"]}'
+                    },
+                    'combined_command': f'pip install xgboost=={compatibility["recommendations"]["xgboost"]["recommended"]} lightgbm=={compatibility["recommendations"]["lightgbm"]["recommended"]} catboost=={compatibility["recommendations"]["catboost"]["recommended"]}',
+                    'requirements_content': f'''# Compatible ML libraries for {args.docker_image}
+                                              # Generated: {datetime.utcnow().isoformat() + 'Z'}
+                                              # Python: {python_version_str}
+                                              # NumPy: {numpy_version_str}
+                                              
+                                              xgboost=={compatibility["recommendations"]["xgboost"]["recommended"]}
+                                              lightgbm=={compatibility["recommendations"]["lightgbm"]["recommended"]}
+                                              catboost=={compatibility["recommendations"]["catboost"]["recommended"]}'''
+                }
+                
+                compatibility['installation'] = install_commands
+                
+                # ========================================================================
+                # STEP 3: Test installation if requested
+                # ========================================================================
+                test_results = {
+                    'test_performed': test_install,
+                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'results': {}
+                }
+                
+                if test_install:
+                    print("\\n3. TESTING INSTALLATION...")
+                    
+                    for lib_name, cmd in install_commands['individual_commands'].items():
+                        print(f"  Testing {lib_name} installation...")
+                        try:
+                            result = subprocess.run(
+                                cmd.split(),
+                                capture_output=True,
+                                text=True,
+                                timeout=60,
+                                check=False
+                            )
+                            
+                            if result.returncode == 0:
+                                test_results['results'][lib_name] = {
+                                    'status': 'SUCCESS',
+                                    'command': cmd,
+                                    'output': result.stdout[:500] + '...' if len(result.stdout) > 500 else result.stdout,
+                                    'return_code': result.returncode
+                                }
+                                print(f"    ✓ {lib_name} installed successfully")
+                            else:
+                                test_results['results'][lib_name] = {
+                                    'status': 'FAILED',
+                                    'command': cmd,
+                                    'error': result.stderr[:500] + '...' if len(result.stderr) > 500 else result.stderr,
+                                    'output': result.stdout[:500] + '...' if len(result.stdout) > 500 else result.stdout,
+                                    'return_code': result.returncode
+                                }
+                                print(f"    ✗ {lib_name} installation failed")
+                        except subprocess.TimeoutExpired:
+                            test_results['results'][lib_name] = {
+                                'status': 'TIMEOUT',
+                                'command': cmd,
+                                'error': 'Installation timed out after 60 seconds'
+                            }
+                            print(f"    {lib_name} installation timed out")
+                        except Exception as e:
+                            test_results['results'][lib_name] = {
+                                'status': 'ERROR',
+                                'command': cmd,
+                                'error': str(e)[:500]
+                            }
+                            print(f"    ⚠ {lib_name} installation error: {str(e)[:100]}")
+                else:
+                    print("\\n3. SKIPPING INSTALLATION TEST (test_installation=false)")
+                    test_results['results'] = {'message': 'Installation test was not requested'}
+                
+                # ========================================================================
+                # STEP 4: Generate final summary
+                # ========================================================================
+                print("\\n4. GENERATING FINAL SUMMARY...")
+                
+                summary = {
+                    'analysis_summary': {
+                        'docker_image': args.docker_image,
+                        'python_version': python_version_str,
+                        'numpy_version': numpy_version_str if numpy_ver else 'Unknown',
+                        'analysis_timestamp': datetime.utcnow().isoformat() + 'Z',
+                        'test_performed': test_install
+                    },
+                    'current_installations': ml_versions,
+                    'compatibility_summary': compatibility['compatibility_status'],
+                    'recommended_versions': {
+                        lib: compat['recommended']
+                        for lib, compat in compatibility['recommendations'].items()
+                    },
+                    'model_builder_comparison': {
+                        'xgboost': {
+                            'recommended': compatibility['recommendations']['xgboost']['recommended'],
+                            'model_builder_version': '1.6.2',
+                            'compatible': compatibility['recommendations']['xgboost']['recommended'] == '1.6.2'
+                        },
+                        'lightgbm': {
+                            'recommended': compatibility['recommendations']['lightgbm']['recommended'],
+                            'model_builder_version': '3.3.5',
+                            'compatible': compatibility['recommendations']['lightgbm']['recommended'] == '3.3.5'
+                        },
+                        'catboost': {
+                            'recommended': compatibility['recommendations']['catboost']['recommended'],
+                            'model_builder_version': '1.2.5',
+                            'compatible': abs(float(compatibility['recommendations']['catboost']['recommended']) - 1.2) < 0.1
+                        }
+                    },
+                    'installation_command': install_commands['combined_command']
+                }
+                
+                # ========================================================================
+                # STEP 5: Save all outputs
+                # ========================================================================
+                print("\\n5. SAVING OUTPUTS...")
+                
+                # Create directories
+                os.makedirs(os.path.dirname(args.base_libraries_report) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.compatibility_report) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.recommended_versions) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(args.installation_test_results) or ".", exist_ok=True)
+                
+                # Save reports
+                with open(args.base_libraries_report, 'w') as f:
+                    json.dump(base_report, f, indent=2)
+                print(f"✓ Base libraries report: {args.base_libraries_report}")
+                
+                with open(args.compatibility_report, 'w') as f:
+                    json.dump(compatibility, f, indent=2)
+                print(f"✓ Compatibility report: {args.compatibility_report}")
+                
+                with open(args.recommended_versions, 'w') as f:
+                    json.dump(summary, f, indent=2)
+                print(f"✓ Recommended versions: {args.recommended_versions}")
+                
+                with open(args.installation_test_results, 'w') as f:
+                    json.dump(test_results, f, indent=2)
+                print(f"✓ Installation test results: {args.installation_test_results}")
+                
+                # ========================================================================
+                # FINAL OUTPUT
+                # ========================================================================
+                print("\\n" + "="*80)
+                print("ANALYSIS COMPLETE")
+                print("="*80)
+                print(f"Image: {args.docker_image}")
+                print(f"Python: {python_version_str}")
+                print(f"NumPy: {numpy_version_str if numpy_ver else 'Not found'}")
+                print("\\nCOMPATIBILITY STATUS:")
+                for lib, status in compatibility['compatibility_status'].items():
+                    symbol = '✓' if status['status'] == 'COMPATIBLE' else '✗' if status['status'] == 'INCOMPATIBLE' else '?'
+                    print(f"  {symbol} {lib:10s} {status['current_version']:15s} ({status['status']})")
+                print("\\nRECOMMENDED VERSIONS:")
+                for lib, rec in compatibility['recommendations'].items():
+                    print(f"  {lib:10s} {rec['recommended']:10s}")
+                print(f"\\nINSTALLATION COMMAND:")
+                print(f"  {install_commands['combined_command']}")
+                print("\\nMODEL BUILDER COMPATIBILITY:")
+                for lib, comp in summary['model_builder_comparison'].items():
+                    symbol = '✓' if comp['compatible'] else '⚠'
+                    print(f"  {symbol} {lib:10s} Recommended: {comp['recommended']:8s} vs Model Builder: {comp['model_builder_version']}")
+                print("="*80)
+                
+            except Exception as e:
+                print(f"\\nERROR: {e}")
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        if __name__ == "__main__":
+            main()
+    args:
+      - --docker_image
+      - {inputValue: docker_image}
+      - --test_installation
+      - {inputValue: test_installation}
+      - --base_libraries_report
+      - {outputPath: base_libraries_report}
+      - --compatibility_report
+      - {outputPath: compatibility_report}
+      - --recommended_versions
+      - {outputPath: recommended_versions}
+      - --installation_test_results
+      - {outputPath: installation_test_results}
