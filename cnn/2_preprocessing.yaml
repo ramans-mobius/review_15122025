@@ -22,7 +22,7 @@ outputs:
     description: 'JSON configuration of applied preprocessing'
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v22
+    image: gurpreetgandhi/nesy-factory:v38-gpu
     command:
       - sh
       - -c
