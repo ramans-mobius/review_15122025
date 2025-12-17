@@ -1,5 +1,5 @@
 name: Image Preprocessing
-description: Takes UI components datasets with base64 images, applies ResNet preprocessing, and outputs processed data loaders.
+description: Takes UI components datasets with base64 images, applies ResNet preprocessing, and outputs processed data loaders with preprocessing metadata.
 inputs:
   - name: train_x
     type: Dataset
@@ -17,12 +17,13 @@ inputs:
 outputs:
   - name: processed_data_pickle
     type: Dataset
-  - name: weight_out
-    type: String
-    description: "ResNet preprocessing config as JSON string"
+    description: 'Processed PyTorch datasets and data loaders'
+  - name: preprocessing_metadata
+    type: Dataset
+    description: 'Preprocessing transforms and metadata for consistent evaluation'
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v38-gpu
+    image: nikhilv215/nesy-factory:v22
     command:
       - sh
       - -c
@@ -33,17 +34,13 @@ implementation:
         import torch
         import torchvision.transforms as transforms
         from torch.utils.data import DataLoader, Dataset
+        import copy
         
-        print('Number of arguments received:', len(sys.argv))
-        for i, arg in enumerate(sys.argv):
-            if i == 6:  # config string is long
-                print(f'  Argument {i}: {arg[:100]}...')
-            else:
-                print(f'  Argument {i}: {arg}')
+        print('Starting preprocessing with metadata generation...')
         
         # Get args
-        if len(sys.argv) < 8:
-            raise ValueError(f'Expected 8 arguments, got {len(sys.argv)}')
+        if len(sys.argv) < 9:
+            raise ValueError(f'Expected 9 arguments, got {len(sys.argv)}')
         
         train_x_path = sys.argv[1]
         train_y_path = sys.argv[2]
@@ -52,27 +49,29 @@ implementation:
         info_path = sys.argv[5]
         config_str = sys.argv[6]
         out_path = sys.argv[7]
-        weight_path = sys.argv[8]
+        metadata_path = sys.argv[8]
         
-        print('Starting preprocessing...')
         print(f'Train X path: {train_x_path}')
         print(f'Train Y path: {train_y_path}')
         
         # Custom Dataset class for base64 images
         class Base64ImageDataset(Dataset):
-            def __init__(self, images_data, labels, transform=None):
+            def __init__(self, images_data, labels, transform=None, return_filenames=False):
                 # Handle both dictionary and list formats
                 if isinstance(images_data, dict) and 'images' in images_data:
                     self.images = images_data['images']
                     self.filenames = images_data.get('filenames', [])
                     self.label_names = images_data.get('label_names', [])
+                    self.original_indices = images_data.get('original_indices', list(range(len(self.images))))
                 else:
                     self.images = images_data
                     self.filenames = []
                     self.label_names = []
+                    self.original_indices = list(range(len(self.images)))
                 
                 self.labels = labels
                 self.transform = transform
+                self.return_filenames = return_filenames
                 
             def __len__(self):
                 return len(self.images)
@@ -90,14 +89,20 @@ implementation:
                     # Get label
                     label = torch.tensor(self.labels[idx], dtype=torch.long)
                     
-                    return img, label
-                    
+                    if self.return_filenames and self.filenames:
+                        return img, label, self.filenames[idx]
+                    else:
+                        return img, label
+                        
                 except Exception as e:
                     print(f'Error loading image {idx}: {e}')
                     # Return a dummy image if there's an error
                     dummy_img = torch.zeros(3, 224, 224)
                     label = torch.tensor(0, dtype=torch.long)
-                    return dummy_img, label
+                    if self.return_filenames and self.filenames:
+                        return dummy_img, label, self.filenames[idx] if idx < len(self.filenames) else f'error_{idx}'
+                    else:
+                        return dummy_img, label
         
         class DataWrapper:
             def __init__(self, data_dict): 
@@ -122,55 +127,44 @@ implementation:
         with open(info_path, 'rb') as f: 
             dataset_info = pickle.load(f)
         
-        print(f'Loaded train X: {len(train_x_data) if isinstance(train_x_data, list) else len(train_x_data.get(\"images\", []))} samples')
-        print(f'Loaded train Y: {len(train_y_labels)} labels')
-        print(f'Loaded test X: {len(test_x_data) if isinstance(test_x_data, list) else len(test_x_data.get(\"images\", []))} samples')
-        print(f'Loaded test Y: {len(test_y_labels)} labels')
+        # Get counts
+        train_images_count = len(train_x_data['images']) if isinstance(train_x_data, dict) else len(train_x_data)
+        test_images_count = len(test_x_data['images']) if isinstance(test_x_data, dict) else len(test_x_data)
         
-        # Ensure labels match images count
-        if isinstance(train_x_data, dict):
-            train_images_count = len(train_x_data.get('images', []))
-        else:
-            train_images_count = len(train_x_data)
+        print(f'Loaded: {train_images_count} train images, {len(train_y_labels)} train labels')
+        print(f'Loaded: {test_images_count} test images, {len(test_y_labels)} test labels')
+        
+        # Sync counts if mismatch
+        def sync_data(images_data, labels, data_type='train'):
+            if isinstance(images_data, dict):
+                images_count = len(images_data['images'])
+            else:
+                images_count = len(images_data)
+                
+            if images_count != len(labels):
+                print(f'Warning: {data_type} images ({images_count}) and labels ({len(labels)}) count mismatch!')
+                min_count = min(images_count, len(labels))
+                
+                if isinstance(images_data, dict):
+                    images_data['images'] = images_data['images'][:min_count]
+                    for key in ['filenames', 'label_names', 'original_indices']:
+                        if key in images_data:
+                            images_data[key] = images_data[key][:min_count]
+                else:
+                    images_data = images_data[:min_count]
+                
+                labels = labels[:min_count]
             
-        if isinstance(test_x_data, dict):
-            test_images_count = len(test_x_data.get('images', []))
-        else:
-            test_images_count = len(test_x_data)
+            return images_data, labels
         
-        print(f'Train images: {train_images_count}, Train labels: {len(train_y_labels)}')
-        print(f'Test images: {test_images_count}, Test labels: {len(test_y_labels)}')
+        train_x_data, train_y_labels = sync_data(train_x_data, train_y_labels, 'train')
+        test_x_data, test_y_labels = sync_data(test_x_data, test_y_labels, 'test')
         
-        if train_images_count != len(train_y_labels):
-            print(f'Warning: Train images ({train_images_count}) and labels ({len(train_y_labels)}) count mismatch!')
-            # Use minimum of both
-            min_count = min(train_images_count, len(train_y_labels))
-            if isinstance(train_x_data, dict):
-                train_x_data['images'] = train_x_data['images'][:min_count]
-                if 'filenames' in train_x_data:
-                    train_x_data['filenames'] = train_x_data['filenames'][:min_count]
-                if 'label_names' in train_x_data:
-                    train_x_data['label_names'] = train_x_data['label_names'][:min_count]
-            else:
-                train_x_data = train_x_data[:min_count]
-            train_y_labels = train_y_labels[:min_count]
-        
-        if test_images_count != len(test_y_labels):
-            print(f'Warning: Test images ({test_images_count}) and labels ({len(test_y_labels)}) count mismatch!')
-            # Use minimum of both
-            min_count = min(test_images_count, len(test_y_labels))
-            if isinstance(test_x_data, dict):
-                test_x_data['images'] = test_x_data['images'][:min_count]
-                if 'filenames' in test_x_data:
-                    test_x_data['filenames'] = test_x_data['filenames'][:min_count]
-                if 'label_names' in test_x_data:
-                    test_x_data['label_names'] = test_x_data['label_names'][:min_count]
-            else:
-                test_x_data = test_x_data[:min_count]
-            test_y_labels = test_y_labels[:min_count]
-        
-        # Create transforms
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        # Define transforms (same as ResNet preprocessing)
+        normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], 
+            std=[0.229, 0.224, 0.225]
+        )
         
         # Training transforms with augmentation
         train_transform = transforms.Compose([
@@ -205,7 +199,7 @@ implementation:
             shuffle=True, 
             num_workers=2,
             pin_memory=True,
-            drop_last=True  # Drop last incomplete batch for stable batch norm
+            drop_last=True
         )
         
         test_loader = DataLoader(
@@ -217,18 +211,16 @@ implementation:
             drop_last=False
         )
         
-        # Get class names from dataset_info
+        # Get class info
         class_names = dataset_info.get('classes', [])
         label_to_idx = dataset_info.get('label_to_idx', {})
         
-        # If we don't have class names, create generic ones
         if not class_names:
             num_classes = dataset_info.get('output_dim', len(set(train_y_labels + test_y_labels)))
             class_names = [f'class_{i}' for i in range(num_classes)]
             label_to_idx = {name: i for i, name in enumerate(class_names)}
         
-        print(f'Classes: {class_names}')
-        print(f'Number of classes: {len(class_names)}')
+        print(f'Classes ({len(class_names)}): {class_names}')
         
         # Save processed data wrapper
         data_wrapper = DataWrapper({
@@ -245,9 +237,9 @@ implementation:
             'dataset_info': dataset_info,
             'train_samples': len(train_dataset),
             'test_samples': len(test_dataset),
-            'transform_info': {
-                'train_transform': str(train_transform),
-                'test_transform': str(test_transform)
+            'transforms': {
+                'train': train_transform,
+                'test': test_transform
             }
         })
         
@@ -255,55 +247,148 @@ implementation:
         with open(out_path, 'wb') as f: 
             pickle.dump(data_wrapper, f)
         
-        # Save weight config
-        weight_config = {
-            'preprocessing_complete': True, 
-            'image_size': image_size, 
-            'batch_size': batch_size,
-            'num_classes': len(class_names), 
-            'classes': class_names,
-            'label_to_idx': label_to_idx,
-            'train_samples': len(train_dataset),
-            'test_samples': len(test_dataset),
-            'original_config': config,
-            'transforms_applied': {
-                'train': [
-                    'Resize(256)',
-                    'RandomResizedCrop(224, scale=(0.8, 1.0))',
-                    'RandomHorizontalFlip(p=0.5)',
-                    'RandomRotation(10)',
-                    'ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1)',
-                    'ToTensor()',
-                    'Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])'
-                ],
-                'test': [
-                    'Resize(256)',
-                    'CenterCrop(224)',
-                    'ToTensor()',
-                    'Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])'
-                ]
+        # ======================================================
+        # CREATE PREPROCESSING METADATA FOR EVALUATOR
+        # ======================================================
+        
+        # Create preprocessing functions that can be serialized
+        class SerializablePreprocessor:
+            def __init__(self, transform, label_mapping, class_names, image_size):
+                self.transform = transform
+                self.label_to_idx = label_mapping
+                self.idx_to_label = {idx: label for label, idx in label_mapping.items()}
+                self.class_names = class_names
+                self.image_size = image_size
+                self.normalize_mean = [0.485, 0.456, 0.406]
+                self.normalize_std = [0.229, 0.224, 0.225]
+            
+            def preprocess_image(self, base64_string):
+        
+                try:
+                    img_data = base64.b64decode(base64_string)
+                    img = Image.open(io.BytesIO(img_data)).convert('RGB')
+                    if self.transform:
+                        img = self.transform(img)
+                    return img
+                except Exception as e:
+                    print(f'Error preprocessing image: {e}')
+                    return torch.zeros(3, self.image_size, self.image_size)
+            
+            def preprocess_batch(self, base64_strings):
+            
+                processed_images = []
+                for img_str in base64_strings:
+                    processed_images.append(self.preprocess_image(img_str))
+                return torch.stack(processed_images) if processed_images else torch.tensor([])
+            
+            def encode_labels(self, label_strings):
+              
+                return [self.label_to_idx.get(label, -1) for label in label_strings]
+            
+            def decode_labels(self, label_indices):
+              
+                return [self.idx_to_label.get(idx, f'unknown_{idx}') for idx in label_indices]
+            
+            def get_transform_description(self):
+              
+                transforms_list = []
+                if hasattr(self.transform, 'transforms'):
+                    for t in self.transform.transforms:
+                        transforms_list.append(str(t))
+                return transforms_list
+        
+        # Create preprocessors for train and test modes
+        train_preprocessor = SerializablePreprocessor(
+            train_transform, label_to_idx, class_names, image_size
+        )
+        
+        test_preprocessor = SerializablePreprocessor(
+            test_transform, label_to_idx, class_names, image_size
+        )
+        
+        # Create metadata dictionary
+        preprocessing_metadata = {
+            'metadata_version': '1.0',
+            'preprocessors': {
+                'train': train_preprocessor,
+                'test': test_preprocessor
+            },
+            'config': {
+                'image_size': image_size,
+                'batch_size': batch_size,
+                'num_classes': len(class_names),
+                'class_names': class_names,
+                'label_to_idx': label_to_idx,
+                'idx_to_label': {idx: label for label, idx in label_to_idx.items()},
+                'normalization': {
+                    'mean': [0.485, 0.456, 0.406],
+                    'std': [0.229, 0.224, 0.225]
+                },
+                'transforms': {
+                    'train': str(train_transform),
+                    'test': str(test_transform)
+                },
+                'transforms_components': {
+                    'train': [str(t) for t in train_transform.transforms],
+                    'test': [str(t) for t in test_transform.transforms]
+                }
+            },
+            'statistics': {
+                'train_samples': len(train_dataset),
+                'test_samples': len(test_dataset),
+                'class_distribution': dataset_info.get('class_distribution', {}),
+                'original_dataset_info': dataset_info
+            },
+            'functions': {
+                'preprocess_image': 'Call preprocessors[\"test\"].preprocess_image(base64_string)',
+                'preprocess_batch': 'Call preprocessors[\"test\"].preprocess_batch(base64_strings)',
+                'encode_labels': 'Call preprocessors[\"test\"].encode_labels(label_strings)',
+                'decode_labels': 'Call preprocessors[\"test\"].decode_labels(label_indices)'
             }
         }
         
-        os.makedirs(os.path.dirname(weight_path) or '.', exist_ok=True)
-        with open(weight_path, 'w') as f: 
-            json.dump(weight_config, f, indent=2)
+        # Save metadata
+        os.makedirs(os.path.dirname(metadata_path) or '.', exist_ok=True)
+        with open(metadata_path, 'wb') as f:
+            pickle.dump(preprocessing_metadata, f)
         
-        print('Preprocessing complete!')
-        print(f'Output saved to: {out_path}')
-        print(f'Config saved to: {weight_path}')
-        print(f'Train loader batches: {len(train_loader)} (batch size: {batch_size})')
-        print(f'Test loader batches: {len(test_loader)} (batch size: {batch_size})')
-        print(f'Total train samples: {len(train_dataset)}')
-        print(f'Total test samples: {len(test_dataset)}')
+        # Also save a JSON version for readability
+        json_metadata_path = metadata_path.replace('.pkl', '.json').replace('.pickle', '.json')
+        json_metadata = {
+            'metadata_version': preprocessing_metadata['metadata_version'],
+            'config': preprocessing_metadata['config'],
+            'statistics': preprocessing_metadata['statistics'],
+            'functions': preprocessing_metadata['functions']
+        }
+        with open(json_metadata_path, 'w') as f:
+            json.dump(json_metadata, f, indent=2, default=str)
         
-        # Print first batch info for verification
+        print('\\n' + '='*80)
+        print('PREPROCESSING COMPLETE')
+        print('='*80)
+        print(f'Processed data saved to: {out_path}')
+        print(f'Preprocessing metadata saved to: {metadata_path}')
+        print(f'Readable JSON version saved to: {json_metadata_path}')
+        print(f'\\nMetadata includes:')
+        print(f'  - Train/test preprocessors for consistent evaluation')
+        print(f'  - Label mappings: {len(label_to_idx)} classes')
+        print(f'  - Transform descriptions for both train and test modes')
+        print(f'  - Normalization parameters')
+        print(f'  - Dataset statistics')
+        print(f'\\nTrain loader: {len(train_loader)} batches ({len(train_dataset)} samples)')
+        print(f'Test loader: {len(test_loader)} batches ({len(test_dataset)} samples)')
+        print('='*80)
+        
+        # Verify first batch
         if len(train_loader) > 0:
             train_iter = iter(train_loader)
             images, labels = next(train_iter)
-            print(f'First batch - Images shape: {images.shape}, Labels shape: {labels.shape}')
-            print(f'First batch label distribution: {torch.bincount(labels).tolist()}')
-        " "$0" "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+            print(f'\\nVerification - First batch:')
+            print(f'  Images shape: {images.shape}')
+            print(f'  Labels shape: {labels.shape}')
+            print(f'  Label values: {labels[:5].tolist()}')
+            print(f'  Image range: [{images.min():.3f}, {images.max():.3f}]')
+        " "$0" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
     args:
       - {inputPath: train_x}
       - {inputPath: train_y}
@@ -312,4 +397,4 @@ implementation:
       - {inputPath: dataset_info}
       - {inputValue: model_config}
       - {outputPath: processed_data_pickle}
-      - {outputPath: weight_out}
+      - {outputPath: preprocessing_metadata}
