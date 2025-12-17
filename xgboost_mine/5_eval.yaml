@@ -1,4 +1,4 @@
-name: Evaluator
+]name: Evaluator
 description: Evaluates trained model on test data with proper schema output
 inputs:
   - name: trained_model
@@ -42,9 +42,35 @@ implementation:
       - |
         import sys, os, pickle, json, pandas as pd, numpy as np
         from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, log_loss
+        from sklearn.preprocessing import LabelEncoder
         import argparse
 
         print("STARTING EVALUATOR")
+
+        # Define the PreprocessingPipeline class BEFORE loading pickle files
+        class PreprocessingPipeline:
+            def __init__(self, steps, target_encoder=None):
+                self.steps = steps
+                self.target_encoder = target_encoder
+            
+            def transform_features(self, X):
+                """Transform features only"""
+                X_transformed = X.copy()
+                for name, transformer in self.steps:
+                    X_transformed = transformer.transform(X_transformed)
+                return X_transformed
+            
+            def transform_target(self, y):
+                """Transform target variable (for classification only)"""
+                if self.target_encoder is not None and hasattr(self.target_encoder, 'transform'):
+                    return self.target_encoder.transform(y)
+                return y
+            
+            def inverse_transform_target(self, y_encoded):
+                """Inverse transform target variable (for classification only)"""
+                if self.target_encoder is not None and hasattr(self.target_encoder, 'inverse_transform'):
+                    return self.target_encoder.inverse_transform(y_encoded)
+                return y_encoded
 
         # Import optional packages for their model classes
         try:
@@ -78,12 +104,16 @@ implementation:
         args = parser.parse_args()
 
         # Load model, test data, and preprocessing pipeline
+        print("Loading trained model...")
         with open(args.trained_model, 'rb') as f:
             model = pickle.load(f)
+        print("Loading test_X...")
         with open(args.test_X, 'rb') as f:
             test_X_dict = pickle.load(f)
+        print("Loading test_y...")
         with open(args.test_y, 'rb') as f:
             test_y_dict = pickle.load(f)
+        print("Loading preprocessing pipeline...")
         with open(args.preprocessing_pipeline, 'rb') as f:
             preprocessing_pipeline = pickle.load(f)
         
@@ -100,24 +130,38 @@ implementation:
         print(f'Test data shape: {X_test_raw.shape}')
         print(f'Target: {target_name}')
         print(f'Task type: {task_type}')
+        print(f'Preprocessing pipeline type: {type(preprocessing_pipeline)}')
 
         # Transform test data using preprocessing pipeline
-        X_test = preprocessing_pipeline.transform_features(X_test_raw)
+        try:
+            X_test = preprocessing_pipeline.transform_features(X_test_raw)
+            print(f'Successfully transformed features - shape: {X_test.shape}')
+        except Exception as e:
+            print(f"Error transforming features: {e}")
+            # Fallback: use raw data if transformation fails
+            X_test = X_test_raw
+            print(f"Using raw features as fallback - shape: {X_test.shape}")
         
         # Transform target if needed (for classification with label encoding)
         y_test = y_test_raw.copy()
-        if hasattr(preprocessing_pipeline, 'target_encoder') and preprocessing_pipeline.target_encoder is not None:
-            y_test = preprocessing_pipeline.transform_target(y_test_raw)
-            print(f'Target transformed using label encoder')
+        try:
+            if hasattr(preprocessing_pipeline, 'target_encoder') and preprocessing_pipeline.target_encoder is not None:
+                y_test = preprocessing_pipeline.transform_target(y_test_raw)
+                print(f'Target transformed using label encoder')
+        except Exception as e:
+            print(f"Error transforming target: {e}")
+            print(f"Using raw target as fallback")
         
         print(f'After preprocessing - X_test shape: {X_test.shape}')
         print(f'Unique target values: {np.unique(y_test)}')
 
         # Make predictions
         y_pred = model.predict(X_test)
+        print(f'Predictions made - shape: {y_pred.shape}')
         
         # Calculate metrics based on task type
         if task_type == 'regression':
+            print("Calculating regression metrics...")
             metrics_dict = {
                 'r2_score': float(r2_score(y_test, y_pred)),
                 'mae': float(mean_absolute_error(y_test, y_pred)),
@@ -135,8 +179,10 @@ implementation:
             loss_value = metrics_dict['mse']
             
         else:  # classification
+            print("Calculating classification metrics...")
             # Get number of classes
             n_classes = len(np.unique(y_test))
+            print(f'Number of classes: {n_classes}')
             
             metrics_dict = {
                 'accuracy': float(accuracy_score(y_test, y_pred)),
@@ -151,6 +197,7 @@ implementation:
             
             # Calculate loss (log loss for classification)
             if hasattr(model, 'predict_proba'):
+                print("Model has predict_proba, calculating probabilities...")
                 y_pred_proba = model.predict_proba(X_test)
                 loss_value = float(log_loss(y_test, y_pred_proba))
                 
@@ -159,13 +206,16 @@ implementation:
                     if n_classes == 2:
                         # Binary classification
                         metrics_dict['roc_auc'] = float(roc_auc_score(y_test, y_pred_proba[:, 1]))
+                        print(f"Binary ROC AUC calculated: {metrics_dict['roc_auc']}")
                     else:
                         # Multi-class classification
                         metrics_dict['roc_auc'] = float(roc_auc_score(y_test, y_pred_proba, multi_class='ovr', average='weighted'))
+                        print(f"Multi-class ROC AUC calculated: {metrics_dict['roc_auc']}")
                 except Exception as e:
                     print(f"ROC AUC calculation failed: {e}")
                     metrics_dict['roc_auc'] = 0.0
             else:
+                print("Model doesn't have predict_proba, using accuracy-based loss")
                 # If no predict_proba, use 1 - accuracy as loss
                 loss_value = 1 - metrics_dict['accuracy']
                 metrics_dict['roc_auc'] = 0.0
@@ -246,6 +296,8 @@ implementation:
         
         print(f"Evaluation completed for {task_type}")
         print(f"Key metrics: {metrics_dict}")
+        print(f"Metrics saved to: {args.metrics}")
+        print(f"Schema metrics saved to: {args.schema_metrics}")
     args:
       - --trained_model
       - {inputPath: trained_model}
