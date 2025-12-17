@@ -236,7 +236,7 @@ implementation:
                 print(f"  {key}: {value} (type: {type(value).__name__})")
         print(f"  confusion_matrix: {len(schema_metrics['confusion_matrix'])} values")
 
-        # Create evaluation report
+        # Create evaluation report - FIXED: Use proper string formatting
         if task_type == 'regression':
             evaluation_report = f'''
             REGRESSION EVALUATION REPORT
@@ -262,6 +262,12 @@ implementation:
         else:
             # Format confusion matrix for display
             cm_display = np.array(metrics_dict.get('confusion_matrix', []))
+            class_distribution = ""
+            unique_classes = np.unique(y_test)
+            for cls in unique_classes:
+                count = np.sum(y_test == cls)
+                class_distribution += f'Class {cls}: {count} samples\\n'
+            
             evaluation_report = f'''
             CLASSIFICATION EVALUATION REPORT
             ===============================
@@ -280,13 +286,7 @@ implementation:
             {cm_display}
             
             CLASS DISTRIBUTION:
-            '''
-            unique_classes = np.unique(y_test)
-            for cls in unique_classes:
-                count = np.sum(y_test == cls)
-                evaluation_report += f'Class {cls}: {count} samples\\n'
-            
-            evaluation_report += f'''
+            {class_distribution}
             TEST SAMPLES: {len(y_test)}
             FEATURES: {len(feature_names) if feature_names else X_test.shape[1]}
             NUMBER OF CLASSES: {len(unique_classes)}
