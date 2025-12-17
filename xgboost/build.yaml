@@ -1,4 +1,4 @@
-name: Boosting Model Builder v1.2 (Python 3.9)
+name: Boosting Model Builder v1.3 (Python 3.9)
 description: Builds boosting models in clean Python 3.9 environment
 inputs:
   - name: config_json
@@ -85,7 +85,6 @@ implementation:
         # ============================================================================
         
         def build_xgboost_model(config, task):
-            """Build XGBoost model"""
             base_params = {
                 'n_estimators': 100,
                 'max_depth': 6,
@@ -131,7 +130,7 @@ implementation:
             return model, 'xgboost'
 
         def build_catboost_model(config, task):
-            """Build CatBoost model"""
+          
             base_params = {
                 'iterations': 100,
                 'depth': 6,
@@ -183,7 +182,7 @@ implementation:
             return model, 'catboost'
 
         def build_lightgbm_model(config, task):
-            """Build LightGBM model"""
+        
             base_params = {
                 'n_estimators': 100,
                 'max_depth': -1,
@@ -230,7 +229,7 @@ implementation:
             return model, 'lightgbm'
 
         def build_adaboost_model(config, task):
-            """Build AdaBoost model"""
+           
             base_params = {
                 'n_estimators': 50,
                 'learning_rate': 1.0,
@@ -271,7 +270,7 @@ implementation:
             return model, 'adaboost'
 
         def build_gradient_boosting_model(config, task):
-            """Build GradientBoosting model"""
+     
             base_params = {
                 'n_estimators': 100,
                 'max_depth': 3,
@@ -304,7 +303,7 @@ implementation:
             return model, 'gradient_boosting'
 
         def build_hist_gradient_boosting_model(config, task):
-            """Build HistGradientBoosting model"""
+         
             base_params = {
                 'max_iter': 100,
                 'max_depth': 3,
@@ -465,7 +464,7 @@ implementation:
                     json.dump(model_info, f, indent=2)
                 print(f"✓ Model info saved: {args.model_info_out}")
                 
-                print("\n" + "="*80)
+                print("\\n" + "="*80)
                 print("BUILD SUCCESSFUL")
                 print("="*80)
                 print(f"Algorithm: {algo_name}")
