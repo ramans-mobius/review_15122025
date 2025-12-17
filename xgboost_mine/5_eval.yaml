@@ -284,7 +284,7 @@ implementation:
             unique_classes = np.unique(y_test)
             for cls in unique_classes:
                 count = np.sum(y_test == cls)
-                evaluation_report += f'Class {cls}: {count} samples\n'
+                evaluation_report += f'Class {cls}: {count} samples\\n'
             
             evaluation_report += f'''
             TEST SAMPLES: {len(y_test)}
