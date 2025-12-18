@@ -1,0 +1,215 @@
+name: XGBoost Training Schema Updater
+description: Updates the training schema with XGBoost training metrics
+
+inputs:
+  - { name: schema_id, type: String, description: "The ID of the training schema to update." }
+  - { name: training_history, type: String, description: "Training history JSON from Trainer output." }
+  - { name: schema_training_metrics, type: String, description: "Schema training metrics JSON from Trainer output." }
+  - { name: epoch_loss, type: String, description: "Epoch loss JSON from Trainer output." }
+  - { name: model_id, type: String, description: "The ID of the model." }
+  - { name: execution_id, type: String, description: "The ID of the execution." }
+  - { name: tenant_id, type: String, description: "The ID of the tenant." }
+  - { name: project_id, type: String, description: "The ID of the project." }
+  - { name: bearer_auth_token, type: String, description: "Bearer token for authentication." }
+  - { name: domain, type: String, description: "The domain for the API endpoint." }
+
+outputs:
+  - { name: training_schema_updated, type: String, description: "Confirmation of training schema update." }
+
+implementation:
+  container:
+    image: python:3.9-slim
+    command:
+      - sh
+      - -c
+      - |
+        pip install requests
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import json
+        import argparse
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--training_history', type=str, required=True)
+        parser.add_argument('--schema_training_metrics', type=str, required=True)
+        parser.add_argument('--epoch_loss', type=str, required=True)
+        parser.add_argument('--model_id', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)
+        parser.add_argument('--tenant_id', type=str, required=True)
+        parser.add_argument('--project_id', type=str, required=True)
+        parser.add_argument('--bearer_auth_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--training_schema_updated', type=str, required=True)
+        args = parser.parse_args()
+
+        # Read input files
+        with open(args.training_history, 'r') as f:
+            training_history = json.load(f)
+        
+        with open(args.schema_training_metrics, 'r') as f:
+            schema_metrics = json.load(f)
+        
+        with open(args.epoch_loss, 'r') as f:
+            epoch_data = json.load(f)
+        
+        with open(args.bearer_auth_token, 'r') as f:
+            bearer_auth_token = f.read().strip()
+        
+        with open(args.tenant_id, 'r') as f:
+            tenant_id = f.read().strip()
+
+        # Prepare custom metrics
+        custom_metrics = {
+            "train_precision": training_history.get("train_metrics", {}).get("precision", 0.0),
+            "train_recall": training_history.get("train_metrics", {}).get("recall", 0.0),
+            "train_f1_score": training_history.get("train_metrics", {}).get("f1_score", 0.0),
+            "train_roc_auc": training_history.get("train_metrics", {}).get("roc_auc", 0.0),
+            "validation_precision": training_history.get("validation_metrics", {}).get("precision", 0.0),
+            "validation_recall": training_history.get("validation_metrics", {}).get("recall", 0.0),
+            "validation_f1_score": training_history.get("validation_metrics", {}).get("f1_score", 0.0),
+            "validation_roc_auc": training_history.get("validation_metrics", {}).get("roc_auc", 0.0)
+        }
+
+        # For regression tasks, add regression metrics
+        if training_history.get("task") == "regression":
+            custom_metrics.update({
+                "train_r2_score": training_history.get("train_metrics", {}).get("r2_score", 0.0),
+                "train_mae": training_history.get("train_metrics", {}).get("mae", 0.0),
+                "train_rmse": training_history.get("train_metrics", {}).get("rmse", 0.0),
+                "validation_r2_score": training_history.get("validation_metrics", {}).get("r2_score", 0.0),
+                "validation_mae": training_history.get("validation_metrics", {}).get("mae", 0.0),
+                "validation_rmse": training_history.get("validation_metrics", {}).get("rmse", 0.0)
+            })
+
+        # Create training schema row
+        training_row = {
+            "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
+            "projectId": args.project_id,
+            "model_id": args.model_id,
+            "epoch": schema_metrics.get("epoch", 0),
+            "loss": float(schema_metrics.get("loss", 0.0)),
+            "accuracy": float(schema_metrics.get("accuracy", 0.0)),
+            "validation_loss": float(schema_metrics.get("validation_loss", 0.0)),
+            "validation_accuracy": float(schema_metrics.get("validation_accuracy", 0.0)),
+            "custom_metrics": json.dumps(custom_metrics),
+            "tenant_id": tenant_id
+        }
+
+        # Set up API call
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_auth_token}'
+        }
+
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[408, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "PUT", "POST", "DELETE", "OPTIONS", "TRACE"],
+            backoff_factor=1
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        http = requests.Session()
+        http.mount("https://", adapter)
+        http.mount("http://", adapter)
+
+        # Check if row exists
+        check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
+        check_payload = {
+            "dbType": "TIDB",
+            "ownedOnly": True,
+            "filter": {
+                "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
+                "model_id": args.model_id,
+                "projectId": args.project_id
+            }
+        }
+
+        print(f"Checking for existing training record with execution_id: {args.execution_id}, model_id: {args.model_id}")
+        
+        try:
+            response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
+            response.raise_for_status()
+            response_data = response.json()
+            
+            if response_data.get("content"):
+                print("Training record found: Updating row")
+                update_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                update_payload = {
+                    "dbType": "TIDB",
+                    "conditionalFilter": {
+                        "conditions": [
+                            {"field": "execution_id", "operator": "EQUAL", "value": int(args.execution_id) if args.execution_id.isdigit() else 0},
+                            {"field": "model_id", "operator": "EQUAL", "value": args.model_id},
+                            {"field": "projectId", "operator": "EQUAL", "value": args.project_id}
+                        ]
+                    },
+                    "partialUpdateRequests": [{
+                        "patch": [
+                            {"operation": "REPLACE", "path": "epoch", "value": training_row["epoch"]},
+                            {"operation": "REPLACE", "path": "loss", "value": training_row["loss"]},
+                            {"operation": "REPLACE", "path": "accuracy", "value": training_row["accuracy"]},
+                            {"operation": "REPLACE", "path": "validation_loss", "value": training_row["validation_loss"]},
+                            {"operation": "REPLACE", "path": "validation_accuracy", "value": training_row["validation_accuracy"]},
+                            {"operation": "REPLACE", "path": "custom_metrics", "value": training_row["custom_metrics"]}
+                        ]
+                    }]
+                }
+                
+                response = http.patch(update_url, headers=headers, json=update_payload, timeout=60)
+                response.raise_for_status()
+                print("Successfully updated training record.")
+            else:
+                print("No training record found: Creating new row")
+                create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                create_payload = {"data": [training_row]}
+                
+                response = http.post(create_url, headers=headers, json=json.dumps(create_payload), timeout=60)
+                response.raise_for_status()
+                print("Successfully created new training record.")
+            
+            print(f"Response: {response.json()}")
+            
+            # Write success confirmation
+            with open(args.training_schema_updated, 'w') as f:
+                json.dump({"status": "success", "message": "Training schema updated successfully"}, f)
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error: {e}")
+            if e.response is not None:
+                print(f"Response Status Code: {e.response.status_code}")
+                print(f"Response Content: {e.response.text}")
+            # Write error confirmation
+            with open(args.training_schema_updated, 'w') as f:
+                json.dump({"status": "error", "message": str(e)}, f)
+            exit(1)
+
+    args:
+      - --schema_id
+      - {inputValue: schema_id}
+      - --training_history
+      - {inputPath: training_history}
+      - --schema_training_metrics
+      - {inputPath: schema_training_metrics}
+      - --epoch_loss
+      - {inputPath: epoch_loss}
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --tenant_id
+      - {inputPath: tenant_id}
+      - --project_id
+      - {inputValue: project_id}
+      - --bearer_auth_token
+      - {inputPath: bearer_auth_token}
+      - --domain
+      - {inputValue: domain}
+      - --training_schema_updated
+      - {outputPath: training_schema_updated}
