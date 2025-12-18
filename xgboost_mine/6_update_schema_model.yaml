@@ -1,0 +1,260 @@
+name: XGBoost Model Schema Updater
+description: Updates the model schema with XGBoost model metadata and configuration
+
+inputs:
+  - { name: schema_id, type: String, description: "The ID of the model schema to update." }
+  - { name: data_info, type: String, description: "Data info JSON from DataLoader output." }
+  - { name: feature_info, type: String, description: "Feature info JSON from Preprocessor output." }
+  - { name: model_info_out, type: String, description: "Model info JSON from ModelBuilder output." }
+  - { name: weight_out, type: String, description: "Weight config JSON from Preprocessor output." }
+  - { name: config_str, type: String, description: "Unified configuration JSON string." }
+  - { name: model_id, type: String, description: "The ID of the model." }
+  - { name: execution_id, type: String, description: "The ID of the execution." }
+  - { name: tenant_id, type: String, description: "The ID of the tenant." }
+  - { name: project_id, type: String, description: "The ID of the project." }
+  - { name: bearer_auth_token, type: String, description: "Bearer token for authentication." }
+  - { name: domain, type: String, description: "The domain for the API endpoint." }
+  - { name: architecture_type, type: String, description: "Architecture type.", default: "XGBoost" }
+  - { name: source, type: String, description: "Source of model.", default: "auto-generated" }
+  - { name: model_name, type: String, description: "Optional custom model name.", default: "" }
+
+outputs:
+  - { name: model_schema_updated, type: String, description: "Confirmation of model schema update." }
+
+implementation:
+  container:
+    image: python:3.9-slim
+    command:
+      - sh
+      - -c
+      - |
+        pip install requests pandas
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import json
+        import argparse
+        import requests
+        import pandas as pd
+        from datetime import datetime
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--data_info', type=str, required=True)
+        parser.add_argument('--feature_info', type=str, required=True)
+        parser.add_argument('--model_info_out', type=str, required=True)
+        parser.add_argument('--weight_out', type=str, required=True)
+        parser.add_argument('--config_str', type=str, required=True)
+        parser.add_argument('--model_id', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)
+        parser.add_argument('--tenant_id', type=str, required=True)
+        parser.add_argument('--project_id', type=str, required=True)
+        parser.add_argument('--bearer_auth_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--architecture_type', type=str, default="XGBoost")
+        parser.add_argument('--source', type=str, default="auto-generated")
+        parser.add_argument('--model_name', type=str, default="")
+        parser.add_argument('--model_schema_updated', type=str, required=True)
+        args = parser.parse_args()
+
+        # Read input files
+        with open(args.data_info, 'r') as f:
+            data_info = json.load(f)
+        
+        with open(args.feature_info, 'r') as f:
+            feature_info = json.load(f)
+        
+        with open(args.model_info_out, 'r') as f:
+            model_info = json.load(f)
+        
+        with open(args.weight_out, 'r') as f:
+            weight_config = json.load(f)
+        
+        config = json.loads(args.config_str)
+        
+        with open(args.bearer_auth_token, 'r') as f:
+            bearer_auth_token = f.read().strip()
+        
+        with open(args.tenant_id, 'r') as f:
+            tenant_id = f.read().strip()
+
+        # Prepare model schema data
+        model_specific_config = {
+            "algorithm": model_info.get("algorithm", "XGBoost"),
+            "task": model_info.get("task", "classification"),
+            "parameters": model_info.get("parameters", {}),
+            "data_info": {
+                "original_samples": data_info.get("original_samples", 0),
+                "final_samples": data_info.get("final_samples", 0),
+                "features_count": data_info.get("features_count", 0),
+                "target_column": data_info.get("target_column", ""),
+                "task_type": data_info.get("task_type", "")
+            },
+            "feature_info": {
+                "original_features": feature_info.get("original_features", 0),
+                "final_features": feature_info.get("final_features", 0),
+                "feature_names": feature_info.get("feature_names", []),
+                "preprocessing_applied": feature_info.get("preprocessing_applied", [])
+            },
+            "preprocessing_config": weight_config.get("preprocessing_config", {}),
+            "original_config": config
+        }
+
+        # Create model name if not provided
+        if not args.model_name:
+            model_name = f"XGBoost_{model_info.get('task', 'model')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        else:
+            model_name = args.model_name
+
+        # Prepare input and output shapes
+        input_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, {feature_info.get('final_features', 0)}]"
+        output_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, 1]"  # Single output for XGBoost
+
+        # Create model schema row
+        model_row = {
+            "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
+            "model_id": args.model_id,
+            "tenant_id": tenant_id,
+            "projectId": args.project_id,
+            "name": model_name,
+            "architecture_type": args.architecture_type,
+            "symbolic_profile": json.dumps({
+                "algorithm": model_info.get("algorithm", "XGBoost"),
+                "task": model_info.get("task", "classification"),
+                "feature_count": feature_info.get("final_features", 0)
+            }),
+            "input_shape": input_shape,
+            "output_shape": output_shape,
+            "model_weights_cdn": "N/A",  # XGBoost doesn't have weight URLs like CNNs
+            "parameter_count": str(weight_config.get('dataset_stats', {}).get('feature_dimension', 0)),
+            "source": args.source,
+            "created_by": "system",
+            "created_at": datetime.now().isoformat(),
+            "model_specific_config": json.dumps(model_specific_config)
+        }
+
+        # Set up API call
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_auth_token}'
+        }
+
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[408, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "PUT", "POST", "DELETE", "OPTIONS", "TRACE"],
+            backoff_factor=1
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        http = requests.Session()
+        http.mount("https://", adapter)
+        http.mount("http://", adapter)
+
+        # Check if row exists
+        check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
+        check_payload = {
+            "dbType": "TIDB",
+            "ownedOnly": True,
+            "filter": {
+                "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
+                "model_id": args.model_id,
+                "projectId": args.project_id
+            }
+        }
+
+        print(f"Checking for existing model with execution_id: {args.execution_id}, model_id: {args.model_id}")
+        
+        try:
+            response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
+            response.raise_for_status()
+            response_data = response.json()
+            
+            if response_data.get("content"):
+                print("Model instance found: Updating row")
+                update_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                update_payload = {
+                    "dbType": "TIDB",
+                    "conditionalFilter": {
+                        "conditions": [
+                            {"field": "execution_id", "operator": "EQUAL", "value": int(args.execution_id) if args.execution_id.isdigit() else 0},
+                            {"field": "model_id", "operator": "EQUAL", "value": args.model_id},
+                            {"field": "projectId", "operator": "EQUAL", "value": args.project_id}
+                        ]
+                    },
+                    "partialUpdateRequests": [{
+                        "patch": [
+                            {"operation": "REPLACE", "path": "name", "value": model_row["name"]},
+                            {"operation": "REPLACE", "path": "symbolic_profile", "value": model_row["symbolic_profile"]},
+                            {"operation": "REPLACE", "path": "input_shape", "value": model_row["input_shape"]},
+                            {"operation": "REPLACE", "path": "output_shape", "value": model_row["output_shape"]},
+                            {"operation": "REPLACE", "path": "parameter_count", "value": model_row["parameter_count"]},
+                            {"operation": "REPLACE", "path": "model_specific_config", "value": model_row["model_specific_config"]}
+                        ]
+                    }]
+                }
+                
+                response = http.patch(update_url, headers=headers, json=update_payload, timeout=60)
+                response.raise_for_status()
+                print("Successfully updated model instance.")
+            else:
+                print("No model instance found: Creating new row")
+                create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                create_payload = {"data": [model_row]}
+                
+                response = http.post(create_url, headers=headers, json=json.dumps(create_payload), timeout=60)
+                response.raise_for_status()
+                print("Successfully created new model instance.")
+            
+            print(f"Response: {response.json()}")
+            
+            # Write success confirmation
+            with open(args.model_schema_updated, 'w') as f:
+                json.dump({"status": "success", "message": "Model schema updated successfully"}, f)
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error: {e}")
+            if e.response is not None:
+                print(f"Response Status Code: {e.response.status_code}")
+                print(f"Response Content: {e.response.text}")
+            # Write error confirmation
+            with open(args.model_schema_updated, 'w') as f:
+                json.dump({"status": "error", "message": str(e)}, f)
+            exit(1)
+
+    args:
+      - --schema_id
+      - {inputValue: schema_id}
+      - --data_info
+      - {inputPath: data_info}
+      - --feature_info
+      - {inputPath: feature_info}
+      - --model_info_out
+      - {inputPath: model_info_out}
+      - --weight_out
+      - {inputPath: weight_out}
+      - --config_str
+      - {inputValue: config_str}
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --tenant_id
+      - {inputPath: tenant_id}
+      - --project_id
+      - {inputValue: project_id}
+      - --bearer_auth_token
+      - {inputPath: bearer_auth_token}
+      - --domain
+      - {inputValue: domain}
+      - --architecture_type
+      - {inputValue: architecture_type}
+      - --source
+      - {inputValue: source}
+      - --model_name
+      - {inputValue: model_name}
+      - --model_schema_updated
+      - {outputPath: model_schema_updated}
