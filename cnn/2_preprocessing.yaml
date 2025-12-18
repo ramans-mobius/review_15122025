@@ -1,4 +1,4 @@
-name: Preprocess Images
+name: Preprocess Image
 description: Takes UI components training data with base64 images, fits ResNet preprocessing on train only.
 inputs:
   - name: train_x
@@ -12,7 +12,7 @@ inputs:
     description: 'Dataset information including classes and label mappings'
   - name: model_config
     type: String
-    description: 'ResNet configuration as JSON string'
+    description: 'Model configuration as JSON string'
 outputs:
   - name: preprocessing_metadata
     type: Dataset
