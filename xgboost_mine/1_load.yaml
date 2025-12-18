@@ -27,7 +27,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v38-gpu
+    image: kumar2004/mobius:1.0
     command:
       - sh
       - -c
