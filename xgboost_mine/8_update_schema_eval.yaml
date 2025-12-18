@@ -1,0 +1,237 @@
+name: XGBoost Evaluation Schema Updater
+description: Updates the evaluation schema with XGBoost evaluation metrics
+
+inputs:
+  - { name: schema_id, type: String, description: "The ID of the evaluation schema to update." }
+  - { name: schema_metrics, type: String, description: "Schema metrics JSON from Evaluator output." }
+  - { name: metrics_json, type: String, description: "Full metrics JSON from Evaluator output." }
+  - { name: model_info_out, type: String, description: "Model info JSON from ModelBuilder output." }
+  - { name: training_history, type: String, description: "Training history JSON from Trainer output." }
+  - { name: model_id, type: String, description: "The ID of the model." }
+  - { name: execution_id, type: String, description: "The ID of the execution." }
+  - { name: tenant_id, type: String, description: "The ID of the tenant." }
+  - { name: project_id, type: String, description: "The ID of the project." }
+  - { name: bearer_auth_token, type: String, description: "Bearer token for authentication." }
+  - { name: domain, type: String, description: "The domain for the API endpoint." }
+  - { name: model_name, type: String, description: "Optional custom model name.", default: "" }
+
+outputs:
+  - { name: evaluation_schema_updated, type: String, description: "Confirmation of evaluation schema update." }
+
+implementation:
+  container:
+    image: python:3.9-slim
+    command:
+      - sh
+      - -c
+      - |
+        pip install requests
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import json
+        import argparse
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--schema_metrics', type=str, required=True)
+        parser.add_argument('--metrics_json', type=str, required=True)
+        parser.add_argument('--model_info_out', type=str, required=True)
+        parser.add_argument('--training_history', type=str, required=True)
+        parser.add_argument('--model_id', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)
+        parser.add_argument('--tenant_id', type=str, required=True)
+        parser.add_argument('--project_id', type=str, required=True)
+        parser.add_argument('--bearer_auth_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--model_name', type=str, default="")
+        parser.add_argument('--evaluation_schema_updated', type=str, required=True)
+        args = parser.parse_args()
+
+        # Read input files
+        with open(args.schema_metrics, 'r') as f:
+            schema_metrics = json.load(f)
+        
+        with open(args.metrics_json, 'r') as f:
+            full_metrics = json.load(f)
+        
+        with open(args.model_info_out, 'r') as f:
+            model_info = json.load(f)
+        
+        with open(args.training_history, 'r') as f:
+            training_history = json.load(f)
+        
+        with open(args.bearer_auth_token, 'r') as f:
+            bearer_auth_token = f.read().strip()
+        
+        with open(args.tenant_id, 'r') as f:
+            tenant_id = f.read().strip()
+
+        # Extract test metrics from full metrics
+        test_metrics = full_metrics.get("test_metrics", {})
+        
+        # Create model name if not provided
+        if not args.model_name:
+            model_name = f"XGBoost_{model_info.get('task', 'model')}"
+        else:
+            model_name = args.model_name
+
+        # Determine model type based on task
+        model_type = model_info.get("task", "classification").capitalize()
+
+        # Prepare confusion matrix (convert to list of floats)
+        confusion_matrix = []
+        cm_raw = test_metrics.get("confusion_matrix", [])
+        if cm_raw:
+            if isinstance(cm_raw[0], list):
+                for row in cm_raw:
+                    confusion_matrix.extend([float(x) for x in row])
+            else:
+                confusion_matrix = [float(x) for x in cm_raw]
+
+        # Create evaluation schema row
+        evaluation_row = {
+            "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
+            "model_id": args.model_id,
+            "projectId": args.project_id,
+            "accuracy": float(test_metrics.get("accuracy", schema_metrics.get("accuracy", 0.0))),
+            "precision_score": float(test_metrics.get("precision", schema_metrics.get("precision", 0.0))),
+            "recall": float(test_metrics.get("recall", schema_metrics.get("recall", 0.0))),
+            "f1_score": float(test_metrics.get("f1_score", schema_metrics.get("f1_score", 0.0))),
+            "roc_auc": float(test_metrics.get("roc_auc", schema_metrics.get("roc_auc", 0.0))),
+            "loss": str(test_metrics.get("loss", schema_metrics.get("loss", "0.0"))),
+            "confusion_matrix": confusion_matrix,
+            "tenant_id": tenant_id,
+            "model_name": model_name,
+            "model_type": model_type,
+            "r2_score": float(test_metrics.get("r2_score", schema_metrics.get("r2_score", 0.0))),
+            "mse": float(test_metrics.get("mse", 0.0)),
+            "rmse_score": float(test_metrics.get("rmse", schema_metrics.get("rmse", 0.0)))
+        }
+
+        # Set up API call
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_auth_token}'
+        }
+
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[408, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "PUT", "POST", "DELETE", "OPTIONS", "TRACE"],
+            backoff_factor=1
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        http = requests.Session()
+        http.mount("https://", adapter)
+        http.mount("http://", adapter)
+
+        # Check if row exists
+        check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
+        check_payload = {
+            "dbType": "TIDB",
+            "ownedOnly": True,
+            "filter": {
+                "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
+                "model_id": args.model_id,
+                "projectId": args.project_id
+            }
+        }
+
+        print(f"Checking for existing evaluation record with execution_id: {args.execution_id}, model_id: {args.model_id}")
+        
+        try:
+            response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
+            response.raise_for_status()
+            response_data = response.json()
+            
+            if response_data.get("content"):
+                print("Evaluation record found: Updating row")
+                update_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                update_payload = {
+                    "dbType": "TIDB",
+                    "conditionalFilter": {
+                        "conditions": [
+                            {"field": "execution_id", "operator": "EQUAL", "value": int(args.execution_id) if args.execution_id.isdigit() else 0},
+                            {"field": "model_id", "operator": "EQUAL", "value": args.model_id},
+                            {"field": "projectId", "operator": "EQUAL", "value": args.project_id}
+                        ]
+                    },
+                    "partialUpdateRequests": [{
+                        "patch": [
+                            {"operation": "REPLACE", "path": "accuracy", "value": evaluation_row["accuracy"]},
+                            {"operation": "REPLACE", "path": "precision_score", "value": evaluation_row["precision_score"]},
+                            {"operation": "REPLACE", "path": "recall", "value": evaluation_row["recall"]},
+                            {"operation": "REPLACE", "path": "f1_score", "value": evaluation_row["f1_score"]},
+                            {"operation": "REPLACE", "path": "roc_auc", "value": evaluation_row["roc_auc"]},
+                            {"operation": "REPLACE", "path": "loss", "value": evaluation_row["loss"]},
+                            {"operation": "REPLACE", "path": "confusion_matrix", "value": evaluation_row["confusion_matrix"]},
+                            {"operation": "REPLACE", "path": "model_name", "value": evaluation_row["model_name"]},
+                            {"operation": "REPLACE", "path": "model_type", "value": evaluation_row["model_type"]},
+                            {"operation": "REPLACE", "path": "r2_score", "value": evaluation_row["r2_score"]},
+                            {"operation": "REPLACE", "path": "mse", "value": evaluation_row["mse"]},
+                            {"operation": "REPLACE", "path": "rmse_score", "value": evaluation_row["rmse_score"]}
+                        ]
+                    }]
+                }
+                
+                response = http.patch(update_url, headers=headers, json=update_payload, timeout=60)
+                response.raise_for_status()
+                print("Successfully updated evaluation record.")
+            else:
+                print("No evaluation record found: Creating new row")
+                create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                create_payload = {"data": [evaluation_row]}
+                
+                response = http.post(create_url, headers=headers, json=json.dumps(create_payload), timeout=60)
+                response.raise_for_status()
+                print("Successfully created new evaluation record.")
+            
+            print(f"Response: {response.json()}")
+            
+            # Write success confirmation
+            with open(args.evaluation_schema_updated, 'w') as f:
+                json.dump({"status": "success", "message": "Evaluation schema updated successfully"}, f)
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error: {e}")
+            if e.response is not None:
+                print(f"Response Status Code: {e.response.status_code}")
+                print(f"Response Content: {e.response.text}")
+            # Write error confirmation
+            with open(args.evaluation_schema_updated, 'w') as f:
+                json.dump({"status": "error", "message": str(e)}, f)
+            exit(1)
+
+    args:
+      - --schema_id
+      - {inputValue: schema_id}
+      - --schema_metrics
+      - {inputPath: schema_metrics}
+      - --metrics_json
+      - {inputPath: metrics_json}
+      - --model_info_out
+      - {inputPath: model_info_out}
+      - --training_history
+      - {inputPath: training_history}
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --tenant_id
+      - {inputPath: tenant_id}
+      - --project_id
+      - {inputValue: project_id}
+      - --bearer_auth_token
+      - {inputPath: bearer_auth_token}
+      - --domain
+      - {inputValue: domain}
+      - --model_name
+      - {inputValue: model_name}
+      - --evaluation_schema_updated
+      - {outputPath: evaluation_schema_updated}
