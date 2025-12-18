@@ -431,7 +431,7 @@ implementation:
             unique_labels = sorted(list(set(all_labels)))
             label_to_idx = {str(label): label for label in unique_labels}
         
-        print(f'\nData loaded successfully!')
+        print(f'\\nData loaded successfully!')
         print(f'Train samples: {len(train_data["images"])}')
         print(f'Test samples: {len(test_data["images"])}')
         print(f'Unique labels: {len(unique_labels)}')
@@ -496,7 +496,7 @@ implementation:
         with open(args.data_analysis_path, 'wb') as f:
             pickle.dump(data_analysis, f)
         
-        print('\n' + '='*80)
+        print('\\n' + '='*80)
         print('DATA LOADING COMPLETE')
         print('='*80)
         print(f'Data source: {data_source_type}')
