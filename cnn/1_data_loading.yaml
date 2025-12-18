@@ -1,13 +1,9 @@
-name: Images Generic DataLoader
-description: Loads datasets from CDN ZIP or torchvision datasets with flexible configuration
+name: Image Generic DataLoader
+description: Loads datasets from CDN ZIP or torchvision datasets using configuration from model_config
 inputs:
-  - name: dataset_config
+  - name: model_config
     type: String
-    description: 'Dataset configuration as JSON string'
-  - name: data_source_type
-    type: String
-    default: 'cdn_zip'
-    description: 'Type of data source (cdn_zip, torchvision, custom)'
+    description: 'Model and dataset configuration as JSON string'
 outputs:
   - name: train_x
     type: Artifact
@@ -54,8 +50,7 @@ implementation:
         warnings.filterwarnings('ignore', category=UserWarning)
         
         parser = argparse.ArgumentParser(description='Generic Data Loader')
-        parser.add_argument('--dataset_config', type=str, required=True)
-        parser.add_argument('--data_source_type', type=str, default='cdn_zip')
+        parser.add_argument('--model_config', type=str, required=True)
         parser.add_argument('--train_x_path', type=str, required=True)
         parser.add_argument('--train_y_path', type=str, required=True)
         parser.add_argument('--test_x_path', type=str, required=True)
@@ -66,18 +61,30 @@ implementation:
         args = parser.parse_args()
         
         print('Starting Generic Data Loader...')
-        print(f'Data source type: {args.data_source_type}')
         
-        # Parse dataset config
-        config = json.loads(args.dataset_config)
+        # Parse model config
+        config = json.loads(args.model_config)
         
-        def load_cdn_zip_dataset(config):
-            cdn_url = config.get('cdn_url', '')
-            train_split = config.get('train_split', 0.7)
-            shuffle_seed = config.get('shuffle_seed', 42)
+        # Extract dataset config from model_config
+        dataset_config = config.get('dataset', {})
+        if not dataset_config:
+            print('Warning: No dataset configuration found in model_config, using defaults')
+            dataset_config = {
+                'data_source_type': 'torchvision',
+                'dataset_name': 'mnist'
+            }
+        
+        data_source_type = dataset_config.get('data_source_type', 'torchvision')
+        print(f'Data source type: {data_source_type}')
+        
+        def load_cdn_zip_dataset(dataset_config):
+            """Load dataset from CDN ZIP file"""
+            cdn_url = dataset_config.get('cdn_url', '')
+            train_split = dataset_config.get('train_split', 0.7)
+            shuffle_seed = dataset_config.get('shuffle_seed', 42)
             
             if not cdn_url:
-                raise ValueError('cdn_url is required for cdn_zip data source')
+                raise ValueError('cdn_url is required in dataset config for cdn_zip data source')
             
             print(f'Loading from CDN ZIP: {cdn_url}')
             print(f'Train split: {train_split}, Shuffle seed: {shuffle_seed}')
@@ -122,12 +129,13 @@ implementation:
                 'shuffle_seed': shuffle_seed
             }
         
-        def load_torchvision_dataset(config):
-            dataset_name = config.get('dataset_name', 'mnist').lower()
-            train_split = config.get('train_split', 0.8)  # Different default for torchvision
-            shuffle_seed = config.get('shuffle_seed', 42)
-            download = config.get('download', True)
-            data_dir = config.get('data_dir', './data')
+        def load_torchvision_dataset(dataset_config):
+            """Load dataset from torchvision"""
+            dataset_name = dataset_config.get('dataset_name', 'mnist').lower()
+            train_split = dataset_config.get('train_split', 0.8)
+            shuffle_seed = dataset_config.get('shuffle_seed', 42)
+            download = dataset_config.get('download', True)
+            data_dir = dataset_config.get('data_dir', './data')
             
             print(f'Loading torchvision dataset: {dataset_name}')
             print(f'Data directory: {data_dir}, Download: {download}')
@@ -172,7 +180,6 @@ implementation:
                 'gtsrb': torchvision.datasets.GTSRB,
                 'renderedsst2': torchvision.datasets.RenderedSST2,
                 'clevr': torchvision.datasets.CLEVRClassification,
-                'pcam': torchvision.datasets.PCAM,
             }
             
             if dataset_name not in dataset_map:
@@ -289,13 +296,13 @@ implementation:
             }
         
         # Load data based on source type
-        if args.data_source_type == 'cdn_zip':
-            all_images, all_labels, all_filenames, all_files, source_info = load_cdn_zip_dataset(config)
-            train_split = config.get('train_split', 0.7)
+        if data_source_type == 'cdn_zip':
+            all_images, all_labels, all_filenames, all_files, source_info = load_cdn_zip_dataset(dataset_config)
+            train_split = dataset_config.get('train_split', 0.7)
             
             # Split data
             indices = list(range(len(all_images)))
-            rng = np.random.RandomState(config.get('shuffle_seed', 42))
+            rng = np.random.RandomState(dataset_config.get('shuffle_seed', 42))
             rng.shuffle(indices)
             
             train_size = int(train_split * len(all_images))
@@ -306,7 +313,7 @@ implementation:
             train_data = {
                 'images': [all_images[i] for i in train_indices],
                 'labels': [all_labels[i] for i in train_indices],
-                'label_names': [all_labels[i] for i in train_indices],  # For classification datasets
+                'label_names': [all_labels[i] for i in train_indices],
                 'filenames': [all_filenames[i] for i in train_indices]
             }
             
@@ -314,7 +321,7 @@ implementation:
             test_data = {
                 'images': [all_images[i] for i in test_indices],
                 'labels': [all_labels[i] for i in test_indices],
-                'label_names': [all_labels[i] for i in test_indices],  # For classification datasets
+                'label_names': [all_labels[i] for i in test_indices],
                 'filenames': [all_filenames[i] for i in test_indices]
             }
             
@@ -324,11 +331,10 @@ implementation:
             train_data['labels'] = [label_to_idx[label] for label in train_data['labels']]
             test_data['labels'] = [label_to_idx[label] for label in test_data['labels']]
             
-        elif args.data_source_type == 'torchvision':
-            all_images, all_labels, all_filenames, all_files, source_info = load_torchvision_dataset(config)
+        elif data_source_type == 'torchvision':
+            all_images, all_labels, all_filenames, all_files, source_info = load_torchvision_dataset(dataset_config)
             
             # For torchvision, we already have the split in the data loading
-            # So we need to split based on original dataset sizes
             original_train_size = source_info['original_train_size']
             original_test_size = source_info['original_test_size']
             
@@ -348,10 +354,10 @@ implementation:
             
             # For torchvision, labels are already numeric
             unique_labels = sorted(list(set(all_labels)))
-            label_to_idx = {str(label): label for label in unique_labels}  # Map string to numeric
+            label_to_idx = {str(label): label for label in unique_labels}
             
         else:
-            raise ValueError(f'Unsupported data source type: {args.data_source_type}')
+            raise ValueError(f'Unsupported data source type: {data_source_type}')
         
         print(f'\\nData loaded successfully!')
         print(f'Train samples: {len(train_data["images"])}')
@@ -365,15 +371,15 @@ implementation:
             'label_to_idx': label_to_idx,
             'idx_to_label': {idx: label for label, idx in label_to_idx.items()},
             'output_dim': len(unique_labels),
-            'data_source_type': args.data_source_type,
+            'data_source_type': data_source_type,
             'source_info': source_info,
-            'config': config
+            'original_config': config
         }
         
         # Create analysis report
         data_analysis = {
             'timestamp': datetime.datetime.now().isoformat(),
-            'data_source': args.data_source_type,
+            'data_source': data_source_type,
             'source_info': source_info,
             'statistics': {
                 'total_samples': len(all_images),
@@ -381,7 +387,7 @@ implementation:
                 'test_samples': len(test_data['images']),
                 'num_classes': len(unique_labels),
                 'class_distribution': dict(Counter([str(label) for label in all_labels])),
-                'average_image_size': len(all_images[0]) if all_images else 0  # Approximate size in bytes
+                'average_image_size': len(all_images[0]) if all_images else 0
             },
             'data_format': {
                 'images_format': 'base64_encoded_png',
@@ -416,32 +422,17 @@ implementation:
         with open(args.data_analysis_path, 'wb') as f:
             pickle.dump(data_analysis, f)
         
-        # Also save a readable JSON version
-        json_analysis_path = args.data_analysis_path.replace('.pkl', '.json').replace('.pickle', '.json')
-        with open(json_analysis_path, 'w') as f:
-            json.dump(data_analysis, f, indent=2, default=str)
-        
         print('\\n' + '='*80)
         print('DATA LOADING COMPLETE')
         print('='*80)
-        print(f'Data source: {args.data_source_type}')
+        print(f'Data source: {data_source_type}')
         print(f'Train samples: {len(train_data["images"])}')
         print(f'Test samples: {len(test_data["images"])}')
         print(f'Classes: {len(unique_labels)}')
-        print(f'Output saved to specified paths')
         print('='*80)
-        
-        # Print dataset information
-        if len(unique_labels) <= 20:
-            print('\\nClass distribution:')
-            for label in sorted(unique_labels):
-                count = sum(1 for l in all_labels if l == label)
-                print(f'  Class {label}: {count} samples')
     args:
-      - --dataset_config
-      - {inputValue: dataset_config}
-      - --data_source_type
-      - {inputValue: data_source_type}
+      - --model_config
+      - {inputValue: model_config}
       - --train_x_path
       - {outputPath: train_x}
       - --train_y_path
