@@ -6,22 +6,22 @@ inputs:
     description: 'Model and dataset configuration as JSON string'
 outputs:
   - name: train_x
-    type: Artifact
+    type: Dataset
     description: 'Training images data'
   - name: train_y
-    type: Artifact
+    type: Dataset
     description: 'Training labels'
   - name: test_x
-    type: Artifact
+    type: Dataset
     description: 'Test images data'
   - name: test_y
-    type: Artifact
+    type: Dataset
     description: 'Test labels'
   - name: dataset_info
-    type: Artifact
+    type: DatasetInfo
     description: 'Dataset information'
   - name: data_analysis_report
-    type: Artifact
+    type: Data
     description: 'Data analysis report'
 
 implementation:
