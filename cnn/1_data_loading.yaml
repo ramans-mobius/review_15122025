@@ -1,17 +1,13 @@
-name: Images load data
-description: Downloads ZIP file from CDN containing UI component images, analyzes contents, and prepares train/test datasets.
+name: Images Generic DataLoader
+description: Loads datasets from CDN ZIP or torchvision datasets with flexible configuration
 inputs:
-  - name: cdn_url
+  - name: dataset_config
     type: String
-    description: 'CDN URL to download ZIP file'
-  - name: train_split
-    type: Float
-    default: '0.7'
-    description: 'Train split ratio'
-  - name: shuffle_seed
-    type: Integer
-    default: '42'
-    description: 'Random seed for shuffling'
+    description: 'Dataset configuration as JSON string'
+  - name: data_source_type
+    type: String
+    default: 'cdn_zip'
+    description: 'Type of data source (cdn_zip, torchvision, custom)'
 outputs:
   - name: train_x
     type: Artifact
@@ -28,24 +24,27 @@ outputs:
   - name: dataset_info
     type: Artifact
     description: 'Dataset information'
-  - name: zip_analysis_report
+  - name: data_analysis_report
     type: Artifact
-    description: 'Detailed ZIP file contents analysis'
+    description: 'Data analysis report'
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v19
+    image: gurpreetgandhi/nesy-factory:v38-gpu
     command:
       - sh
       - -c
       - |
+        # Install torchvision first
+        pip install torchvision==0.17.0 pillow requests numpy --quiet
+        
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
         import argparse
-        import pickle, json, base64, io, zipfile, numpy as np, datetime
+        import pickle, json, base64, io, zipfile, numpy as np, datetime, os, sys
         from collections import Counter, defaultdict
         import torch
         import requests
@@ -54,30 +53,41 @@ implementation:
         
         warnings.filterwarnings('ignore', category=UserWarning)
         
-        parser = argparse.ArgumentParser(description='Load UI Components Dataset')
-        parser.add_argument('--cdn_url', type=str, required=True)
-        parser.add_argument('--train_split', type=float, default=0.7)
-        parser.add_argument('--shuffle_seed', type=int, default=42)
+        parser = argparse.ArgumentParser(description='Generic Data Loader')
+        parser.add_argument('--dataset_config', type=str, required=True)
+        parser.add_argument('--data_source_type', type=str, default='cdn_zip')
         parser.add_argument('--train_x_path', type=str, required=True)
         parser.add_argument('--train_y_path', type=str, required=True)
         parser.add_argument('--test_x_path', type=str, required=True)
         parser.add_argument('--test_y_path', type=str, required=True)
         parser.add_argument('--dataset_info_path', type=str, required=True)
-        parser.add_argument('--zip_analysis_path', type=str, required=True)
+        parser.add_argument('--data_analysis_path', type=str, required=True)
         
         args = parser.parse_args()
         
-        print('Starting dataset download and analysis...')
-        print(f'CDN URL: {args.cdn_url}')
-        print(f'Train split: {args.train_split}')
-        print(f'Shuffle seed: {args.shuffle_seed}')
+        print('Starting Generic Data Loader...')
+        print(f'Data source type: {args.data_source_type}')
         
-        def download_and_extract_zip(url):
-            decoded_url = unquote(url)
-            print(f'Downloading from decoded URL: {decoded_url}')
+        # Parse dataset config
+        config = json.loads(args.dataset_config)
+        
+        def load_cdn_zip_dataset(config):
+            """Load dataset from CDN ZIP file"""
+            cdn_url = config.get('cdn_url', '')
+            train_split = config.get('train_split', 0.7)
+            shuffle_seed = config.get('shuffle_seed', 42)
+            
+            if not cdn_url:
+                raise ValueError('cdn_url is required for cdn_zip data source')
+            
+            print(f'Loading from CDN ZIP: {cdn_url}')
+            print(f'Train split: {train_split}, Shuffle seed: {shuffle_seed}')
+            
+            decoded_url = unquote(cdn_url)
+            print(f'Downloading from: {decoded_url}')
             
             headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(decoded_url, headers=headers, timeout=60)
+            response = requests.get(decoded_url, headers=headers, timeout=120)
             response.raise_for_status()
             
             zip_content = io.BytesIO(response.content)
@@ -106,73 +116,284 @@ implementation:
                         except Exception as e:
                             print(f'Warning: Could not read {file_path}: {e}')
             
-            return images, labels, filenames, all_files
-
-        # Download and process
-        all_images, all_labels, all_filenames, all_files = download_and_extract_zip(args.cdn_url)
+            return images, labels, filenames, all_files, {
+                'source_type': 'cdn_zip',
+                'url': cdn_url,
+                'train_split': train_split,
+                'shuffle_seed': shuffle_seed
+            }
         
-        if not all_images:
-            raise Exception('No valid images found in ZIP file')
+        def load_torchvision_dataset(config):
+            """Load dataset from torchvision"""
+            dataset_name = config.get('dataset_name', 'mnist').lower()
+            train_split = config.get('train_split', 0.8)  # Different default for torchvision
+            shuffle_seed = config.get('shuffle_seed', 42)
+            download = config.get('download', True)
+            data_dir = config.get('data_dir', './data')
+            
+            print(f'Loading torchvision dataset: {dataset_name}')
+            print(f'Data directory: {data_dir}, Download: {download}')
+            
+            # Import torchvision here (after installation)
+            import torchvision
+            from torchvision import transforms
+            from PIL import Image
+            import io
+            
+            # Define available datasets
+            dataset_map = {
+                'mnist': torchvision.datasets.MNIST,
+                'cifar10': torchvision.datasets.CIFAR10,
+                'cifar100': torchvision.datasets.CIFAR100,
+                'fashionmnist': torchvision.datasets.FashionMNIST,
+                'kmnist': torchvision.datasets.KMNIST,
+                'emnist': torchvision.datasets.EMNIST,
+                'qmnist': torchvision.datasets.QMNIST,
+                'svhn': torchvision.datasets.SVHN,
+                'stl10': torchvision.datasets.STL10,
+                'caltech101': torchvision.datasets.Caltech101,
+                'caltech256': torchvision.datasets.Caltech256,
+                'celeba': torchvision.datasets.CelebA,
+                'imagenet': torchvision.datasets.ImageNet,
+                'places365': torchvision.datasets.Places365,
+                'coco': torchvision.datasets.CocoCaptions,
+                'voc': torchvision.datasets.VOCDetection,
+                'cityscapes': torchvision.datasets.Cityscapes,
+                'usps': torchvision.datasets.USPS,
+                'phototour': torchvision.datasets.PhotoTour,
+                'sbd': torchvision.datasets.SBDataset,
+                'semeion': torchvision.datasets.SEMEION,
+                'omniglot': torchvision.datasets.Omniglot,
+                'lsun': torchvision.datasets.LSUN,
+                'flowers102': torchvision.datasets.Flowers102,
+                'food101': torchvision.datasets.Food101,
+                'dtd': torchvision.datasets.DTD,
+                'pcam': torchvision.datasets.PCAM,
+                'country211': torchvision.datasets.Country211,
+                'fer2013': torchvision.datasets.FER2013,
+                'gtsrb': torchvision.datasets.GTSRB,
+                'renderedsst2': torchvision.datasets.RenderedSST2,
+                'clevr': torchvision.datasets.CLEVRClassification,
+                'pcam': torchvision.datasets.PCAM,
+            }
+            
+            if dataset_name not in dataset_map:
+                available = ', '.join(dataset_map.keys())
+                raise ValueError(f'Dataset {dataset_name} not available. Available: {available}')
+            
+            dataset_class = dataset_map[dataset_name]
+            
+            # Special handling for different dataset types
+            if dataset_name in ['emnist', 'usps']:
+                train_dataset = dataset_class(
+                    root=data_dir, 
+                    split='balanced' if dataset_name == 'emnist' else 'train',
+                    download=download,
+                    transform=transforms.ToTensor()
+                )
+                test_dataset = dataset_class(
+                    root=data_dir,
+                    split='balanced' if dataset_name == 'emnist' else 'test',
+                    download=download,
+                    transform=transforms.ToTensor()
+                )
+            elif dataset_name in ['svhn']:
+                train_dataset = dataset_class(
+                    root=data_dir,
+                    split='train',
+                    download=download,
+                    transform=transforms.ToTensor()
+                )
+                test_dataset = dataset_class(
+                    root=data_dir,
+                    split='test',
+                    download=download,
+                    transform=transforms.ToTensor()
+                )
+            elif dataset_name in ['stl10']:
+                train_dataset = dataset_class(
+                    root=data_dir,
+                    split='train',
+                    download=download,
+                    transform=transforms.ToTensor()
+                )
+                test_dataset = dataset_class(
+                    root=data_dir,
+                    split='test',
+                    download=download,
+                    transform=transforms.ToTensor()
+                )
+            else:
+                # Standard datasets
+                train_dataset = dataset_class(
+                    root=data_dir,
+                    train=True,
+                    download=download,
+                    transform=transforms.ToTensor()
+                )
+                test_dataset = dataset_class(
+                    root=data_dir,
+                    train=False,
+                    download=download,
+                    transform=transforms.ToTensor()
+                )
+            
+            print(f'Train samples: {len(train_dataset)}, Test samples: {len(test_dataset)}')
+            
+            # Convert to base64 format (to maintain consistency with CDN format)
+            def dataset_to_base64(dataset):
+                images = []
+                labels = []
+                filenames = []
+                
+                for idx, (img_tensor, label) in enumerate(dataset):
+                    # Convert tensor to PIL Image
+                    if isinstance(img_tensor, torch.Tensor):
+                        # Handle different tensor shapes
+                        if img_tensor.dim() == 3:
+                            img_tensor = img_tensor.permute(1, 2, 0)  # CHW to HWC
+                        img_array = (img_tensor.numpy() * 255).astype(np.uint8)
+                        img = Image.fromarray(img_array)
+                    else:
+                        img = img_tensor
+                    
+                    # Convert to base64
+                    buffer = io.BytesIO()
+                    img.save(buffer, format='PNG')
+                    base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                    
+                    images.append(base64_image)
+                    labels.append(label)
+                    filenames.append(f'{dataset_name}_{idx}.png')
+                    
+                    # Progress indication
+                    if idx % 1000 == 0 and idx > 0:
+                        print(f'  Processed {idx} images...')
+                
+                return images, labels, filenames
+            
+            print('Converting train dataset to base64 format...')
+            train_images, train_labels, train_filenames = dataset_to_base64(train_dataset)
+            print('Converting test dataset to base64 format...')
+            test_images, test_labels, test_filenames = dataset_to_base64(test_dataset)
+            
+            # For torchvision, we already have train/test split
+            all_images = train_images + test_images
+            all_labels = train_labels + test_labels
+            all_filenames = train_filenames + test_filenames
+            
+            return all_images, all_labels, all_filenames, [], {
+                'source_type': 'torchvision',
+                'dataset_name': dataset_name,
+                'data_dir': data_dir,
+                'original_train_size': len(train_dataset),
+                'original_test_size': len(test_dataset)
+            }
         
-        print(f'Successfully extracted {len(all_images)} images with labels')
+        # Load data based on source type
+        if args.data_source_type == 'cdn_zip':
+            all_images, all_labels, all_filenames, all_files, source_info = load_cdn_zip_dataset(config)
+            train_split = config.get('train_split', 0.7)
+            
+            # Split data
+            indices = list(range(len(all_images)))
+            rng = np.random.RandomState(config.get('shuffle_seed', 42))
+            rng.shuffle(indices)
+            
+            train_size = int(train_split * len(all_images))
+            train_indices = indices[:train_size]
+            test_indices = indices[train_size:]
+            
+            # Create train data
+            train_data = {
+                'images': [all_images[i] for i in train_indices],
+                'labels': [all_labels[i] for i in train_indices],
+                'label_names': [all_labels[i] for i in train_indices],  # For classification datasets
+                'filenames': [all_filenames[i] for i in train_indices]
+            }
+            
+            # Create test data
+            test_data = {
+                'images': [all_images[i] for i in test_indices],
+                'labels': [all_labels[i] for i in test_indices],
+                'label_names': [all_labels[i] for i in test_indices],  # For classification datasets
+                'filenames': [all_filenames[i] for i in test_indices]
+            }
+            
+            # For CDN, we need to create numeric labels
+            unique_labels = sorted(list(set(all_labels)))
+            label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
+            train_data['labels'] = [label_to_idx[label] for label in train_data['labels']]
+            test_data['labels'] = [label_to_idx[label] for label in test_data['labels']]
+            
+        elif args.data_source_type == 'torchvision':
+            all_images, all_labels, all_filenames, all_files, source_info = load_torchvision_dataset(config)
+            
+            # For torchvision, we already have the split in the data loading
+            # So we need to split based on original dataset sizes
+            original_train_size = source_info['original_train_size']
+            original_test_size = source_info['original_test_size']
+            
+            train_data = {
+                'images': all_images[:original_train_size],
+                'labels': all_labels[:original_train_size],
+                'label_names': [str(label) for label in all_labels[:original_train_size]],
+                'filenames': all_filenames[:original_train_size]
+            }
+            
+            test_data = {
+                'images': all_images[original_train_size:],
+                'labels': all_labels[original_train_size:],
+                'label_names': [str(label) for label in all_labels[original_train_size:]],
+                'filenames': all_filenames[original_train_size:]
+            }
+            
+            # For torchvision, labels are already numeric
+            unique_labels = sorted(list(set(all_labels)))
+            label_to_idx = {str(label): label for label in unique_labels}  # Map string to numeric
+            
+        else:
+            raise ValueError(f'Unsupported data source type: {args.data_source_type}')
+        
+        print(f'\\nData loaded successfully!')
+        print(f'Train samples: {len(train_data["images"])}')
+        print(f'Test samples: {len(test_data["images"])}')
         
         # Create dataset info
-        unique_labels = sorted(list(set(all_labels)))
-        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
-        label_indices = [label_to_idx[label] for label in all_labels]
-        
         dataset_info = {
             'total_samples': len(all_images),
-            'classes': unique_labels,
-            'class_distribution': dict(Counter(all_labels)),
+            'classes': [str(label) for label in unique_labels],
+            'class_distribution': dict(Counter([str(label) for label in all_labels])),
             'label_to_idx': label_to_idx,
             'idx_to_label': {idx: label for label, idx in label_to_idx.items()},
             'output_dim': len(unique_labels),
-            'train_split_ratio': args.train_split,
-            'shuffle_seed': args.shuffle_seed,
-            'filenames': all_filenames
+            'data_source_type': args.data_source_type,
+            'source_info': source_info,
+            'config': config
         }
         
-        print(f'Dataset: {len(all_images)} samples, {len(unique_labels)} classes: {unique_labels}')
-        
-        # Create simple analysis report
-        zip_analysis = {
-            'total_files': len(all_files),
-            'image_files': len(all_images),
-            'other_files': len(all_files) - len(all_images),
-            'classes_present': unique_labels,
-            'class_distribution': dict(Counter(all_labels)),
-            'download_timestamp': datetime.datetime.now().isoformat(),
-            'cdn_url': args.cdn_url
-        }
-        
-        # Split data
-        indices = list(range(len(all_images)))
-        rng = np.random.RandomState(args.shuffle_seed)
-        rng.shuffle(indices)
-        
-        train_size = int(args.train_split * len(all_images))
-        train_indices = indices[:train_size]
-        test_indices = indices[train_size:]
-        
-        # Create train data
-        train_data = {
-            'images': [all_images[i] for i in train_indices],
-            'labels': [label_indices[i] for i in train_indices],
-            'label_names': [all_labels[i] for i in train_indices],
-            'filenames': [all_filenames[i] for i in train_indices]
-        }
-        
-        # Create test data
-        test_data = {
-            'images': [all_images[i] for i in test_indices],
-            'labels': [label_indices[i] for i in test_indices],
-            'label_names': [all_labels[i] for i in test_indices],
-            'filenames': [all_filenames[i] for i in test_indices]
+        # Create analysis report
+        data_analysis = {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'data_source': args.data_source_type,
+            'source_info': source_info,
+            'statistics': {
+                'total_samples': len(all_images),
+                'train_samples': len(train_data['images']),
+                'test_samples': len(test_data['images']),
+                'num_classes': len(unique_labels),
+                'class_distribution': dict(Counter([str(label) for label in all_labels])),
+                'average_image_size': len(all_images[0]) if all_images else 0  # Approximate size in bytes
+            },
+            'data_format': {
+                'images_format': 'base64_encoded_png',
+                'labels_format': 'numeric_indices',
+                'metadata_included': True
+            },
+            'config_used': config
         }
         
         # Save outputs
-        import os
         os.makedirs(os.path.dirname(args.train_x_path) or '.', exist_ok=True)
         with open(args.train_x_path, 'wb') as f:
             pickle.dump(train_data, f)
@@ -193,25 +414,36 @@ implementation:
         with open(args.dataset_info_path, 'wb') as f:
             pickle.dump(dataset_info, f)
         
-        os.makedirs(os.path.dirname(args.zip_analysis_path) or '.', exist_ok=True)
-        with open(args.zip_analysis_path, 'wb') as f:
-            pickle.dump(zip_analysis, f)
+        os.makedirs(os.path.dirname(args.data_analysis_path) or '.', exist_ok=True)
+        with open(args.data_analysis_path, 'wb') as f:
+            pickle.dump(data_analysis, f)
+        
+        # Also save a readable JSON version
+        json_analysis_path = args.data_analysis_path.replace('.pkl', '.json').replace('.pickle', '.json')
+        with open(json_analysis_path, 'w') as f:
+            json.dump(data_analysis, f, indent=2, default=str)
         
         print('\\n' + '='*80)
-        print('DATASET LOADING COMPLETE')
+        print('DATA LOADING COMPLETE')
         print('='*80)
-        print(f'Train samples: {len(train_data[\"images\"])}')
-        print(f'Test samples: {len(test_data[\"images\"])}')
+        print(f'Data source: {args.data_source_type}')
+        print(f'Train samples: {len(train_data["images"])}')
+        print(f'Test samples: {len(test_data["images"])}')
         print(f'Classes: {len(unique_labels)}')
-        print(f'Class distribution: {dict(Counter(all_labels))}')
+        print(f'Output saved to specified paths')
         print('='*80)
+        
+        # Print dataset information
+        if len(unique_labels) <= 20:
+            print('\\nClass distribution:')
+            for label in sorted(unique_labels):
+                count = sum(1 for l in all_labels if l == label)
+                print(f'  Class {label}: {count} samples')
     args:
-      - --cdn_url
-      - {inputValue: cdn_url}
-      - --train_split
-      - {inputValue: train_split}
-      - --shuffle_seed
-      - {inputValue: shuffle_seed}
+      - --dataset_config
+      - {inputValue: dataset_config}
+      - --data_source_type
+      - {inputValue: data_source_type}
       - --train_x_path
       - {outputPath: train_x}
       - --train_y_path
@@ -222,5 +454,5 @@ implementation:
       - {outputPath: test_y}
       - --dataset_info_path
       - {outputPath: dataset_info}
-      - --zip_analysis_path
-      - {outputPath: zip_analysis_report}
+      - --data_analysis_path
+      - {outputPath: data_analysis_report}
