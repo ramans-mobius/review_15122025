@@ -79,7 +79,6 @@ implementation:
         print(f'Data source type: {data_source_type}')
         
         def load_cdn_zip_dataset(dataset_config):
-            """Load dataset from CDN ZIP file with retry logic"""
             cdn_url = dataset_config.get('cdn_url', '')
             train_split = dataset_config.get('train_split', 0.7)
             shuffle_seed = dataset_config.get('shuffle_seed', 42)
@@ -167,7 +166,6 @@ implementation:
             }
         
         def tensor_to_pil_image(tensor):
-            """Convert PyTorch tensor to PIL Image, handling different shapes"""
             from PIL import Image
             
             if isinstance(tensor, torch.Tensor):
@@ -205,7 +203,7 @@ implementation:
                 return tensor
         
         def load_torchvision_dataset(dataset_config):
-            """Load dataset from torchvision"""
+          
             dataset_name = dataset_config.get('dataset_name', 'mnist').lower()
             download = dataset_config.get('download', True)
             data_dir = dataset_config.get('data_dir', './data')
