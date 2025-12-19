@@ -114,27 +114,34 @@ implementation:
         input_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, {feature_info.get('final_features', 0)}]"
         output_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, 1]"  # Single output for XGBoost
 
-        # Create model schema row
+        # Parse execution_id to int (primary key)
+        try:
+            execution_id_int = int(args.execution_id) if args.execution_id and args.execution_id.isdigit() else 0
+        except:
+            execution_id_int = 0
+
+        # Create model schema row with proper data types
         model_row = {
-            "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
-            "model_id": args.model_id,
-            "tenant_id": tenant_id,
-            "projectId": args.project_id,
-            "name": model_name,
-            "architecture_type": args.architecture_type,
+            "execution_id": execution_id_int,  # Must be number
+            "experiment_id": args.model_id,  # Using model_id as experiment_id
+            "model_id": args.model_id,  # string (primary key)
+            "tenant_id": tenant_id,  # string
+            "projectId": args.project_id,  # string (primary key)
+            "name": model_name,  # string
+            "architecture_type": args.architecture_type,  # string (matching allowed values)
             "symbolic_profile": json.dumps({
                 "algorithm": model_info.get("algorithm", "XGBoost"),
                 "task": model_info.get("task", "classification"),
                 "feature_count": feature_info.get("final_features", 0)
-            }),
-            "input_shape": input_shape,
-            "output_shape": output_shape,
-            "model_weights_cdn": "N/A",  # XGBoost doesn't have weight URLs like CNNs
-            "parameter_count": str(weight_config.get('dataset_stats', {}).get('feature_dimension', 0)),
-            "source": args.source,
-            "created_by": "system",
-            "created_at": datetime.now().isoformat(),
-            "model_specific_config": json.dumps(model_specific_config)
+            }),  # string
+            "input_shape": input_shape,  # string
+            "output_shape": output_shape,  # string
+            "model_weights_cdn": "N/A",  # string (XGBoost doesn't have weight URLs like CNNs)
+            "parameter_count": str(feature_info.get('final_features', 0)),  # string
+            "source": args.source,  # string (matching allowed values)
+            "created_by": "system",  # string (user_id)
+            "created_at": datetime.now().isoformat(),  # datetime string
+            "model_specific_config": json.dumps(model_specific_config)  # json string
         }
 
         # Set up API call
@@ -160,13 +167,13 @@ implementation:
             "dbType": "TIDB",
             "ownedOnly": True,
             "filter": {
-                "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
+                "execution_id": execution_id_int,
                 "model_id": args.model_id,
                 "projectId": args.project_id
             }
         }
 
-        print(f"Checking for existing model with execution_id: {args.execution_id}, model_id: {args.model_id}")
+        print(f"Checking for existing model with execution_id: {execution_id_int}, model_id: {args.model_id}")
         
         try:
             response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
@@ -180,7 +187,7 @@ implementation:
                     "dbType": "TIDB",
                     "conditionalFilter": {
                         "conditions": [
-                            {"field": "execution_id", "operator": "EQUAL", "value": int(args.execution_id) if args.execution_id.isdigit() else 0},
+                            {"field": "execution_id", "operator": "EQUAL", "value": execution_id_int},
                             {"field": "model_id", "operator": "EQUAL", "value": args.model_id},
                             {"field": "projectId", "operator": "EQUAL", "value": args.project_id}
                         ]
@@ -192,7 +199,8 @@ implementation:
                             {"operation": "REPLACE", "path": "input_shape", "value": model_row["input_shape"]},
                             {"operation": "REPLACE", "path": "output_shape", "value": model_row["output_shape"]},
                             {"operation": "REPLACE", "path": "parameter_count", "value": model_row["parameter_count"]},
-                            {"operation": "REPLACE", "path": "model_specific_config", "value": model_row["model_specific_config"]}
+                            {"operation": "REPLACE", "path": "model_specific_config", "value": model_row["model_specific_config"]},
+                            {"operation": "REPLACE", "path": "experiment_id", "value": model_row["experiment_id"]}
                         ]
                     }]
                 }
@@ -205,7 +213,7 @@ implementation:
                 create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
                 create_payload = {"data": [model_row]}
                 
-                response = http.post(create_url, headers=headers, json=json.dumps(create_payload), timeout=60)
+                response = http.post(create_url, headers=headers, json=create_payload, timeout=60)
                 response.raise_for_status()
                 print("Successfully created new model instance.")
             
