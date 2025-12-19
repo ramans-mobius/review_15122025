@@ -32,6 +32,7 @@ implementation:
         import requests
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
+        import os
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
@@ -44,6 +45,11 @@ implementation:
         parser.add_argument('--domain', type=str, required=True)
         parser.add_argument('--training_schema_updated', type=str, required=True)
         args = parser.parse_args()
+
+        # Create output directory first
+        output_dir = os.path.dirname(args.training_schema_updated)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
         # Read input files
         with open(args.schema_training_metrics, 'r') as f:
@@ -68,61 +74,37 @@ implementation:
             except:
                 return float(default)
 
-        # Prepare custom metrics from schema_metrics
-        # Based on your Trainer output, schema_training_metrics should contain:
-        # {
-        #   'epoch': 100,
-        #   'loss': 0.123,
-        #   'accuracy': 0.85,
-        #   'validation_loss': 0.145,
-        #   'validation_accuracy': 0.82,
-        #   'test_accuracy': 0.82,
-        #   'test_precision': 0.81,
-        #   'test_recall': 0.83,
-        #   'test_f1_score': 0.82,
-        #   'test_roc_auc': 0.89,
-        #   'algorithm': 'XGBoost',
-        #   'task': 'classification',
-        #   ...
-        # }
-        
-        task = schema_metrics.get('task', 'classification')
-        
-        if task == 'regression':
-            custom_metrics = {
-                "train_r2_score": safe_float(schema_metrics.get('loss', 0.0)),  # For regression, loss is MSE/RMSE
-                "train_mae": safe_float(schema_metrics.get('train_mae', 0.0)),
-                "train_rmse": safe_float(schema_metrics.get('train_rmse', 0.0)),
-                "validation_r2_score": safe_float(schema_metrics.get('validation_loss', 0.0)),
-                "validation_mae": safe_float(schema_metrics.get('validation_mae', 0.0)),
-                "validation_rmse": safe_float(schema_metrics.get('validation_rmse', 0.0))
-            }
-        else:
-            # Classification metrics
-            custom_metrics = {
-                "train_precision": safe_float(schema_metrics.get('test_precision', 0.0)),
-                "train_recall": safe_float(schema_metrics.get('test_recall', 0.0)),
-                "train_f1_score": safe_float(schema_metrics.get('test_f1_score', 0.0)),
-                "train_roc_auc": safe_float(schema_metrics.get('test_roc_auc', 0.0)),
-                "validation_precision": safe_float(schema_metrics.get('test_precision', 0.0)),
-                "validation_recall": safe_float(schema_metrics.get('test_recall', 0.0)),
-                "validation_f1_score": safe_float(schema_metrics.get('test_f1_score', 0.0)),
-                "validation_roc_auc": safe_float(schema_metrics.get('test_roc_auc', 0.0))
-            }
-
-        # Create training schema row with proper data types
+        # Create training schema row EXACTLY as per your schema
         training_row = {
-            "execution_id": execution_id_int,  # number (Primary key)
-            "projectId": args.project_id,  # string (primary key)
-            "model_id": args.model_id,  # string (primary key)
-            "epoch": int(schema_metrics.get("epoch", 0)),  # int
-            "loss": safe_float(schema_metrics.get("loss", 0.0)),  # float
-            "accuracy": safe_float(schema_metrics.get("accuracy", 0.0)),  # float
-            "validation_loss": safe_float(schema_metrics.get("validation_loss", 0.0)),  # float
-            "validation_accuracy": safe_float(schema_metrics.get("validation_accuracy", 0.0)),  # float
-            "custom_metrics": json.dumps(custom_metrics),  # json string {metric_name: float}
-            "tenant_id": tenant_id  # string
+            "execution_id": execution_id_int,  # number (Primary key) - EXACT
+            "projectId": args.project_id,  # string (primary key) - EXACT
+            "model_id": args.model_id,  # string (primary key) - EXACT
+            "epoch": int(schema_metrics.get("epoch", 0)),  # int - EXACT
+            "loss": safe_float(schema_metrics.get("loss", 0.0)),  # float - EXACT
+            "accuracy": safe_float(schema_metrics.get("accuracy", 0.0)),  # float - EXACT
+            "validation_loss": safe_float(schema_metrics.get("validation_loss", 0.0)),  # float - EXACT
+            "validation_accuracy": safe_float(schema_metrics.get("validation_accuracy", 0.0)),  # float - EXACT
+            "tenant_id": tenant_id  # string - EXACT
+            # custom_metrics is commented out for now since it caused error
         }
+
+        # Add custom_metrics ONLY if it's a valid field
+        # Try without it first, then add if needed
+        custom_metrics_data = {}
+        if "test_precision" in schema_metrics:
+            custom_metrics_data["test_precision"] = safe_float(schema_metrics.get("test_precision", 0.0))
+        if "test_recall" in schema_metrics:
+            custom_metrics_data["test_recall"] = safe_float(schema_metrics.get("test_recall", 0.0))
+        if "test_f1_score" in schema_metrics:
+            custom_metrics_data["test_f1_score"] = safe_float(schema_metrics.get("test_f1_score", 0.0))
+        if "test_roc_auc" in schema_metrics:
+            custom_metrics_data["test_roc_auc"] = safe_float(schema_metrics.get("test_roc_auc", 0.0))
+        
+        # Only add custom_metrics if we have data
+        if custom_metrics_data:
+            training_row["custom_metrics"] = json.dumps(custom_metrics_data)
+
+        print(f"Training row being sent: {json.dumps(training_row, indent=2)}")
 
         # Set up API call
         headers = {
@@ -178,11 +160,16 @@ implementation:
                             {"operation": "REPLACE", "path": "loss", "value": training_row["loss"]},
                             {"operation": "REPLACE", "path": "accuracy", "value": training_row["accuracy"]},
                             {"operation": "REPLACE", "path": "validation_loss", "value": training_row["validation_loss"]},
-                            {"operation": "REPLACE", "path": "validation_accuracy", "value": training_row["validation_accuracy"]},
-                            {"operation": "REPLACE", "path": "custom_metrics", "value": training_row["custom_metrics"]}
+                            {"operation": "REPLACE", "path": "validation_accuracy", "value": training_row["validation_accuracy"]}
                         ]
                     }]
                 }
+                
+                # Add custom_metrics only if it exists
+                if "custom_metrics" in training_row:
+                    update_payload["partialUpdateRequests"][0]["patch"].append(
+                        {"operation": "REPLACE", "path": "custom_metrics", "value": training_row["custom_metrics"]}
+                    )
                 
                 response = http.patch(update_url, headers=headers, json=update_payload, timeout=60)
                 response.raise_for_status()
@@ -209,7 +196,7 @@ implementation:
                 print(f"Response Content: {e.response.text}")
             # Write error confirmation
             with open(args.training_schema_updated, 'w') as f:
-                json.dump({"status": "error", "message": str(e)}, f)
+                json.dump({"status": "error", "message": str(e), "row_data": training_row}, f)
             exit(1)
 
     args:
