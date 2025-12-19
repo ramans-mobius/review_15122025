@@ -1,22 +1,18 @@
-name: XGBoost Evaluation Schema Updater
-description: Updates the evaluation schema with XGBoost evaluation metrics
+name: XGBoost Training Schema Updater
+description: Updates the training schema with XGBoost training metrics
 
 inputs:
-  - { name: schema_id, type: String, description: "The ID of the evaluation schema to update." }
-  - { name: schema_metrics, type: String, description: "Schema metrics JSON from Evaluator output." }
-  - { name: metrics_json, type: String, description: "Full metrics JSON from Evaluator output." }
-  - { name: model_info_out, type: String, description: "Model info JSON from ModelBuilder output." }
-  - { name: training_history, type: String, description: "Training history JSON from Trainer output." }
+  - { name: schema_id, type: String, description: "The ID of the training schema to update." }
+  - { name: schema_training_metrics, type: String, description: "Schema training metrics JSON from Trainer output." }
   - { name: model_id, type: String, description: "The ID of the model." }
   - { name: execution_id, type: String, description: "The ID of the execution." }
   - { name: tenant_id, type: String, description: "The ID of the tenant." }
   - { name: project_id, type: String, description: "The ID of the project." }
   - { name: bearer_auth_token, type: String, description: "Bearer token for authentication." }
   - { name: domain, type: String, description: "The domain for the API endpoint." }
-  - { name: model_name, type: String, description: "Optional custom model name.", default: "" }
 
 outputs:
-  - { name: evaluation_schema_updated, type: String, description: "Confirmation of evaluation schema update." }
+  - { name: training_schema_updated, type: String, description: "Confirmation of training schema update." }
 
 implementation:
   container:
@@ -39,32 +35,19 @@ implementation:
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
-        parser.add_argument('--schema_metrics', type=str, required=True)
-        parser.add_argument('--metrics_json', type=str, required=True)
-        parser.add_argument('--model_info_out', type=str, required=True)
-        parser.add_argument('--training_history', type=str, required=True)
+        parser.add_argument('--schema_training_metrics', type=str, required=True)
         parser.add_argument('--model_id', type=str, required=True)
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--tenant_id', type=str, required=True)
         parser.add_argument('--project_id', type=str, required=True)
         parser.add_argument('--bearer_auth_token', type=str, required=True)
         parser.add_argument('--domain', type=str, required=True)
-        parser.add_argument('--model_name', type=str, default="")
-        parser.add_argument('--evaluation_schema_updated', type=str, required=True)
+        parser.add_argument('--training_schema_updated', type=str, required=True)
         args = parser.parse_args()
 
         # Read input files
-        with open(args.schema_metrics, 'r') as f:
+        with open(args.schema_training_metrics, 'r') as f:
             schema_metrics = json.load(f)
-        
-        with open(args.metrics_json, 'r') as f:
-            full_metrics = json.load(f)
-        
-        with open(args.model_info_out, 'r') as f:
-            model_info = json.load(f)
-        
-        with open(args.training_history, 'r') as f:
-            training_history = json.load(f)
         
         with open(args.bearer_auth_token, 'r') as f:
             bearer_auth_token = f.read().strip()
@@ -78,32 +61,6 @@ implementation:
         except:
             execution_id_int = 0
 
-        # Extract test metrics from full metrics
-        test_metrics = full_metrics.get("test_metrics", {})
-        
-        # Create model name if not provided
-        if not args.model_name:
-            model_name = f"XGBoost_{model_info.get('task', 'model')}"
-        else:
-            model_name = args.model_name
-
-        # Determine model type based on task
-        model_type = model_info.get("task", "classification").capitalize()
-
-        # Prepare confusion matrix (convert to list of floats)
-        confusion_matrix = []
-        cm_raw = test_metrics.get("confusion_matrix", [])
-        if cm_raw:
-            if isinstance(cm_raw[0], list):
-                for row in cm_raw:
-                    confusion_matrix.extend([float(x) for x in row])
-            else:
-                confusion_matrix = [float(x) for x in cm_raw]
-        
-        # Ensure confusion_matrix is not empty
-        if not confusion_matrix:
-            confusion_matrix = [0.0]
-
         # Helper function to safely convert to float
         def safe_float(value, default=0.0):
             try:
@@ -111,33 +68,61 @@ implementation:
             except:
                 return float(default)
 
-        # Create evaluation schema row with proper data types
-        evaluation_row = {
-            "execution_id": execution_id_int,  # number (primary key)
-            "model_id": args.model_id,  # string (primary key)
-            "projectId": args.project_id,  # string (primary key)
-            "accuracy": safe_float(test_metrics.get("accuracy", schema_metrics.get("accuracy", 0.0))),  # float
-            "precision_score": safe_float(test_metrics.get("precision", schema_metrics.get("precision", 0.0))),  # float
-            "recall": safe_float(test_metrics.get("recall", schema_metrics.get("recall", 0.0))),  # float
-            "f1_score": safe_float(test_metrics.get("f1_score", schema_metrics.get("f1_score", 0.0))),  # float
-            "roc_auc": safe_float(test_metrics.get("roc_auc", schema_metrics.get("roc_auc", 0.0))),  # float
-            "loss": str(schema_metrics.get("loss", "0.0")),  # string (must be string)
-            "confusion_matrix": confusion_matrix,  # [] list of floats
-            "tenant_id": tenant_id,  # string
-            "model_name": model_name,  # string
-            "model_type": model_type,  # string
-            "r2_score": safe_float(test_metrics.get("r2_score", schema_metrics.get("r2_score", 0.0))),  # float
-            "mse": safe_float(test_metrics.get("mse", 0.0)),  # float
-            "rmse_score": safe_float(test_metrics.get("rmse", schema_metrics.get("rmse", 0.0)))  # float
-        }
+        # Prepare custom metrics from schema_metrics
+        # Based on your Trainer output, schema_training_metrics should contain:
+        # {
+        #   'epoch': 100,
+        #   'loss': 0.123,
+        #   'accuracy': 0.85,
+        #   'validation_loss': 0.145,
+        #   'validation_accuracy': 0.82,
+        #   'test_accuracy': 0.82,
+        #   'test_precision': 0.81,
+        #   'test_recall': 0.83,
+        #   'test_f1_score': 0.82,
+        #   'test_roc_auc': 0.89,
+        #   'algorithm': 'XGBoost',
+        #   'task': 'classification',
+        #   ...
+        # }
+        
+        task = schema_metrics.get('task', 'classification')
+        
+        if task == 'regression':
+            custom_metrics = {
+                "train_r2_score": safe_float(schema_metrics.get('loss', 0.0)),  # For regression, loss is MSE/RMSE
+                "train_mae": safe_float(schema_metrics.get('train_mae', 0.0)),
+                "train_rmse": safe_float(schema_metrics.get('train_rmse', 0.0)),
+                "validation_r2_score": safe_float(schema_metrics.get('validation_loss', 0.0)),
+                "validation_mae": safe_float(schema_metrics.get('validation_mae', 0.0)),
+                "validation_rmse": safe_float(schema_metrics.get('validation_rmse', 0.0))
+            }
+        else:
+            # Classification metrics
+            custom_metrics = {
+                "train_precision": safe_float(schema_metrics.get('test_precision', 0.0)),
+                "train_recall": safe_float(schema_metrics.get('test_recall', 0.0)),
+                "train_f1_score": safe_float(schema_metrics.get('test_f1_score', 0.0)),
+                "train_roc_auc": safe_float(schema_metrics.get('test_roc_auc', 0.0)),
+                "validation_precision": safe_float(schema_metrics.get('test_precision', 0.0)),
+                "validation_recall": safe_float(schema_metrics.get('test_recall', 0.0)),
+                "validation_f1_score": safe_float(schema_metrics.get('test_f1_score', 0.0)),
+                "validation_roc_auc": safe_float(schema_metrics.get('test_roc_auc', 0.0))
+            }
 
-        # Ensure no empty strings - convert empty strings to appropriate values
-        for key, value in evaluation_row.items():
-            if isinstance(value, str) and value == "":
-                if key == "loss":
-                    evaluation_row[key] = "0.0"
-                elif key in ["model_name", "model_type"]:
-                    evaluation_row[key] = "Unknown"
+        # Create training schema row with proper data types
+        training_row = {
+            "execution_id": execution_id_int,  # number (Primary key)
+            "projectId": args.project_id,  # string (primary key)
+            "model_id": args.model_id,  # string (primary key)
+            "epoch": int(schema_metrics.get("epoch", 0)),  # int
+            "loss": safe_float(schema_metrics.get("loss", 0.0)),  # float
+            "accuracy": safe_float(schema_metrics.get("accuracy", 0.0)),  # float
+            "validation_loss": safe_float(schema_metrics.get("validation_loss", 0.0)),  # float
+            "validation_accuracy": safe_float(schema_metrics.get("validation_accuracy", 0.0)),  # float
+            "custom_metrics": json.dumps(custom_metrics),  # json string {metric_name: float}
+            "tenant_id": tenant_id  # string
+        }
 
         # Set up API call
         headers = {
@@ -168,7 +153,7 @@ implementation:
             }
         }
 
-        print(f"Checking for existing evaluation record with execution_id: {execution_id_int}, model_id: {args.model_id}")
+        print(f"Checking for existing training record with execution_id: {execution_id_int}, model_id: {args.model_id}")
         
         try:
             response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
@@ -176,7 +161,7 @@ implementation:
             response_data = response.json()
             
             if response_data.get("content"):
-                print("Evaluation record found: Updating row")
+                print("Training record found: Updating row")
                 update_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
                 update_payload = {
                     "dbType": "TIDB",
@@ -189,39 +174,33 @@ implementation:
                     },
                     "partialUpdateRequests": [{
                         "patch": [
-                            {"operation": "REPLACE", "path": "accuracy", "value": evaluation_row["accuracy"]},
-                            {"operation": "REPLACE", "path": "precision_score", "value": evaluation_row["precision_score"]},
-                            {"operation": "REPLACE", "path": "recall", "value": evaluation_row["recall"]},
-                            {"operation": "REPLACE", "path": "f1_score", "value": evaluation_row["f1_score"]},
-                            {"operation": "REPLACE", "path": "roc_auc", "value": evaluation_row["roc_auc"]},
-                            {"operation": "REPLACE", "path": "loss", "value": evaluation_row["loss"]},
-                            {"operation": "REPLACE", "path": "confusion_matrix", "value": evaluation_row["confusion_matrix"]},
-                            {"operation": "REPLACE", "path": "model_name", "value": evaluation_row["model_name"]},
-                            {"operation": "REPLACE", "path": "model_type", "value": evaluation_row["model_type"]},
-                            {"operation": "REPLACE", "path": "r2_score", "value": evaluation_row["r2_score"]},
-                            {"operation": "REPLACE", "path": "mse", "value": evaluation_row["mse"]},
-                            {"operation": "REPLACE", "path": "rmse_score", "value": evaluation_row["rmse_score"]}
+                            {"operation": "REPLACE", "path": "epoch", "value": training_row["epoch"]},
+                            {"operation": "REPLACE", "path": "loss", "value": training_row["loss"]},
+                            {"operation": "REPLACE", "path": "accuracy", "value": training_row["accuracy"]},
+                            {"operation": "REPLACE", "path": "validation_loss", "value": training_row["validation_loss"]},
+                            {"operation": "REPLACE", "path": "validation_accuracy", "value": training_row["validation_accuracy"]},
+                            {"operation": "REPLACE", "path": "custom_metrics", "value": training_row["custom_metrics"]}
                         ]
                     }]
                 }
                 
                 response = http.patch(update_url, headers=headers, json=update_payload, timeout=60)
                 response.raise_for_status()
-                print("Successfully updated evaluation record.")
+                print("Successfully updated training record.")
             else:
-                print("No evaluation record found: Creating new row")
+                print("No training record found: Creating new row")
                 create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
-                create_payload = {"data": [evaluation_row]}
+                create_payload = {"data": [training_row]}
                 
                 response = http.post(create_url, headers=headers, json=create_payload, timeout=60)
                 response.raise_for_status()
-                print("Successfully created new evaluation record.")
+                print("Successfully created new training record.")
             
             print(f"Response: {response.json()}")
             
             # Write success confirmation
-            with open(args.evaluation_schema_updated, 'w') as f:
-                json.dump({"status": "success", "message": "Evaluation schema updated successfully"}, f)
+            with open(args.training_schema_updated, 'w') as f:
+                json.dump({"status": "success", "message": "Training schema updated successfully"}, f)
 
         except requests.exceptions.RequestException as e:
             print(f"Error: {e}")
@@ -229,21 +208,15 @@ implementation:
                 print(f"Response Status Code: {e.response.status_code}")
                 print(f"Response Content: {e.response.text}")
             # Write error confirmation
-            with open(args.evaluation_schema_updated, 'w') as f:
+            with open(args.training_schema_updated, 'w') as f:
                 json.dump({"status": "error", "message": str(e)}, f)
             exit(1)
 
     args:
       - --schema_id
       - {inputValue: schema_id}
-      - --schema_metrics
-      - {inputPath: schema_metrics}
-      - --metrics_json
-      - {inputPath: metrics_json}
-      - --model_info_out
-      - {inputPath: model_info_out}
-      - --training_history
-      - {inputPath: training_history}
+      - --schema_training_metrics
+      - {inputPath: schema_training_metrics}
       - --model_id
       - {inputValue: model_id}
       - --execution_id
@@ -256,7 +229,5 @@ implementation:
       - {inputPath: bearer_auth_token}
       - --domain
       - {inputValue: domain}
-      - --model_name
-      - {inputValue: model_name}
-      - --evaluation_schema_updated
-      - {outputPath: evaluation_schema_updated}
+      - --training_schema_updated
+      - {outputPath: training_schema_updated}
