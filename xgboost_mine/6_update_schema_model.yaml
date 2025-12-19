@@ -41,6 +41,7 @@ implementation:
         from datetime import datetime
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
+        import os
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
@@ -60,6 +61,11 @@ implementation:
         parser.add_argument('--model_name', type=str, default="")
         parser.add_argument('--model_schema_updated', type=str, required=True)
         args = parser.parse_args()
+
+        # Create output directory first
+        output_dir = os.path.dirname(args.model_schema_updated)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
         # Read input files
         with open(args.data_info, 'r') as f:
@@ -120,28 +126,28 @@ implementation:
         except:
             execution_id_int = 0
 
-        # Create model schema row with proper data types
+        # Create model schema row EXACTLY as per your schema
         model_row = {
-            "execution_id": execution_id_int,  # Must be number
-            "experiment_id": args.model_id,  # Using model_id as experiment_id
-            "model_id": args.model_id,  # string (primary key)
-            "tenant_id": tenant_id,  # string
-            "projectId": args.project_id,  # string (primary key)
-            "name": model_name,  # string
-            "architecture_type": args.architecture_type,  # string (matching allowed values)
-            "symbolic_profile": json.dumps({
+            "execution_id": execution_id_int,  # number (primary key) - EXACT
+            "experiment_id": args.model_id,  # string - EXACT
+            "model_id": args.model_id,  # string (primary key) - EXACT
+            "tenant_id": tenant_id,  # string - EXACT
+            "projectId": args.project_id,  # string (primary key) - EXACT
+            "name": model_name,  # string - EXACT
+            "architecture_type": args.architecture_type,  # [transformer, FFN, GRM, CNN] - EXACT
+            "symbolic_profile": json.dumps({  # string - EXACT
                 "algorithm": model_info.get("algorithm", "XGBoost"),
                 "task": model_info.get("task", "classification"),
                 "feature_count": feature_info.get("final_features", 0)
-            }),  # string
-            "input_shape": input_shape,  # string
-            "output_shape": output_shape,  # string
-            "model_weights_cdn": "N/A",  # string (XGBoost doesn't have weight URLs like CNNs)
-            "parameter_count": str(feature_info.get('final_features', 0)),  # string
-            "source": args.source,  # string (matching allowed values)
-            "created_by": "system",  # string (user_id)
-            "created_at": datetime.now().isoformat(),  # datetime string
-            "model_specific_config": json.dumps(model_specific_config)  # json string
+            }),
+            "input_shape": input_shape,  # string - EXACT
+            "output_shape": output_shape,  # string - EXACT
+            "model_weights_cdn": "N/A",  # string - EXACT
+            "parameter_count": str(feature_info.get('final_features', 0)),  # string - EXACT
+            "source": args.source,  # [manual, wizard, auto-generated] - EXACT
+            "created_by": "system",  # user_id - EXACT
+            "created_at": datetime.now().isoformat(),  # datetime - EXACT
+            "model_specific_config": json.dumps(model_specific_config)  # json - EXACT (as per your schema)
         }
 
         # Set up API call
@@ -174,6 +180,7 @@ implementation:
         }
 
         print(f"Checking for existing model with execution_id: {execution_id_int}, model_id: {args.model_id}")
+        print(f"Model row being sent: {json.dumps(model_row, indent=2)}")
         
         try:
             response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
@@ -200,7 +207,9 @@ implementation:
                             {"operation": "REPLACE", "path": "output_shape", "value": model_row["output_shape"]},
                             {"operation": "REPLACE", "path": "parameter_count", "value": model_row["parameter_count"]},
                             {"operation": "REPLACE", "path": "model_specific_config", "value": model_row["model_specific_config"]},
-                            {"operation": "REPLACE", "path": "experiment_id", "value": model_row["experiment_id"]}
+                            {"operation": "REPLACE", "path": "experiment_id", "value": model_row["experiment_id"]},
+                            {"operation": "REPLACE", "path": "architecture_type", "value": model_row["architecture_type"]},
+                            {"operation": "REPLACE", "path": "source", "value": model_row["source"]}
                         ]
                     }]
                 }
@@ -230,7 +239,7 @@ implementation:
                 print(f"Response Content: {e.response.text}")
             # Write error confirmation
             with open(args.model_schema_updated, 'w') as f:
-                json.dump({"status": "error", "message": str(e)}, f)
+                json.dump({"status": "error", "message": str(e), "row_data": model_row}, f)
             exit(1)
 
     args:
