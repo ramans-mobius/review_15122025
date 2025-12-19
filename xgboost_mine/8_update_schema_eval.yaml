@@ -72,6 +72,12 @@ implementation:
         with open(args.tenant_id, 'r') as f:
             tenant_id = f.read().strip()
 
+        # Parse execution_id to int (primary key)
+        try:
+            execution_id_int = int(args.execution_id) if args.execution_id and args.execution_id.isdigit() else 0
+        except:
+            execution_id_int = 0
+
         # Extract test metrics from full metrics
         test_metrics = full_metrics.get("test_metrics", {})
         
@@ -93,26 +99,45 @@ implementation:
                     confusion_matrix.extend([float(x) for x in row])
             else:
                 confusion_matrix = [float(x) for x in cm_raw]
+        
+        # Ensure confusion_matrix is not empty
+        if not confusion_matrix:
+            confusion_matrix = [0.0]
 
-        # Create evaluation schema row
+        # Helper function to safely convert to float
+        def safe_float(value, default=0.0):
+            try:
+                return float(value)
+            except:
+                return float(default)
+
+        # Create evaluation schema row with proper data types
         evaluation_row = {
-            "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
-            "model_id": args.model_id,
-            "projectId": args.project_id,
-            "accuracy": float(test_metrics.get("accuracy", schema_metrics.get("accuracy", 0.0))),
-            "precision_score": float(test_metrics.get("precision", schema_metrics.get("precision", 0.0))),
-            "recall": float(test_metrics.get("recall", schema_metrics.get("recall", 0.0))),
-            "f1_score": float(test_metrics.get("f1_score", schema_metrics.get("f1_score", 0.0))),
-            "roc_auc": float(test_metrics.get("roc_auc", schema_metrics.get("roc_auc", 0.0))),
-            "loss": str(test_metrics.get("loss", schema_metrics.get("loss", "0.0"))),
-            "confusion_matrix": confusion_matrix,
-            "tenant_id": tenant_id,
-            "model_name": model_name,
-            "model_type": model_type,
-            "r2_score": float(test_metrics.get("r2_score", schema_metrics.get("r2_score", 0.0))),
-            "mse": float(test_metrics.get("mse", 0.0)),
-            "rmse_score": float(test_metrics.get("rmse", schema_metrics.get("rmse", 0.0)))
+            "execution_id": execution_id_int,  # number (primary key)
+            "model_id": args.model_id,  # string (primary key)
+            "projectId": args.project_id,  # string (primary key)
+            "accuracy": safe_float(test_metrics.get("accuracy", schema_metrics.get("accuracy", 0.0))),  # float
+            "precision_score": safe_float(test_metrics.get("precision", schema_metrics.get("precision", 0.0))),  # float
+            "recall": safe_float(test_metrics.get("recall", schema_metrics.get("recall", 0.0))),  # float
+            "f1_score": safe_float(test_metrics.get("f1_score", schema_metrics.get("f1_score", 0.0))),  # float
+            "roc_auc": safe_float(test_metrics.get("roc_auc", schema_metrics.get("roc_auc", 0.0))),  # float
+            "loss": str(schema_metrics.get("loss", "0.0")),  # string (must be string)
+            "confusion_matrix": confusion_matrix,  # [] list of floats
+            "tenant_id": tenant_id,  # string
+            "model_name": model_name,  # string
+            "model_type": model_type,  # string
+            "r2_score": safe_float(test_metrics.get("r2_score", schema_metrics.get("r2_score", 0.0))),  # float
+            "mse": safe_float(test_metrics.get("mse", 0.0)),  # float
+            "rmse_score": safe_float(test_metrics.get("rmse", schema_metrics.get("rmse", 0.0)))  # float
         }
+
+        # Ensure no empty strings - convert empty strings to appropriate values
+        for key, value in evaluation_row.items():
+            if isinstance(value, str) and value == "":
+                if key == "loss":
+                    evaluation_row[key] = "0.0"
+                elif key in ["model_name", "model_type"]:
+                    evaluation_row[key] = "Unknown"
 
         # Set up API call
         headers = {
@@ -137,13 +162,13 @@ implementation:
             "dbType": "TIDB",
             "ownedOnly": True,
             "filter": {
-                "execution_id": int(args.execution_id) if args.execution_id.isdigit() else 0,
+                "execution_id": execution_id_int,
                 "model_id": args.model_id,
                 "projectId": args.project_id
             }
         }
 
-        print(f"Checking for existing evaluation record with execution_id: {args.execution_id}, model_id: {args.model_id}")
+        print(f"Checking for existing evaluation record with execution_id: {execution_id_int}, model_id: {args.model_id}")
         
         try:
             response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
@@ -157,7 +182,7 @@ implementation:
                     "dbType": "TIDB",
                     "conditionalFilter": {
                         "conditions": [
-                            {"field": "execution_id", "operator": "EQUAL", "value": int(args.execution_id) if args.execution_id.isdigit() else 0},
+                            {"field": "execution_id", "operator": "EQUAL", "value": execution_id_int},
                             {"field": "model_id", "operator": "EQUAL", "value": args.model_id},
                             {"field": "projectId", "operator": "EQUAL", "value": args.project_id}
                         ]
@@ -188,7 +213,7 @@ implementation:
                 create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
                 create_payload = {"data": [evaluation_row]}
                 
-                response = http.post(create_url, headers=headers, json=json.dumps(create_payload), timeout=60)
+                response = http.post(create_url, headers=headers, json=create_payload, timeout=60)
                 response.raise_for_status()
                 print("Successfully created new evaluation record.")
             
