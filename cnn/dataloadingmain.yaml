@@ -1,0 +1,134 @@
+name: Data Loader
+description: Downloads dataset and splits into test and train split
+inputs:
+  - {name: cdn_url, type: String, description: 'CDN URL to download ZIP file (use %24%24 for $$)'}
+  - {name: train_split, type: Float, description: 'Train split ratio (default 0.7)'}
+  - {name: shuffle_seed, type: Integer, description: 'Random seed for shuffling'}
+outputs:
+  - {name: train_data, type: Dataset}
+  - {name: test_data, type: Dataset}
+  - {name: dataset_info, type: DatasetInfo}
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v19
+    command:
+      - sh
+      - -c
+      - |
+        python -c "
+        import sys, os, pickle, json, base64, io, zipfile
+        from collections import Counter
+        from torch.utils.data import random_split
+        import torch
+        import requests
+        from urllib.parse import unquote
+        
+        print('Number of arguments:', len(sys.argv))
+        print('Arguments:', sys.argv)
+        
+        # Get args directly from command line - FIXED INDICES
+        cdn_url = sys.argv[1]
+        train_split = float(sys.argv[2])
+        shuffle_seed = int(sys.argv[3])
+        train_data_path = sys.argv[4]
+        test_data_path = sys.argv[5]
+        dataset_info_path = sys.argv[6]
+        
+        print('Starting dataset download...')
+        print(f'CDN URL: {cdn_url}')
+        print(f'Train split: {train_split}')
+        print(f'Shuffle seed: {shuffle_seed}')
+        
+        # Download and extract function
+        def download_and_extract_zip(url):
+            decoded_url = unquote(url)
+            print(f'Downloading from decoded URL: {decoded_url}')
+            
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(decoded_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            zip_content = io.BytesIO(response.content)
+            dataset = []
+            
+            with zipfile.ZipFile(zip_content, 'r') as zip_file:
+                png_files = [f for f in zip_file.namelist() if f.lower().endswith('.png')]
+                print(f'Found {len(png_files)} PNG files')
+                
+                for file_path in png_files:
+                    parts = file_path.split('/')
+                    if len(parts) >= 3 and parts[0] == 'Classification_dataset':
+                        label = parts[1]
+                        
+                        with zip_file.open(file_path) as image_file:
+                            image_data = image_file.read()
+                            base64_image = base64.b64encode(image_data).decode('utf-8')
+                            
+                            dataset.append({
+                                'image_data': base64_image,
+                                'label': label,
+                                'filename': file_path
+                            })
+            
+            return dataset
+
+        # Download and process
+        raw_data = download_and_extract_zip(cdn_url)
+        
+        if not raw_data:
+            raise Exception('No images found in ZIP file')
+
+        # Create dataset info
+        labels = [item['label'] for item in raw_data]
+        unique_labels = sorted(list(set(labels)))
+        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
+        label_distribution = Counter(labels)
+
+        dataset_info = {
+            'total_samples': len(raw_data),
+            'classes': unique_labels,
+            'class_distribution': dict(label_distribution),
+            'label_to_idx': label_to_idx,
+            'output_dim': len(unique_labels),
+            'train_split_ratio': train_split,
+            'shuffle_seed': shuffle_seed
+        }
+
+        print(f'Dataset: {len(raw_data)} samples, {len(unique_labels)} classes: {unique_labels}')
+
+        # Split data
+        train_size = int(train_split * len(raw_data))
+        test_size = len(raw_data) - train_size
+        
+        train_data, test_data = random_split(
+            raw_data, [train_size, test_size],
+            generator=torch.Generator().manual_seed(shuffle_seed)
+        )
+
+        # Convert to lists and save
+        train_data_list = [raw_data[i] for i in train_data.indices]
+        test_data_list = [raw_data[i] for i in test_data.indices]
+
+        os.makedirs(os.path.dirname(train_data_path) or '.', exist_ok=True)
+        with open(train_data_path, 'wb') as f:
+            pickle.dump(train_data_list, f)
+
+        os.makedirs(os.path.dirname(test_data_path) or '.', exist_ok=True)
+        with open(test_data_path, 'wb') as f:
+            pickle.dump(test_data_list, f)
+
+        os.makedirs(os.path.dirname(dataset_info_path) or '.', exist_ok=True)
+        with open(dataset_info_path, 'wb') as f:
+            pickle.dump(dataset_info, f)
+
+        print('Dataset loading complete!')
+        print(f'Train samples: {len(train_data_list)}')
+        print(f'Test samples: {len(test_data_list)}')
+        " "$0" "$1" "$2" "$3" "$4" "$5"
+    args:
+      - {inputValue: cdn_url}
+      - {inputValue: train_split}
+      - {inputValue: shuffle_seed}
+      - {outputPath: train_data}
+      - {outputPath: test_data}
+      - {outputPath: dataset_info}
