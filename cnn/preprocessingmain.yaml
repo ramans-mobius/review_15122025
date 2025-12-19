@@ -1,0 +1,170 @@
+name: Preprocess Data
+description: Preprocess datasets
+inputs:
+  - name: train_data
+    type: Dataset
+  - name: test_data
+    type: Dataset
+  - name: dataset_info
+    type: DatasetInfo
+  - name: model_config
+    type: String
+    description: 'ResNet configuration as JSON string'
+outputs:
+  - name: processed_data_pickle
+    type: Dataset
+  - name: weight_out
+    type: String
+    description: "ResNet preprocessing config as JSON string"
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v34
+    command:
+      - sh
+      - -c
+      - |
+        python3 -m pip install --quiet --upgrade pip setuptools wheel
+        python3 -m pip install --quiet "torchvision==0.17.0"
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import sys, os, pickle, json, base64, io
+        from PIL import Image
+        import torch
+        import torchvision.transforms as transforms
+        from torch.utils.data import DataLoader, Dataset
+        
+        print('Number of arguments received:', len(sys.argv))
+        for i, arg in enumerate(sys.argv):
+            if i == 4:  # config string is long
+                print(f'  Argument {i}: {arg[:100]}...')
+            else:
+                print(f'  Argument {i}: {arg}')
+        
+        # Get args
+        if len(sys.argv) < 7:
+            raise ValueError(f'Expected 7 arguments, got {len(sys.argv)}')
+        
+        train_path = sys.argv[1]
+        test_path = sys.argv[2]
+        info_path = sys.argv[3]
+        config_str = sys.argv[4]
+        out_path = sys.argv[5]
+        weight_path = sys.argv[6]
+        
+        print('Starting preprocessing...')
+        print(f'Train path: {train_path}')
+        print(f'Test path: {test_path}')
+        
+        # Simple classes
+        class CustomJSONDataset(Dataset):
+            def __init__(self, data, transform=None):
+                self.data, self.transform = data, transform
+            def __len__(self): return len(self.data)
+            def __getitem__(self, idx):
+                item = self.data[idx]
+                img = Image.open(io.BytesIO(base64.b64decode(item['image_data']))).convert('RGB')
+                return self.transform(img) if self.transform else img, item['label']
+        
+        class DataWrapper:
+            def __init__(self, data_dict): self.__dict__.update(data_dict)
+        
+        # Load config
+        config = json.loads(config_str)
+        batch_size = config.get('training', {}).get('batch_size', 16)
+        image_size = config.get('preprocessing', {}).get('image_size', 224)
+        
+        print(f'Batch size: {batch_size}, Image size: {image_size}')
+        
+        # Load data
+        with open(train_path, 'rb') as f: train_data = pickle.load(f)
+        with open(test_path, 'rb') as f: test_data = pickle.load(f)
+        with open(info_path, 'rb') as f: dataset_info = pickle.load(f)
+        
+        print(f'Loaded {len(train_data)} train, {len(test_data)} test samples')
+        # FIXED: Use different quotes for the f-string
+        print('Classes: ' + str(dataset_info['classes']))
+        
+        # Create transforms
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        train_tf = transforms.Compose([
+            transforms.Resize(256), 
+            transforms.RandomCrop(224), 
+            transforms.RandomHorizontalFlip(), 
+            transforms.ToTensor(), 
+            normalize
+        ])
+        test_tf = transforms.Compose([
+            transforms.Resize(256), 
+            transforms.CenterCrop(224), 
+            transforms.ToTensor(), 
+            normalize
+        ])
+        
+        # Create datasets
+        train_ds = CustomJSONDataset(train_data, train_tf)
+        test_ds = CustomJSONDataset(test_data, test_tf)
+        
+        # Convert labels
+        label_map = dataset_info['label_to_idx']
+        class LabeledDataset(Dataset):
+            def __init__(self, ds, mapping): 
+                self.ds, self.mapping = ds, mapping
+            def __len__(self): 
+                return len(self.ds)
+            def __getitem__(self, idx):
+                img, label_str = self.ds[idx]
+                return img, self.mapping[label_str]
+        
+        train_ld = LabeledDataset(train_ds, label_map)
+        test_ld = LabeledDataset(test_ds, label_map)
+        
+        # Create loaders
+        train_loader = DataLoader(train_ld, batch_size=batch_size, shuffle=True, num_workers=0)
+        test_loader = DataLoader(test_ld, batch_size=batch_size, shuffle=False, num_workers=0)
+        
+        # Save processed data
+        data_wrapper = DataWrapper({
+            'train_loader': train_loader, 
+            'test_loader': test_loader,
+            'num_classes': len(dataset_info['classes']), 
+            'class_names': dataset_info['classes'],
+            'label_to_idx': label_map, 
+            'image_size': image_size, 
+            'batch_size': batch_size,
+            'dataset_info': dataset_info
+        })
+        
+        os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+        with open(out_path, 'wb') as f: 
+            pickle.dump(data_wrapper, f)
+        
+        # Save weight config
+        weight_config = {
+            'preprocessing_complete': True, 
+            'image_size': image_size, 
+            'batch_size': batch_size,
+            'num_classes': len(dataset_info['classes']), 
+            'classes': dataset_info['classes'],
+            'original_config': config
+        }
+        
+        os.makedirs(os.path.dirname(weight_path) or '.', exist_ok=True)
+        with open(weight_path, 'w') as f: 
+            json.dump(weight_config, f, indent=2)
+        
+        print('Preprocessing complete!')
+        print(f'Output saved to: {out_path}')
+        print(f'Config saved to: {weight_path}')
+        print(f'Train loader batches: {len(train_loader)}')
+        print(f'Test loader batches: {len(test_loader)}')
+        print('Done')
+    args:
+      - {inputPath: train_data}
+      - {inputPath: test_data}
+      - {inputPath: dataset_info}
+      - {inputValue: model_config}
+      - {outputPath: processed_data_pickle}
+      - {outputPath: weight_out}
