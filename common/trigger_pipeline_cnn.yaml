@@ -1,4 +1,4 @@
-name: Trigger CNN Pipeline
+name: Trigger CNN Pipeline v2
 description: Triggers an Elyra Kubeflow pipeline for CNN training with DQN optimization.
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the uploaded pickle file"}
@@ -185,6 +185,17 @@ implementation:
         print(f"requesttype: {args.requesttype}")
         print(f"productid: {args.productid}")
         print(f"domain: {args.domain}")
+
+        # Print the full curl command
+        print("\\n=== FULL CURL COMMAND ===")
+        print()
+        print("curl -X POST \\\\")
+        print(f"  '{trigger_url}' \\\\")
+        print("  -H 'accept: application/json' \\\\")
+        print(f"  -H 'Authorization: Bearer {access_token}' \\\\")
+        print("  -H 'Content-Type: application/json' \\\\")
+        print(f"  -d '{json.dumps(payload)}'")
+        print()
 
         import time
         curl_command = [
