@@ -61,7 +61,7 @@ implementation:
         # We need to determine the format and read it
         
         def read_dataset(file_path):
-            """Read dataset file in various formats."""
+            
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"Dataset file not found: {file_path}")
             
