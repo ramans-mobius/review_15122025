@@ -21,6 +21,7 @@ inputs:
   - {name: model_schema, type: String, description: "Schema ID for model metrics"}
   - {name: train_schema, type: String, description: "Schema ID for training history"}
   - {name: eval_schema, type: String, description: "Schema ID for evaluation metrics"}
+  - {name: dqn_pipeline_id, type: String, description: "ID of the DQN RLAF pipeline to trigger from within the CNN pipeline"}
 implementation:
   container:
     image: python:3.8-slim
@@ -64,10 +65,10 @@ implementation:
         parser.add_argument('--model_schema', type=str, required=True, help='Schema ID for model metrics.')
         parser.add_argument('--train_schema', type=str, required=True, help='Schema ID for training history.')
         parser.add_argument('--eval_schema', type=str, required=True, help='Schema ID for evaluation metrics.')
+        parser.add_argument('--dqn_pipeline_id', type=str, required=True, help='ID of the DQN RLAF pipeline.')
         args = parser.parse_args()
 
         # URL encode problematic characters in CDN URLs
-        # Replace common problematic characters with their URL-encoded equivalents
         def encode_cdn_url(url):
             # First, replace known problematic patterns
             url = url.replace("(", "%28")
@@ -84,10 +85,9 @@ implementation:
             # For the _ENC pattern that appears in CDN URLs
             url = url.replace("_ENC", "_ENC")
             
-            print(f"Original URL: {url}")
+            print(f"Original URL: {url[:100]}...")
             
             # Additional URL encoding for safety
-            # Split URL to encode only the path portion, not the protocol
             if "://" in url:
                 protocol, rest = url.split("://", 1)
                 # Encode the rest of the URL
@@ -96,13 +96,14 @@ implementation:
             else:
                 url = urllib.parse.quote(url, safe="/:?=&%_")
             
-            print(f"Encoded URL: {url}")
+            print(f"Encoded URL: {url[:100]}...")
             return url
 
         # Encode both CDN URLs
         args.pickle_cdn_url = encode_cdn_url(args.pickle_cdn_url)
         args.config_cdn_url = encode_cdn_url(args.config_cdn_url)
 
+        # The pipeline_id argument is used in the trigger URL
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
         with open(args.access_token, 'r') as f:
             access_token = f.read().strip()
@@ -113,6 +114,7 @@ implementation:
         }
 
         # Build payload with all pipeline parameters
+        # Note: dqn_pipeline_id is passed as a parameter to the pipeline
         payload = {
             "pipelineType": "ML",
             "containerResources": {},
@@ -137,20 +139,48 @@ implementation:
                 "model_schema": args.model_schema,
                 "train_schema": args.train_schema,
                 "eval_schema": args.eval_schema,
-                "pipeline_id": args.pipeline_id
+                "pipeline_id": args.dqn_pipeline_id,  # This is the DQN pipeline ID parameter
+                "dqn_pipeline_id": args.dqn_pipeline_id  # Both names might be needed
             },
             "version": 1
         }
 
-        print(f"Triggering pipeline at: {trigger_url}")
+        print(f"Triggering CNN pipeline at: {trigger_url}")
+        print(f"CNN Pipeline ID (to trigger): {args.pipeline_id}")
+        print(f"DQN Pipeline ID (parameter): {args.dqn_pipeline_id}")
         print(f"Payload parameters preview:")
-        for key, value in payload["parameters"].items():
-            if "cdn_url" in key:
-                print(f"  {key}: {value[:100]}...")
-            elif key in ["password"]:
-                print(f"  {key}: [REDACTED]")
-            else:
-                print(f"  {key}: {value}")
+        
+        # Group parameters for better readability
+        print("\n=== CDN URLs ===")
+        print(f"pickle_cdn_url: {args.pickle_cdn_url[:80]}...")
+        print(f"config_cdn_url: {args.config_cdn_url[:80]}...")
+        
+        print("\n=== Model Parameters ===")
+        print(f"model_name: {args.model_name}")
+        print(f"model_id: {args.model_id}")
+        print(f"model_schema: {args.model_schema}")
+        
+        print("\n=== Pipeline IDs ===")
+        print(f"pipeline_id (for trigger URL): {args.pipeline_id}")
+        print(f"dqn_pipeline_id (parameter): {args.dqn_pipeline_id}")
+        print(f"experiment_id: {args.experiment_id}")
+        print(f"execution_id: {args.execution_id}")
+        
+        print("\n=== Continual Learning ===")
+        print(f"splitting_strategy: {args.splitting_strategy}")
+        print(f"num_tasks: {args.num_tasks}")
+        
+        print("\n=== Authentication ===")
+        print(f"userName: {args.userName}")
+        print(f"password: [REDACTED]")
+        print(f"requesttype: {args.requesttype}")
+        print(f"productid: {args.productid}")
+        print(f"domain: {args.domain}")
+        
+        print("\n=== Schema IDs ===")
+        print(f"project_id: {args.project_id}")
+        print(f"train_schema: {args.train_schema}")
+        print(f"eval_schema: {args.eval_schema}")
 
         import time
         curl_command = [
@@ -185,7 +215,6 @@ implementation:
                 
                 if i < retries - 1:
                     # Check if the error is a 5xx server error to retry
-                    # curl exit code for HTTP errors > 400 is 22
                     if e.returncode == 22:
                          print(f"Retrying in {retry_delay} seconds...")
                          time.sleep(retry_delay)
@@ -240,3 +269,5 @@ implementation:
       - {inputValue: train_schema}
       - --eval_schema
       - {inputValue: eval_schema}
+      - --dqn_pipeline_id
+      - {inputValue: dqn_pipeline_id}
