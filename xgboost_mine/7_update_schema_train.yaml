@@ -74,35 +74,33 @@ implementation:
             except:
                 return float(default)
 
-        # Create training schema row EXACTLY as per your schema
-        training_row = {
-            "execution_id": execution_id_int,  # number (Primary key) - EXACT
-            "projectId": args.project_id,  # string (primary key) - EXACT
-            "model_id": args.model_id,  # string (primary key) - EXACT
-            "epoch": int(schema_metrics.get("epoch", 0)),  # int - EXACT
-            "loss": safe_float(schema_metrics.get("loss", 0.0)),  # float - EXACT
-            "accuracy": safe_float(schema_metrics.get("accuracy", 0.0)),  # float - EXACT
-            "validation_loss": safe_float(schema_metrics.get("validation_loss", 0.0)),  # float - EXACT
-            "validation_accuracy": safe_float(schema_metrics.get("validation_accuracy", 0.0)),  # float - EXACT
-            "tenant_id": tenant_id  # string - EXACT
-            # custom_metrics is commented out for now since it caused error
-        }
-
-        # Add custom_metrics ONLY if it's a valid field
-        # Try without it first, then add if needed
-        custom_metrics_data = {}
+        # Create custom_metrics as a DICTIONARY (not JSON string)
+        custom_metrics_dict = {}
         if "test_precision" in schema_metrics:
-            custom_metrics_data["test_precision"] = safe_float(schema_metrics.get("test_precision", 0.0))
+            custom_metrics_dict["test_precision"] = safe_float(schema_metrics.get("test_precision", 0.0))
         if "test_recall" in schema_metrics:
-            custom_metrics_data["test_recall"] = safe_float(schema_metrics.get("test_recall", 0.0))
+            custom_metrics_dict["test_recall"] = safe_float(schema_metrics.get("test_recall", 0.0))
         if "test_f1_score" in schema_metrics:
-            custom_metrics_data["test_f1_score"] = safe_float(schema_metrics.get("test_f1_score", 0.0))
+            custom_metrics_dict["test_f1_score"] = safe_float(schema_metrics.get("test_f1_score", 0.0))
         if "test_roc_auc" in schema_metrics:
-            custom_metrics_data["test_roc_auc"] = safe_float(schema_metrics.get("test_roc_auc", 0.0))
+            custom_metrics_dict["test_roc_auc"] = safe_float(schema_metrics.get("test_roc_auc", 0.0))
+
+        # Create training schema row - custom_metrics as dict (schema says {metric_name: float})
+        training_row = {
+            "execution_id": execution_id_int,
+            "projectId": args.project_id,
+            "model_id": args.model_id,
+            "epoch": int(schema_metrics.get("epoch", 0)),
+            "loss": safe_float(schema_metrics.get("loss", 0.0)),
+            "accuracy": safe_float(schema_metrics.get("accuracy", 0.0)),
+            "validation_loss": safe_float(schema_metrics.get("validation_loss", 0.0)),
+            "validation_accuracy": safe_float(schema_metrics.get("validation_accuracy", 0.0)),
+            "tenant_id": tenant_id
+        }
         
-        # Only add custom_metrics if we have data
-        if custom_metrics_data:
-            training_row["custom_metrics"] = json.dumps(custom_metrics_data)
+        # Add custom_metrics ONLY if we have data
+        if custom_metrics_dict:
+            training_row["custom_metrics"] = custom_metrics_dict  # DICT, not JSON string
 
         print(f"Training row being sent: {json.dumps(training_row, indent=2)}")
 
