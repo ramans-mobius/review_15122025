@@ -154,32 +154,32 @@ implementation:
         print(f"Payload parameters preview:")
         
         # Group parameters for better readability
-        print("\n=== CDN URLs ===")
+        print("\\n=== CDN URLs ===")
         print(f"pickle_cdn_url: {args.pickle_cdn_url[:80]}...")
         print(f"config_cdn_url: {args.config_cdn_url[:80]}...")
         
-        print("\n=== Model Parameters ===")
+        print("\\n=== Model Parameters ===")
         print(f"model_name: {args.model_name}")
         print(f"model_id: {args.model_id}")
         print(f"model_schema: {args.model_schema}")
         
-        print("\n=== Pipeline IDs ===")
+        print("\\n=== Pipeline IDs ===")
         print(f"pipeline_id (for trigger URL): {args.pipeline_id}")
         print(f"dqn_pipeline_id (parameter): {args.dqn_pipeline_id}")
         print(f"experiment_id: {args.experiment_id}")
         print(f"execution_id: {args.execution_id}")
         
-        print("\n=== Schema IDs ===")  # Consolidated schema section
+        print("\\n=== Schema IDs ===")  # Consolidated schema section
         print(f"project_id: {args.project_id}")
         print(f"train_schema: {args.train_schema}")
         print(f"eval_schema: {args.eval_schema}")
         print(f"rlaf_schema: {args.rlaf_schema}")  # Added RLAF schema
         
-        print("\n=== Continual Learning ===")
+        print("\\n=== Continual Learning ===")
         print(f"splitting_strategy: {args.splitting_strategy}")
         print(f"num_tasks: {args.num_tasks}")
         
-        print("\n=== Authentication ===")
+        print("\\n=== Authentication ===")
         print(f"userName: {args.userName}")
         print(f"password: [REDACTED]")
         print(f"requesttype: {args.requesttype}")
@@ -215,7 +215,7 @@ implementation:
                 # Try to parse and pretty print the response
                 try:
                     response_json = json.loads(process.stdout)
-                    print("\nParsed response:")
+                    print("\\nParsed response:")
                     print(json.dumps(response_json, indent=2))
                 except:
                     print("Could not parse response as JSON")
