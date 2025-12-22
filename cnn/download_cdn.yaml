@@ -77,7 +77,6 @@ implementation:
                 return img, label
         
         def decode_cdn_url(url):
-            """Decode URL-encoded CDN URL to ensure proper curl request"""
             print(f"Original received URL: {url[:100]}...")
             
             # First, check if the URL already has encoded characters
@@ -133,7 +132,6 @@ implementation:
         print(f"Prepared config URL: {config_url[:150]}...")
         
         def download_from_cdn(url, output_path, max_retries=3):
-            """Download file from CDN with retry logic and proper error handling"""
             curl_command = [
                 "curl",
                 "--location",
