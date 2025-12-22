@@ -1,4 +1,4 @@
-name: XGBoost Model Schema Updater
+name: XGBoost Model Schema Updater v2
 description: Updates the model schema with XGBoost model metadata and configuration
 
 inputs:
@@ -95,21 +95,6 @@ implementation:
             print(f"Warning: execution_id '{args.execution_id}' is not a valid integer. Using 0 as default.")
             execution_id_int = 0
 
-        # Prepare model_specific_config as a SIMPLE JSON string
-        model_specific_config_dict = {
-            "algorithm": model_info.get("algorithm", "XGBoost"),
-            "task": model_info.get("task", "classification"),
-            "feature_count": feature_info.get("final_features", 0),
-            "n_estimators": model_info.get("parameters", {}).get("n_estimators", 100),
-            "learning_rate": model_info.get("parameters", {}).get("learning_rate", 0.1),
-            "max_depth": model_info.get("parameters", {}).get("max_depth", 6),
-            "target_column": data_info.get("target_column", ""),
-            "preprocessing_applied": ", ".join(feature_info.get("preprocessing_applied", []))
-        }
-        
-        # Convert to JSON string
-        model_specific_config_str = json.dumps(model_specific_config_dict)
-
         # Create model name if not provided
         if not args.model_name:
             model_name = f"XGBoost_{model_info.get('task', 'model')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -120,7 +105,7 @@ implementation:
         input_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, {feature_info.get('final_features', 0)}]"
         output_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, 1]"
 
-        # Create model schema row - execution_id as INTEGER
+        # Create model schema row - WITHOUT model_specific_config
         model_row = {
             "execution_id": execution_id_int,  # INTEGER
             "experiment_id": args.model_id,
@@ -140,8 +125,8 @@ implementation:
             "parameter_count": str(feature_info.get('final_features', 0)),
             "source": args.source,
             "created_by": "system",
-            "created_at": datetime.now().isoformat(),
-            "model_specific_config": model_specific_config_str
+            "created_at": datetime.now().isoformat()
+            # REMOVED: "model_specific_config": model_specific_config_str
         }
 
         # Set up API call
@@ -200,7 +185,6 @@ implementation:
                             {"operation": "REPLACE", "path": "input_shape", "value": model_row["input_shape"]},
                             {"operation": "REPLACE", "path": "output_shape", "value": model_row["output_shape"]},
                             {"operation": "REPLACE", "path": "parameter_count", "value": model_row["parameter_count"]},
-                            {"operation": "REPLACE", "path": "model_specific_config", "value": model_row["model_specific_config"]},
                             {"operation": "REPLACE", "path": "experiment_id", "value": model_row["experiment_id"]},
                             {"operation": "REPLACE", "path": "architecture_type", "value": model_row["architecture_type"]},
                             {"operation": "REPLACE", "path": "source", "value": model_row["source"]}
