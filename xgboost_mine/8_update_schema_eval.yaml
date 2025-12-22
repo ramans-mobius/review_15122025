@@ -3,17 +3,15 @@ description: Updates the evaluation schema with XGBoost evaluation metrics
 
 inputs:
   - { name: schema_id, type: String, description: "The ID of the evaluation schema to update." }
-  - { name: schema_metrics, type: String, description: "Schema metrics JSON from Evaluator output." }
-  - { name: metrics_json, type: String, description: "Full metrics JSON from Evaluator output." }
-  - { name: model_info_out, type: String, description: "Model info JSON from ModelBuilder output." }
-  - { name: training_history, type: String, description: "Training history JSON from Trainer output." }
+  - { name: schema_evaluation_metrics, type: String, description: "Schema evaluation metrics JSON from Evaluator output." }
   - { name: model_id, type: String, description: "The ID of the model." }
   - { name: execution_id, type: String, description: "The ID of the execution." }
   - { name: tenant_id, type: String, description: "The ID of the tenant." }
   - { name: project_id, type: String, description: "The ID of the project." }
   - { name: bearer_auth_token, type: String, description: "Bearer token for authentication." }
   - { name: domain, type: String, description: "The domain for the API endpoint." }
-  - { name: model_name, type: String, description: "Optional custom model name.", default: "" }
+  - { name: model_name, type: String, description: "Model name.", default: "XGBoost" }
+  - { name: model_type, type: String, description: "Model type.", default: "Classification" }
 
 outputs:
   - { name: evaluation_schema_updated, type: String, description: "Confirmation of evaluation schema update." }
@@ -40,17 +38,15 @@ implementation:
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
-        parser.add_argument('--schema_metrics', type=str, required=True)
-        parser.add_argument('--metrics_json', type=str, required=True)
-        parser.add_argument('--model_info_out', type=str, required=True)
-        parser.add_argument('--training_history', type=str, required=True)
+        parser.add_argument('--schema_evaluation_metrics', type=str, required=True)
         parser.add_argument('--model_id', type=str, required=True)
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--tenant_id', type=str, required=True)
         parser.add_argument('--project_id', type=str, required=True)
         parser.add_argument('--bearer_auth_token', type=str, required=True)
         parser.add_argument('--domain', type=str, required=True)
-        parser.add_argument('--model_name', type=str, default="")
+        parser.add_argument('--model_name', type=str, default="XGBoost")
+        parser.add_argument('--model_type', type=str, default="Classification")
         parser.add_argument('--evaluation_schema_updated', type=str, required=True)
         args = parser.parse_args()
 
@@ -60,14 +56,8 @@ implementation:
             os.makedirs(output_dir, exist_ok=True)
 
         # Read input files
-        with open(args.schema_metrics, 'r') as f:
+        with open(args.schema_evaluation_metrics, 'r') as f:
             schema_metrics = json.load(f)
-        
-        with open(args.metrics_json, 'r') as f:
-            full_metrics = json.load(f)
-        
-        with open(args.model_info_out, 'r') as f:
-            model_info = json.load(f)
         
         with open(args.bearer_auth_token, 'r') as f:
             bearer_auth_token = f.read().strip()
@@ -81,32 +71,6 @@ implementation:
         except:
             execution_id_int = 0
 
-        # Extract test metrics from full metrics
-        test_metrics = full_metrics.get("test_metrics", {})
-        
-        # Create model name if not provided
-        if not args.model_name:
-            model_name = f"XGBoost_{model_info.get('task', 'model')}"
-        else:
-            model_name = args.model_name
-
-        # Determine model type based on task
-        model_type = model_info.get("task", "classification").capitalize()
-
-        # Prepare confusion matrix (convert to list of floats)
-        confusion_matrix = []
-        cm_raw = test_metrics.get("confusion_matrix", [])
-        if cm_raw:
-            if isinstance(cm_raw[0], list):
-                for row in cm_raw:
-                    confusion_matrix.extend([float(x) for x in row])
-            else:
-                confusion_matrix = [float(x) for x in cm_raw]
-        
-        # Ensure confusion_matrix is not empty
-        if not confusion_matrix:
-            confusion_matrix = [0.0]
-
         # Helper function to safely convert to float
         def safe_float(value, default=0.0):
             try:
@@ -114,29 +78,43 @@ implementation:
             except:
                 return float(default)
 
-        # CRITICAL FIX: Based on your schema and the error, loss should be STRING
-        # Your schema: "loss: string"
-        # The error was confusing but showed your data had loss as string
-        loss_value = str(schema_metrics.get("loss", "0.0"))  # Keep as string!
-
-        # Create evaluation schema row EXACTLY as per your schema
+        # Parse confusion_matrix - ensure it's a list of floats
+        confusion_matrix = []
+        if "confusion_matrix" in schema_metrics:
+            cm = schema_metrics["confusion_matrix"]
+            if isinstance(cm, list):
+                # If it's already a list, convert elements to float
+                confusion_matrix = [float(x) for x in cm]
+            elif isinstance(cm, str):
+                # If it's a string representation
+                try:
+                    # Try to parse as JSON
+                    cm_list = json.loads(cm)
+                    if isinstance(cm_list, list):
+                        confusion_matrix = [float(x) for x in cm_list]
+                except:
+                    # If not JSON, try to parse as string
+                    cm_str = cm.strip('[]')
+                    confusion_matrix = [float(x.strip()) for x in cm_str.split(',')]
+        
+        # Create evaluation schema row - loss as STRING per schema
         evaluation_row = {
-            "execution_id": execution_id_int,  # number (primary key) - EXACT
-            "model_id": args.model_id,  # string (primary key) - EXACT
-            "projectId": args.project_id,  # string (primary key) - EXACT
-            "accuracy": safe_float(test_metrics.get("accuracy", schema_metrics.get("accuracy", 0.0))),  # float - EXACT
-            "precision_score": safe_float(test_metrics.get("precision", schema_metrics.get("precision", 0.0))),  # float - EXACT
-            "recall": safe_float(test_metrics.get("recall", schema_metrics.get("recall", 0.0))),  # float - EXACT
-            "f1_score": safe_float(test_metrics.get("f1_score", schema_metrics.get("f1_score", 0.0))),  # float - EXACT
-            "roc_auc": safe_float(test_metrics.get("roc_auc", schema_metrics.get("roc_auc", 0.0))),  # float - EXACT
-            "loss": loss_value,  # string - EXACT (as per your schema!)
-            "confusion_matrix": confusion_matrix,  # [] - EXACT
-            "tenant_id": tenant_id,  # string - EXACT
-            "model_name": model_name,  # string - EXACT
-            "model_type": model_type,  # string - EXACT
-            "r2_score": safe_float(test_metrics.get("r2_score", schema_metrics.get("r2_score", 0.0))),  # float - EXACT
-            "mse": safe_float(test_metrics.get("mse", 0.0)),  # float - EXACT
-            "rmse_score": safe_float(test_metrics.get("rmse", schema_metrics.get("rmse", 0.0)))  # float - EXACT
+            "execution_id": execution_id_int,
+            "model_id": args.model_id,
+            "projectId": args.project_id,
+            "accuracy": safe_float(schema_metrics.get("accuracy", 0.0)),
+            "precision_score": safe_float(schema_metrics.get("precision_score", 0.0)),
+            "recall": safe_float(schema_metrics.get("recall", 0.0)),
+            "f1_score": safe_float(schema_metrics.get("f1_score", 0.0)),
+            "roc_auc": safe_float(schema_metrics.get("roc_auc", 0.0)),
+            "loss": str(safe_float(schema_metrics.get("loss", 0.0))),  # STRING, not float
+            "confusion_matrix": confusion_matrix,  # List of floats
+            "tenant_id": tenant_id,
+            "model_name": args.model_name,
+            "model_type": args.model_type,
+            "r2_score": safe_float(schema_metrics.get("r2_score", 0.0)),
+            "mse": safe_float(schema_metrics.get("mse", 0.0)),
+            "rmse_score": safe_float(schema_metrics.get("rmse_score", 0.0))
         }
 
         print(f"Evaluation row being sent: {json.dumps(evaluation_row, indent=2)}")
@@ -238,14 +216,8 @@ implementation:
     args:
       - --schema_id
       - {inputValue: schema_id}
-      - --schema_metrics
-      - {inputPath: schema_metrics}
-      - --metrics_json
-      - {inputPath: metrics_json}
-      - --model_info_out
-      - {inputPath: model_info_out}
-      - --training_history
-      - {inputPath: training_history}
+      - --schema_evaluation_metrics
+      - {inputPath: schema_evaluation_metrics}
       - --model_id
       - {inputValue: model_id}
       - --execution_id
@@ -260,5 +232,7 @@ implementation:
       - {inputValue: domain}
       - --model_name
       - {inputValue: model_name}
+      - --model_type
+      - {inputValue: model_type}
       - --evaluation_schema_updated
       - {outputPath: evaluation_schema_updated}
