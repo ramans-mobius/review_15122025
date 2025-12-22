@@ -88,8 +88,14 @@ implementation:
         with open(args.tenant_id, 'r') as f:
             tenant_id = f.read().strip()
 
+        # Parse execution_id to int (primary key) - MUST BE INTEGER
+        try:
+            execution_id_int = int(args.execution_id)
+        except (ValueError, TypeError):
+            print(f"Warning: execution_id '{args.execution_id}' is not a valid integer. Using 0 as default.")
+            execution_id_int = 0
+
         # Prepare model_specific_config as a SIMPLE JSON string
-        # Avoid nested JSON objects inside JSON string
         model_specific_config_dict = {
             "algorithm": model_info.get("algorithm", "XGBoost"),
             "task": model_info.get("task", "classification"),
@@ -101,7 +107,7 @@ implementation:
             "preprocessing_applied": ", ".join(feature_info.get("preprocessing_applied", []))
         }
         
-        # Convert to JSON string (single level, no nested JSON)
+        # Convert to JSON string
         model_specific_config_str = json.dumps(model_specific_config_dict)
 
         # Create model name if not provided
@@ -114,21 +120,15 @@ implementation:
         input_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, {feature_info.get('final_features', 0)}]"
         output_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, 1]"
 
-        # Parse execution_id to int (primary key)
-        try:
-            execution_id_int = int(args.execution_id) if args.execution_id and args.execution_id.isdigit() else 0
-        except:
-            execution_id_int = 0
-
-        # Create model schema row - EXACT field names as per schema
+        # Create model schema row - execution_id as INTEGER
         model_row = {
-            "execution_id": execution_id_int,
+            "execution_id": execution_id_int,  # INTEGER
             "experiment_id": args.model_id,
             "model_id": args.model_id,
             "tenant_id": tenant_id,
             "projectId": args.project_id,
             "name": model_name,
-            "architecture_type": "GRM",  # Fixed value for XGBoost
+            "architecture_type": "GRM",
             "symbolic_profile": json.dumps({
                 "algorithm": model_info.get("algorithm", "XGBoost"),
                 "task": model_info.get("task", "classification"),
@@ -141,7 +141,7 @@ implementation:
             "source": args.source,
             "created_by": "system",
             "created_at": datetime.now().isoformat(),
-            "model_specific_config": model_specific_config_str  # SIMPLE JSON string
+            "model_specific_config": model_specific_config_str
         }
 
         # Set up API call
@@ -161,19 +161,19 @@ implementation:
         http.mount("https://", adapter)
         http.mount("http://", adapter)
 
-        # Check if row exists
+        # Check if row exists - execution_id as INTEGER in filter
         check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
         check_payload = {
             "dbType": "TIDB",
             "ownedOnly": True,
             "filter": {
-                "execution_id": execution_id_int,
+                "execution_id": execution_id_int,  # INTEGER
                 "model_id": args.model_id,
                 "projectId": args.project_id
             }
         }
 
-        print(f"Checking for existing model with execution_id: {execution_id_int}, model_id: {args.model_id}")
+        print(f"Checking for existing model with execution_id: {execution_id_int} (type: {type(execution_id_int)}), model_id: {args.model_id}")
         print(f"Model row being sent: {json.dumps(model_row, indent=2)}")
         
         try:
@@ -188,7 +188,7 @@ implementation:
                     "dbType": "TIDB",
                     "conditionalFilter": {
                         "conditions": [
-                            {"field": "execution_id", "operator": "EQUAL", "value": execution_id_int},
+                            {"field": "execution_id", "operator": "EQUAL", "value": execution_id_int},  # INTEGER
                             {"field": "model_id", "operator": "EQUAL", "value": args.model_id},
                             {"field": "projectId", "operator": "EQUAL", "value": args.project_id}
                         ]
