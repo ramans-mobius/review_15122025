@@ -61,10 +61,11 @@ implementation:
         with open(args.tenant_id, 'r') as f:
             tenant_id = f.read().strip()
 
-        # Parse execution_id to int (primary key)
+        # Parse execution_id to int (primary key) - MUST BE INTEGER
         try:
-            execution_id_int = int(args.execution_id) if args.execution_id and args.execution_id.isdigit() else 0
-        except:
+            execution_id_int = int(args.execution_id)
+        except (ValueError, TypeError):
+            print(f"Warning: execution_id '{args.execution_id}' is not a valid integer. Using 0 as default.")
             execution_id_int = 0
 
         # Helper function to safely convert to float
@@ -85,9 +86,9 @@ implementation:
         if "test_roc_auc" in schema_metrics:
             custom_metrics_dict["test_roc_auc"] = safe_float(schema_metrics.get("test_roc_auc", 0.0))
 
-        # Create training schema row - custom_metrics as dict (schema says {metric_name: float})
+        # Create training schema row - execution_id as INTEGER
         training_row = {
-            "execution_id": execution_id_int,
+            "execution_id": execution_id_int,  # INTEGER
             "projectId": args.project_id,
             "model_id": args.model_id,
             "epoch": int(schema_metrics.get("epoch", 0)),
@@ -121,19 +122,19 @@ implementation:
         http.mount("https://", adapter)
         http.mount("http://", adapter)
 
-        # Check if row exists
+        # Check if row exists - execution_id as INTEGER in filter
         check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
         check_payload = {
             "dbType": "TIDB",
             "ownedOnly": True,
             "filter": {
-                "execution_id": execution_id_int,
+                "execution_id": execution_id_int,  # INTEGER
                 "model_id": args.model_id,
                 "projectId": args.project_id
             }
         }
 
-        print(f"Checking for existing training record with execution_id: {execution_id_int}, model_id: {args.model_id}")
+        print(f"Checking for existing training record with execution_id: {execution_id_int} (type: {type(execution_id_int)}), model_id: {args.model_id}")
         
         try:
             response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
@@ -147,7 +148,7 @@ implementation:
                     "dbType": "TIDB",
                     "conditionalFilter": {
                         "conditions": [
-                            {"field": "execution_id", "operator": "EQUAL", "value": execution_id_int},
+                            {"field": "execution_id", "operator": "EQUAL", "value": execution_id_int},  # INTEGER
                             {"field": "model_id", "operator": "EQUAL", "value": args.model_id},
                             {"field": "projectId", "operator": "EQUAL", "value": args.project_id}
                         ]
