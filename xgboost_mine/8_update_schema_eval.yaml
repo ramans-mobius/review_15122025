@@ -3,7 +3,7 @@ description: Updates the evaluation schema with XGBoost evaluation metrics
 
 inputs:
   - { name: schema_id, type: String, description: "The ID of the evaluation schema to update." }
-  - { name: schema_evaluation_metrics, type: String, description: "Schema evaluation metrics JSON from Evaluator output." }
+  - { name: schema_evaluation_metrics, type: Dataset, description: "Schema evaluation metrics Dataset from Evaluator output." }  # Changed to Dataset
   - { name: model_id, type: String, description: "The ID of the model." }
   - { name: execution_id, type: String, description: "The ID of the execution." }
   - { name: tenant_id, type: String, description: "The ID of the tenant." }
@@ -23,7 +23,7 @@ implementation:
       - sh
       - -c
       - |
-        pip install requests
+        pip install requests pandas
         exec "$0" "$@"
       - python3
       - -u
@@ -32,13 +32,14 @@ implementation:
         import json
         import argparse
         import requests
+        import pandas as pd
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
         import os
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
-        parser.add_argument('--schema_evaluation_metrics', type=str, required=True)
+        parser.add_argument('--schema_evaluation_metrics', type=str, required=True)  # Dataset path
         parser.add_argument('--model_id', type=str, required=True)
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--tenant_id', type=str, required=True)
@@ -55,9 +56,60 @@ implementation:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-        # Read input files
-        with open(args.schema_evaluation_metrics, 'r') as f:
-            schema_metrics = json.load(f)
+        # Read input files - NOW READING FROM DATASET
+        # The Dataset could be in various formats (JSON, CSV, Parquet, etc.)
+        # We need to determine the format and read it
+        
+        def read_dataset(file_path):
+            """Read dataset file in various formats."""
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Dataset file not found: {file_path}")
+            
+            # Try different formats
+            try:
+                # Try JSON first
+                if file_path.endswith('.json'):
+                    with open(file_path, 'r') as f:
+                        return json.load(f)
+                
+                # Try CSV
+                elif file_path.endswith('.csv'):
+                    df = pd.read_csv(file_path)
+                    # Convert DataFrame to dict
+                    if len(df) == 1:
+                        # Single row - likely metrics
+                        return df.iloc[0].to_dict()
+                    else:
+                        return df.to_dict(orient='records')
+                
+                # Try Parquet
+                elif file_path.endswith('.parquet'):
+                    df = pd.read_parquet(file_path)
+                    if len(df) == 1:
+                        return df.iloc[0].to_dict()
+                    else:
+                        return df.to_dict(orient='records')
+                
+                # Try text file (could be JSON string)
+                else:
+                    with open(file_path, 'r') as f:
+                        content = f.read().strip()
+                        # Try to parse as JSON
+                        try:
+                            return json.loads(content)
+                        except:
+                            # If not JSON, return as string
+                            return {"metrics": content}
+                            
+            except Exception as e:
+                print(f"Error reading dataset {file_path}: {e}")
+                # Fallback: read as text
+                with open(file_path, 'r') as f:
+                    return {"raw_content": f.read()}
+
+        # Read the dataset
+        schema_metrics = read_dataset(args.schema_evaluation_metrics)
+        print(f"Read metrics from dataset: {json.dumps(schema_metrics, indent=2)[:500]}...")
         
         with open(args.bearer_auth_token, 'r') as f:
             bearer_auth_token = f.read().strip()
@@ -218,7 +270,7 @@ implementation:
       - --schema_id
       - {inputValue: schema_id}
       - --schema_evaluation_metrics
-      - {inputPath: schema_evaluation_metrics}
+      - {inputPath: schema_evaluation_metrics}  # Dataset input path
       - --model_id
       - {inputValue: model_id}
       - --execution_id
