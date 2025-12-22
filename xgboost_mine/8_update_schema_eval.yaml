@@ -1,9 +1,9 @@
-name: XGBoost Evaluation Schema Updater v200
+name: XGBoost Evaluation Schema Updater v300
 description: Updates the evaluation schema with XGBoost evaluation metrics
 
 inputs:
   - { name: schema_id, type: String, description: "The ID of the evaluation schema to update." }
-  - { name: schema_evaluation_metrics, type: String, description: "Schema evaluation metrics JSON string from Evaluator output." }  # CHANGED TO String
+  - { name: schema_evaluation_metrics, type: String, description: "Schema evaluation metrics JSON string from Evaluator output." }
   - { name: model_id, type: String, description: "The ID of the model." }
   - { name: execution_id, type: String, description: "The ID of the execution." }
   - { name: tenant_id, type: String, description: "The ID of the tenant." }
@@ -38,7 +38,7 @@ implementation:
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
-        parser.add_argument('--schema_evaluation_metrics', type=str, required=True)  # JSON string path
+        parser.add_argument('--schema_evaluation_metrics', type=str, required=True)
         parser.add_argument('--model_id', type=str, required=True)
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--tenant_id', type=str, required=True)
@@ -65,13 +65,6 @@ implementation:
             print(f"Successfully loaded schema metrics JSON")
             print(f"Schema metrics keys: {list(schema_metrics.keys())}")
             
-            # Print what we received
-            for key, value in schema_metrics.items():
-                if key != 'confusion_matrix':
-                    print(f"  {key}: {value} (type: {type(value).__name__})")
-                else:
-                    print(f"  {key}: {len(value) if isinstance(value, list) else 'N/A'} values")
-                    
         except Exception as e:
             print(f"Error reading schema metrics JSON: {e}")
             print(f"Falling back to empty metrics")
@@ -97,52 +90,76 @@ implementation:
             except:
                 return float(default)
 
+        # Helper function to convert to integer (for roc_auc)
+        def safe_int(value, default=0):
+            try:
+                # Convert float to int (round or truncate as needed)
+                if isinstance(value, float):
+                    return int(round(value * 1000))  # Multiply to preserve precision
+                return int(value)
+            except:
+                return default
+
         # Parse confusion_matrix - ensure it's a list of floats
         confusion_matrix = []
         if "confusion_matrix" in schema_metrics:
             cm = schema_metrics["confusion_matrix"]
             if isinstance(cm, list):
                 confusion_matrix = [float(x) for x in cm]
-            else:
-                print(f"Warning: confusion_matrix is not a list: {type(cm)}")
 
-        # IMPORTANT: For 'loss' field, use the string value from schema_metrics
-        # The schema_metrics dict has 'loss' as a string already
-        loss_value = schema_metrics.get('loss', '0.0')
-        if isinstance(loss_value, (int, float)):
-            loss_value = str(loss_value)
+        # Convert metrics to correct types as per schema:
+        # 1. loss must be FLOAT (not string)
+        loss_value = safe_float(schema_metrics.get('loss', 0.0))
         
-        # For other metrics, convert to float
-        accuracy = safe_float(schema_metrics.get('accuracy', 0.0))
+        # 2. roc_auc must be INTEGER (not float)
+        roc_auc_value = safe_int(schema_metrics.get('roc_auc', 0.0))
+        
+        # 3. accuracy, precision, recall, f1_score, r2_score, mse, rmse_score must be FLOAT
+        accuracy_value = safe_float(schema_metrics.get('accuracy', 0.0))
         precision_score_val = safe_float(schema_metrics.get('precision', 0.0))
         recall_val = safe_float(schema_metrics.get('recall', 0.0))
         f1_score_val = safe_float(schema_metrics.get('f1_score', 0.0))
-        roc_auc_val = safe_float(schema_metrics.get('roc_auc', 0.0))
         r2_score_val = safe_float(schema_metrics.get('r2_score', 0.0))
         mse_val = 0.0  # Not in schema_metrics, use 0.0
         rmse_score_val = safe_float(schema_metrics.get('rmse', 0.0))
+        
+        # 4. rmse must be STRING (different from rmse_score!)
+        rmse_string = str(schema_metrics.get('rmse', '0.0'))
 
-        # Create evaluation schema row
+        # Create evaluation schema row - MATCHING EXACT SCHEMA TYPES
         evaluation_row = {
-            "execution_id": execution_id_int,
-            "model_id": args.model_id,
-            "projectId": args.project_id,
-            "accuracy": accuracy,
-            "precision_score": precision_score_val,
-            "recall": recall_val,
-            "f1_score": f1_score_val,
-            "roc_auc": roc_auc_val,
-            "loss": loss_value,  # Keep as string from schema_metrics
-            "confusion_matrix": confusion_matrix,
-            "tenant_id": tenant_id,
-            "model_name": args.model_name,
-            "model_type": args.model_type,
-            "r2_score": r2_score_val,
-            "mse": mse_val,  # Not in schema_metrics, use 0.0
-            "rmse_score": rmse_score_val
+            "execution_id": execution_id_int,  # number
+            "model_id": args.model_id,  # string
+            "projectId": args.project_id,  # string
+            "accuracy": accuracy_value,  # float
+            "precision_score": precision_score_val,  # float
+            "recall": recall_val,  # float
+            "f1_score": f1_score_val,  # float
+            "roc_auc": roc_auc_value,  # integer (not float!)
+            "loss": loss_value,  # float (not string!)
+            "confusion_matrix": confusion_matrix,  # float_array
+            "tenant_id": tenant_id,  # string
+            "model_name": args.model_name,  # string
+            "model_type": args.model_type,  # string
+            "r2_score": r2_score_val,  # float
+            "mse": mse_val,  # float
+            "rmse_score": rmse_score_val,  # float
+            "rmse": rmse_string  # string (ADDED - was missing!)
         }
 
-        print(f"Evaluation row being sent: {json.dumps(evaluation_row, indent=2)}")
+        print(f"Evaluation row being sent (with correct types):")
+        print(f"  execution_id: {evaluation_row['execution_id']} (type: {type(evaluation_row['execution_id']).__name__})")
+        print(f"  accuracy: {evaluation_row['accuracy']} (type: {type(evaluation_row['accuracy']).__name__})")
+        print(f"  precision_score: {evaluation_row['precision_score']} (type: {type(evaluation_row['precision_score']).__name__})")
+        print(f"  recall: {evaluation_row['recall']} (type: {type(evaluation_row['recall']).__name__})")
+        print(f"  f1_score: {evaluation_row['f1_score']} (type: {type(evaluation_row['f1_score']).__name__})")
+        print(f"  roc_auc: {evaluation_row['roc_auc']} (type: {type(evaluation_row['roc_auc']).__name__}) ← INTEGER")
+        print(f"  loss: {evaluation_row['loss']} (type: {type(evaluation_row['loss']).__name__}) ← FLOAT")
+        print(f"  r2_score: {evaluation_row['r2_score']} (type: {type(evaluation_row['r2_score']).__name__})")
+        print(f"  mse: {evaluation_row['mse']} (type: {type(evaluation_row['mse']).__name__})")
+        print(f"  rmse_score: {evaluation_row['rmse_score']} (type: {type(evaluation_row['rmse_score']).__name__})")
+        print(f"  rmse: {evaluation_row['rmse']} (type: {type(evaluation_row['rmse']).__name__}) ← STRING")
+        print(f"  confusion_matrix: {len(evaluation_row['confusion_matrix'])} values")
 
         # Set up API call
         headers = {
@@ -205,7 +222,8 @@ implementation:
                             {"operation": "REPLACE", "path": "model_type", "value": evaluation_row["model_type"]},
                             {"operation": "REPLACE", "path": "r2_score", "value": evaluation_row["r2_score"]},
                             {"operation": "REPLACE", "path": "mse", "value": evaluation_row["mse"]},
-                            {"operation": "REPLACE", "path": "rmse_score", "value": evaluation_row["rmse_score"]}
+                            {"operation": "REPLACE", "path": "rmse_score", "value": evaluation_row["rmse_score"]},
+                            {"operation": "REPLACE", "path": "rmse", "value": evaluation_row["rmse"]}
                         ]
                     }]
                 }
@@ -241,7 +259,7 @@ implementation:
       - --schema_id
       - {inputValue: schema_id}
       - --schema_evaluation_metrics
-      - {inputPath: schema_evaluation_metrics}  # Changed to String input
+      - {inputPath: schema_evaluation_metrics}
       - --model_id
       - {inputValue: model_id}
       - --execution_id
