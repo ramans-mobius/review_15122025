@@ -1,9 +1,9 @@
-name: XGBoost Evaluation Schema Updater
+name: XGBoost Evaluation Schema Updater v2
 description: Updates the evaluation schema with XGBoost evaluation metrics
 
 inputs:
   - { name: schema_id, type: String, description: "The ID of the evaluation schema to update." }
-  - { name: schema_evaluation_metrics, type: Dataset, description: "Schema evaluation metrics Dataset from Evaluator output." }  # Changed to Dataset
+  - { name: schema_evaluation_metrics, type: Dataset, description: "Schema evaluation metrics Dataset from Evaluator output." }
   - { name: model_id, type: String, description: "The ID of the model." }
   - { name: execution_id, type: String, description: "The ID of the execution." }
   - { name: tenant_id, type: String, description: "The ID of the tenant." }
@@ -56,60 +56,76 @@ implementation:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-        # Read input files - NOW READING FROM DATASET
-        # The Dataset could be in various formats (JSON, CSV, Parquet, etc.)
-        # We need to determine the format and read it
-        
+        # Read input files - FIXED DATASET READING
         def read_dataset(file_path):
+            """Read dataset file in various formats."""
+            print(f"Reading dataset from: {file_path}")
+            print(f"File exists: {os.path.exists(file_path)}")
             
             if not os.path.exists(file_path):
-                raise FileNotFoundError(f"Dataset file not found: {file_path}")
+                return {}
             
-            # Try different formats
             try:
-                # Try JSON first
+                # First, try to read as JSON file
                 if file_path.endswith('.json'):
                     with open(file_path, 'r') as f:
                         return json.load(f)
                 
-                # Try CSV
-                elif file_path.endswith('.csv'):
-                    df = pd.read_csv(file_path)
-                    # Convert DataFrame to dict
-                    if len(df) == 1:
-                        # Single row - likely metrics
-                        return df.iloc[0].to_dict()
-                    else:
-                        return df.to_dict(orient='records')
+                # If it's a pickle file (common binary format)
+                if file_path.endswith('.pkl') or file_path.endswith('.pickle'):
+                    import pickle
+                    with open(file_path, 'rb') as f:
+                        return pickle.load(f)
                 
-                # Try Parquet
-                elif file_path.endswith('.parquet'):
+                # If it's a CSV file
+                if file_path.endswith('.csv'):
+                    df = pd.read_csv(file_path)
+                    if len(df) == 1:
+                        return df.iloc[0].to_dict()
+                    return df.to_dict(orient='records')
+                
+                # If it's a parquet file
+                if file_path.endswith('.parquet'):
                     df = pd.read_parquet(file_path)
                     if len(df) == 1:
                         return df.iloc[0].to_dict()
-                    else:
-                        return df.to_dict(orient='records')
+                    return df.to_dict(orient='records')
                 
-                # Try text file (could be JSON string)
-                else:
-                    with open(file_path, 'r') as f:
-                        content = f.read().strip()
-                        # Try to parse as JSON
-                        try:
-                            return json.loads(content)
-                        except:
-                            # If not JSON, return as string
-                            return {"metrics": content}
-                            
+                # Try to determine file type by reading first few bytes
+                with open(file_path, 'rb') as f:
+                    first_bytes = f.read(100)
+                    
+                # Check if it's a pickle file (pickle files often start with certain bytes)
+                if first_bytes.startswith(b'\x80'):
+                    import pickle
+                    with open(file_path, 'rb') as f:
+                        return pickle.load(f)
+                
+                # If we can't determine, try to read as text with different encodings
+                encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                for encoding in encodings:
+                    try:
+                        with open(file_path, 'r', encoding=encoding) as f:
+                            content = f.read()
+                            # Try to parse as JSON
+                            try:
+                                return json.loads(content)
+                            except:
+                                return {"content": content}
+                    except UnicodeDecodeError:
+                        continue
+                
+                # If all text attempts fail, return empty dict
+                print(f"Warning: Could not read file with any text encoding")
+                return {}
+                
             except Exception as e:
-                print(f"Error reading dataset {file_path}: {e}")
-                # Fallback: read as text
-                with open(file_path, 'r') as f:
-                    return {"raw_content": f.read()}
+                print(f"Error reading dataset: {e}")
+                return {}
 
         # Read the dataset
         schema_metrics = read_dataset(args.schema_evaluation_metrics)
-        print(f"Read metrics from dataset: {json.dumps(schema_metrics, indent=2)[:500]}...")
+        print(f"Read metrics: {json.dumps(schema_metrics, indent=2)[:500]}...")
         
         with open(args.bearer_auth_token, 'r') as f:
             bearer_auth_token = f.read().strip()
@@ -117,7 +133,7 @@ implementation:
         with open(args.tenant_id, 'r') as f:
             tenant_id = f.read().strip()
 
-        # Parse execution_id to int (primary key) - MUST BE INTEGER
+        # Parse execution_id to int (primary key)
         try:
             execution_id_int = int(args.execution_id)
         except (ValueError, TypeError):
@@ -131,43 +147,42 @@ implementation:
             except:
                 return float(default)
 
-        # Parse confusion_matrix - ensure it's a list of floats
+        # Parse confusion_matrix
         confusion_matrix = []
-        if "confusion_matrix" in schema_metrics:
+        if schema_metrics and "confusion_matrix" in schema_metrics:
             cm = schema_metrics["confusion_matrix"]
             if isinstance(cm, list):
-                # If it's already a list, convert elements to float
                 confusion_matrix = [float(x) for x in cm]
             elif isinstance(cm, str):
-                # If it's a string representation
                 try:
-                    # Try to parse as JSON
                     cm_list = json.loads(cm)
                     if isinstance(cm_list, list):
                         confusion_matrix = [float(x) for x in cm_list]
                 except:
-                    # If not JSON, try to parse as string
-                    cm_str = cm.strip('[]')
-                    confusion_matrix = [float(x.strip()) for x in cm_str.split(',')]
+                    try:
+                        cm_str = cm.strip('[]')
+                        confusion_matrix = [float(x.strip()) for x in cm_str.split(',')]
+                    except:
+                        confusion_matrix = []
 
-        # Create evaluation schema row - execution_id as INTEGER, loss as STRING
+        # Create evaluation schema row
         evaluation_row = {
-            "execution_id": execution_id_int,  # INTEGER
+            "execution_id": execution_id_int,
             "model_id": args.model_id,
             "projectId": args.project_id,
-            "accuracy": safe_float(schema_metrics.get("accuracy", 0.0)),
-            "precision_score": safe_float(schema_metrics.get("precision_score", 0.0)),
-            "recall": safe_float(schema_metrics.get("recall", 0.0)),
-            "f1_score": safe_float(schema_metrics.get("f1_score", 0.0)),
-            "roc_auc": safe_float(schema_metrics.get("roc_auc", 0.0)),
-            "loss": str(safe_float(schema_metrics.get("loss", 0.0))),  # STRING, not float
-            "confusion_matrix": confusion_matrix,  # List of floats
+            "accuracy": safe_float(schema_metrics.get("accuracy", 0.0)) if schema_metrics else 0.0,
+            "precision_score": safe_float(schema_metrics.get("precision_score", 0.0)) if schema_metrics else 0.0,
+            "recall": safe_float(schema_metrics.get("recall", 0.0)) if schema_metrics else 0.0,
+            "f1_score": safe_float(schema_metrics.get("f1_score", 0.0)) if schema_metrics else 0.0,
+            "roc_auc": safe_float(schema_metrics.get("roc_auc", 0.0)) if schema_metrics else 0.0,
+            "loss": str(safe_float(schema_metrics.get("loss", 0.0))) if schema_metrics else "0.0",
+            "confusion_matrix": confusion_matrix,
             "tenant_id": tenant_id,
             "model_name": args.model_name,
             "model_type": args.model_type,
-            "r2_score": safe_float(schema_metrics.get("r2_score", 0.0)),
-            "mse": safe_float(schema_metrics.get("mse", 0.0)),
-            "rmse_score": safe_float(schema_metrics.get("rmse_score", 0.0))
+            "r2_score": safe_float(schema_metrics.get("r2_score", 0.0)) if schema_metrics else 0.0,
+            "mse": safe_float(schema_metrics.get("mse", 0.0)) if schema_metrics else 0.0,
+            "rmse_score": safe_float(schema_metrics.get("rmse_score", 0.0)) if schema_metrics else 0.0
         }
 
         print(f"Evaluation row being sent: {json.dumps(evaluation_row, indent=2)}")
@@ -189,19 +204,19 @@ implementation:
         http.mount("https://", adapter)
         http.mount("http://", adapter)
 
-        # Check if row exists - execution_id as INTEGER in filter
+        # Check if row exists
         check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
         check_payload = {
             "dbType": "TIDB",
             "ownedOnly": True,
             "filter": {
-                "execution_id": execution_id_int,  # INTEGER
+                "execution_id": execution_id_int,
                 "model_id": args.model_id,
                 "projectId": args.project_id
             }
         }
 
-        print(f"Checking for existing evaluation record with execution_id: {execution_id_int} (type: {type(execution_id_int)}), model_id: {args.model_id}")
+        print(f"Checking for existing evaluation record with execution_id: {execution_id_int}, model_id: {args.model_id}")
         
         try:
             response = http.post(check_url, headers=headers, json=check_payload, timeout=60)
@@ -215,7 +230,7 @@ implementation:
                     "dbType": "TIDB",
                     "conditionalFilter": {
                         "conditions": [
-                            {"field": "execution_id", "operator": "EQUAL", "value": execution_id_int},  # INTEGER
+                            {"field": "execution_id", "operator": "EQUAL", "value": execution_id_int},
                             {"field": "model_id", "operator": "EQUAL", "value": args.model_id},
                             {"field": "projectId", "operator": "EQUAL", "value": args.project_id}
                         ]
@@ -261,7 +276,6 @@ implementation:
             if e.response is not None:
                 print(f"Response Status Code: {e.response.status_code}")
                 print(f"Response Content: {e.response.text}")
-            # Write error confirmation
             with open(args.evaluation_schema_updated, 'w') as f:
                 json.dump({"status": "error", "message": str(e), "row_data": evaluation_row}, f)
             exit(1)
@@ -270,7 +284,7 @@ implementation:
       - --schema_id
       - {inputValue: schema_id}
       - --schema_evaluation_metrics
-      - {inputPath: schema_evaluation_metrics}  # Dataset input path
+      - {inputPath: schema_evaluation_metrics}
       - --model_id
       - {inputValue: model_id}
       - --execution_id
