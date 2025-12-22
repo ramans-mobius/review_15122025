@@ -1,4 +1,4 @@
-name: Trigger CNN Pipeline v2
+name: Trigger CNN Pipeline v3
 description: Triggers an Elyra Kubeflow pipeline for CNN training with DQN optimization.
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the uploaded pickle file"}
@@ -141,7 +141,6 @@ implementation:
                 "train_schema": args.train_schema,
                 "eval_schema": args.eval_schema,
                 "pipeline_id": args.dqn_pipeline_id,
-                "dqn_pipeline_id": args.dqn_pipeline_id,
                 "rlaf_schema": args.rlaf_schema  # Added RLAF schema parameter
             },
             "version": 1
