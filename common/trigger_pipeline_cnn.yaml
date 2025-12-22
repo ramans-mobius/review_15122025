@@ -41,6 +41,7 @@ implementation:
         import subprocess
         import json
         import os
+        import urllib.parse
 
         parser = argparse.ArgumentParser(description="Trigger a CNN Kubeflow pipeline.")
         parser.add_argument('--pickle_cdn_url', type=str, required=True, help='URL to the uploaded pickle file.')
@@ -65,9 +66,42 @@ implementation:
         parser.add_argument('--eval_schema', type=str, required=True, help='Schema ID for evaluation metrics.')
         args = parser.parse_args()
 
-        # Escape $$ for curl command
-        args.pickle_cdn_url = args.pickle_cdn_url.replace("$$", "$$$")
-        args.config_cdn_url = args.config_cdn_url.replace("$$", "$$$")
+        # URL encode problematic characters in CDN URLs
+        # Replace common problematic characters with their URL-encoded equivalents
+        def encode_cdn_url(url):
+            # First, replace known problematic patterns
+            url = url.replace("(", "%28")
+            url = url.replace(")", "%29")
+            url = url.replace("$", "%24")
+            url = url.replace(" ", "%20")
+            
+            # Additional encoding for other special characters
+            url = url.replace("[", "%5B")
+            url = url.replace("]", "%5D")
+            url = url.replace("{", "%7B")
+            url = url.replace("}", "%7D")
+            
+            # For the _ENC pattern that appears in CDN URLs
+            url = url.replace("_ENC", "_ENC")
+            
+            print(f"Original URL: {url}")
+            
+            # Additional URL encoding for safety
+            # Split URL to encode only the path portion, not the protocol
+            if "://" in url:
+                protocol, rest = url.split("://", 1)
+                # Encode the rest of the URL
+                rest = urllib.parse.quote(rest, safe="/:?=&%_")
+                url = f"{protocol}://{rest}"
+            else:
+                url = urllib.parse.quote(url, safe="/:?=&%_")
+            
+            print(f"Encoded URL: {url}")
+            return url
+
+        # Encode both CDN URLs
+        args.pickle_cdn_url = encode_cdn_url(args.pickle_cdn_url)
+        args.config_cdn_url = encode_cdn_url(args.config_cdn_url)
 
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
         with open(args.access_token, 'r') as f:
@@ -109,7 +143,14 @@ implementation:
         }
 
         print(f"Triggering pipeline at: {trigger_url}")
-        print(f"Payload: {json.dumps(payload, indent=2)}")
+        print(f"Payload parameters preview:")
+        for key, value in payload["parameters"].items():
+            if "cdn_url" in key:
+                print(f"  {key}: {value[:100]}...")
+            elif key in ["password"]:
+                print(f"  {key}: [REDACTED]")
+            else:
+                print(f"  {key}: {value}")
 
         import time
         curl_command = [
