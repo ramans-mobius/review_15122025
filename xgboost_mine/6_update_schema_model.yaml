@@ -1,4 +1,4 @@
-name: XGBoost Model Schema Updater v2
+name: XGBoost Model Schema Updater
 description: Updates the model schema with XGBoost model metadata and configuration
 
 inputs:
@@ -105,7 +105,7 @@ implementation:
         input_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, {feature_info.get('final_features', 0)}]"
         output_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, 1]"
 
-        # Create model schema row - WITHOUT model_specific_config
+        # Create model schema row - FIXED created_at format
         model_row = {
             "execution_id": execution_id_int,  # INTEGER
             "experiment_id": args.model_id,
@@ -125,7 +125,7 @@ implementation:
             "parameter_count": str(feature_info.get('final_features', 0)),
             "source": args.source,
             "created_by": "system",
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # FIXED FORMAT
             # REMOVED: "model_specific_config": model_specific_config_str
         }
 
