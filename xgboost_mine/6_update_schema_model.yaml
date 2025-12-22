@@ -88,27 +88,21 @@ implementation:
         with open(args.tenant_id, 'r') as f:
             tenant_id = f.read().strip()
 
-        # Prepare model schema data
-        model_specific_config = {
+        # Prepare model_specific_config as a SIMPLE JSON string
+        # Avoid nested JSON objects inside JSON string
+        model_specific_config_dict = {
             "algorithm": model_info.get("algorithm", "XGBoost"),
             "task": model_info.get("task", "classification"),
-            "parameters": model_info.get("parameters", {}),
-            "data_info": {
-                "original_samples": data_info.get("original_samples", 0),
-                "final_samples": data_info.get("final_samples", 0),
-                "features_count": data_info.get("features_count", 0),
-                "target_column": data_info.get("target_column", ""),
-                "task_type": data_info.get("task_type", "")
-            },
-            "feature_info": {
-                "original_features": feature_info.get("original_features", 0),
-                "final_features": feature_info.get("final_features", 0),
-                "feature_names": feature_info.get("feature_names", []),
-                "preprocessing_applied": feature_info.get("preprocessing_applied", [])
-            },
-            "preprocessing_config": weight_config.get("preprocessing_config", {}),
-            "original_config": config
+            "feature_count": feature_info.get("final_features", 0),
+            "n_estimators": model_info.get("parameters", {}).get("n_estimators", 100),
+            "learning_rate": model_info.get("parameters", {}).get("learning_rate", 0.1),
+            "max_depth": model_info.get("parameters", {}).get("max_depth", 6),
+            "target_column": data_info.get("target_column", ""),
+            "preprocessing_applied": ", ".join(feature_info.get("preprocessing_applied", []))
         }
+        
+        # Convert to JSON string (single level, no nested JSON)
+        model_specific_config_str = json.dumps(model_specific_config_dict)
 
         # Create model name if not provided
         if not args.model_name:
@@ -118,7 +112,7 @@ implementation:
 
         # Prepare input and output shapes
         input_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, {feature_info.get('final_features', 0)}]"
-        output_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, 1]"  # Single output for XGBoost
+        output_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, 1]"
 
         # Parse execution_id to int (primary key)
         try:
@@ -126,28 +120,28 @@ implementation:
         except:
             execution_id_int = 0
 
-        # Create model schema row EXACTLY as per your schema
+        # Create model schema row - EXACT field names as per schema
         model_row = {
-            "execution_id": execution_id_int,  # number (primary key) - EXACT
-            "experiment_id": args.model_id,  # string - EXACT
-            "model_id": args.model_id,  # string (primary key) - EXACT
-            "tenant_id": tenant_id,  # string - EXACT
-            "projectId": args.project_id,  # string (primary key) - EXACT
-            "name": model_name,  # string - EXACT
-            "architecture_type": args.architecture_type,  # [transformer, FFN, GRM, CNN] - EXACT
-            "symbolic_profile": json.dumps({  # string - EXACT
+            "execution_id": execution_id_int,
+            "experiment_id": args.model_id,
+            "model_id": args.model_id,
+            "tenant_id": tenant_id,
+            "projectId": args.project_id,
+            "name": model_name,
+            "architecture_type": "GRM",  # Fixed value for XGBoost
+            "symbolic_profile": json.dumps({
                 "algorithm": model_info.get("algorithm", "XGBoost"),
                 "task": model_info.get("task", "classification"),
                 "feature_count": feature_info.get("final_features", 0)
             }),
-            "input_shape": input_shape,  # string - EXACT
-            "output_shape": output_shape,  # string - EXACT
-            "model_weights_cdn": "N/A",  # string - EXACT
-            "parameter_count": str(feature_info.get('final_features', 0)),  # string - EXACT
-            "source": args.source,  # [manual, wizard, auto-generated] - EXACT
-            "created_by": "system",  # user_id - EXACT
-            "created_at": datetime.now().isoformat(),  # datetime - EXACT
-            "model_specific_config": json.dumps(model_specific_config)  # json - EXACT (as per your schema)
+            "input_shape": input_shape,
+            "output_shape": output_shape,
+            "model_weights_cdn": "N/A",
+            "parameter_count": str(feature_info.get('final_features', 0)),
+            "source": args.source,
+            "created_by": "system",
+            "created_at": datetime.now().isoformat(),
+            "model_specific_config": model_specific_config_str  # SIMPLE JSON string
         }
 
         # Set up API call
