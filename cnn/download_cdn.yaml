@@ -1,4 +1,4 @@
-name: DownloadDatasetFromCDN
+name: Download Dataset From CDN
 description: Downloads dataset pickle file from CDN and extracts DataWrapper object with URL encoding support
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the dataset pickle file on CDN (may contain encoded characters)"}
@@ -41,75 +41,69 @@ implementation:
                 if data_dict:
                     self.__dict__.update(data_dict)
         
-        class CustomDataset:
-            def __init__(self, data, transform=None):
-                self.data = data
-                self.transform = transform
-            
-            def __len__(self):
-                return len(self.data)
-            
-            def __getitem__(self, idx):
-                item = self.data[idx]
-                # Handle different data formats
-                if isinstance(item, dict):
-                    if 'image_data' in item:
-                        # Base64 encoded image
-                        img_data = base64.b64decode(item['image_data'])
-                        img = Image.open(io.BytesIO(img_data)).convert('RGB')
-                    elif 'image' in item:
-                        # Raw image data
-                        img = item['image']
-                    else:
-                        # Create dummy image
-                        img = Image.new('RGB', (224, 224), color='white')
-                    
-                    label = item.get('label', 0)
-                elif isinstance(item, tuple) and len(item) == 2:
-                    img, label = item
-                else:
-                    img = Image.new('RGB', (224, 224), color='white')
-                    label = 0
-                
-                if self.transform:
-                    img = self.transform(img)
-                
-                return img, label
-        
         def decode_cdn_url(url):
-            print(f"Original received URL: {url[:100]}...")
+            print(f"Original URL length: {len(url)} chars")
+            print(f"First 150 chars: {url[:150]}")
             
-            # First, check if the URL already has encoded characters
-            # Common patterns in your CDN URLs:
-            # 1. %28 for (
-            # 2. %29 for )
-            # 3. %24 for $
-            # 4. %20 for space
+            # Remove any spaces first
+            url = url.replace(" ", "")
+            print(f"After removing spaces: {url[:150]}")
             
-            # For curl to work properly, we need to ensure the URL is properly encoded
-            # but not double-encoded. Let's decode first and then re-encode properly
-            
+            # Decode URL-encoded characters
             try:
-                # Decode any existing URL encoding
                 decoded = urllib.parse.unquote(url)
-                print(f"After unquote: {decoded[:100]}...")
+                print(f"After unquote: {decoded[:150]}")
                 
-                # Now properly encode for curl
-                if "://" in decoded:
-                    protocol, rest = decoded.split("://", 1)
-                    # Encode special characters but keep / : ? = & intact
-                    encoded_rest = urllib.parse.quote(rest, safe="/:?=&%")
-                    final_url = f"{protocol}://{encoded_rest}"
+                # Check if we still have _ENC followed by encoded part
+                # The correct pattern should be: _ENC(actual_encoded_content)
+                if "_ENC(" in decoded:
+                    print(f"Found _ENC( pattern")
+                    # The URL should already be correct after unquoting
+                    final_url = decoded
                 else:
-                    final_url = urllib.parse.quote(decoded, safe="/:?=&%")
+                    # Check for _ENC%28 pattern
+                    if "_ENC%28" in decoded:
+                        print(f"Found _ENC%28 pattern, replacing with _ENC(")
+                        decoded = decoded.replace("_ENC%28", "_ENC(")
+                    
+                    # Also fix closing parenthesis
+                    if "%29" in decoded:
+                        decoded = decoded.replace("%29", ")")
+                    
+                    final_url = decoded
                 
-                print(f"Final encoded URL for curl: {final_url[:100]}...")
+                print(f"Final URL for curl: {final_url[:150]}")
                 return final_url
                 
             except Exception as e:
-                print(f"Warning: URL decoding failed: {e}")
-                # Fallback: use the URL as-is
+                print(f"Error decoding URL: {e}")
+                # Return the URL with spaces removed
                 return url
+        
+        def display_file_contents(filepath, max_bytes=500):
+            if os.path.exists(filepath):
+                size = os.path.getsize(filepath)
+                print(f"File size: {size} bytes")
+                
+                if size > 0:
+                    with open(filepath, 'rb') as f:
+                        # Read first N bytes
+                        content = f.read(max_bytes)
+                        print(f"First {len(content)} bytes (hex):")
+                        print(content.hex())
+                        
+                        # Try to decode as text if it looks like text
+                        try:
+                            text_content = content.decode('utf-8', errors='ignore')
+                            if len(text_content.strip()) > 0:
+                                print(f"First {len(text_content)} chars as text:")
+                                print(text_content[:200])
+                        except:
+                            print("Binary content (not UTF-8 text)")
+                else:
+                    print("File is empty")
+            else:
+                print("File does not exist")
         
         parser = argparse.ArgumentParser(description="Download dataset from CDN")
         parser.add_argument('--pickle_cdn_url', type=str, required=True, help='URL to dataset pickle file')
@@ -123,15 +117,19 @@ implementation:
         # Read bearer token
         with open(args.bearer_token, 'r') as f:
             bearer_token = f.read().strip()
+        print(f"Bearer token length: {len(bearer_token)} chars")
+        print(f"First 20 chars: {bearer_token[:20]}...")
         
         # Decode and prepare URLs for curl
         pickle_url = decode_cdn_url(args.pickle_cdn_url)
         config_url = decode_cdn_url(args.config_cdn_url)
         
-        print(f"Prepared pickle URL: {pickle_url[:150]}...")
-        print(f"Prepared config URL: {config_url[:150]}...")
+        print(f"\\n=== Prepared URLs ===")
+        print(f"Pickle URL: {pickle_url[:200]}...")
+        print(f"Config URL: {config_url[:200]}...")
         
-        def download_from_cdn(url, output_path, max_retries=3):
+        def download_from_cdn(url, output_path, description="file"):
+            
             curl_command = [
                 "curl",
                 "--location",
@@ -141,188 +139,157 @@ implementation:
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "120"
+                "--max-time", "120",
+                "--verbose"
             ]
             
-            print(f"Executing curl command for download...")
-            print(f"URL (truncated): {url[:100]}...")
+            print(f"\\n=== Downloading {description} ===")
+            print(f"Curl command (simplified): curl --location [URL] --header 'Authorization: Bearer ...' --output {output_path}")
+            print(f"Full URL: {url}")
             
-            for attempt in range(max_retries):
-                try:
-                    process = subprocess.run(
-                        curl_command,
-                        capture_output=True,
-                        text=True,
-                        check=True
-                    )
-                    print(f"Download successful: {output_path}")
-                    
-                    # Check if file was downloaded and has content
-                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                        return True
-                    else:
-                        print(f"Warning: Downloaded file is empty or doesn't exist")
-                        if attempt < max_retries - 1:
-                            print(f"Retrying download (attempt {attempt + 2}/{max_retries})...")
-                            continue
-                        return False
-                        
-                except subprocess.CalledProcessError as e:
-                    print(f"Attempt {attempt + 1} failed:")
-                    print(f"Return code: {e.returncode}")
-                    print(f"Error: {e.stderr}")
-                    print(f"Output: {e.stdout}")
-                    
-                    if attempt < max_retries - 1:
-                        print(f"Retrying in 5 seconds...")
-                        import time
-                        time.sleep(5)
-                        continue
-                    else:
-                        print(f"All {max_retries} attempts failed")
-                        return False
-                except Exception as e:
-                    print(f"Unexpected error: {e}")
-                    if attempt < max_retries - 1:
-                        continue
-                    return False
-            
-            return False
+            try:
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                print(f"✓ Download successful")
+                print(f"HTTP Status: Likely 200 OK")
+                
+                # Display file contents for verification
+                print(f"\\n=== Verifying downloaded {description} ===")
+                display_file_contents(output_path)
+                
+                return True
+                
+            except subprocess.CalledProcessError as e:
+                print(f"✗ Download failed!")
+                print(f"Exit code: {e.returncode}")
+                print(f"Error output: {e.stderr}")
+                print(f"Standard output: {e.stdout}")
+                
+                # Try to extract HTTP status code
+                if "HTTP/" in e.stderr:
+                    lines = e.stderr.split('\\n')
+                    for line in lines:
+                        if "HTTP/" in line:
+                            print(f"HTTP Response: {line.strip()}")
+                
+                return False
+            except Exception as e:
+                print(f"✗ Unexpected error: {e}")
+                return False
+        
+        # Ensure output directories exist
+        os.makedirs(os.path.dirname(args.data_wrapper_pickle) or '.', exist_ok=True)
+        os.makedirs(os.path.dirname(args.config_json) or '.', exist_ok=True)
         
         # Download pickle file
         pickle_temp = "/tmp/downloaded_dataset.pkl"
-        download_success = download_from_cdn(pickle_url, pickle_temp)
+        print(f"\\n{'='*60}")
+        print("ATTEMPTING TO DOWNLOAD DATASET PICKLE")
+        print('='*60)
         
-        if not download_success:
-            print("Failed to download dataset pickle after all retries, creating dummy dataset...")
-            # Create a dummy DataWrapper as fallback
-            import torchvision.transforms as transforms
-            from torch.utils.data import DataLoader, TensorDataset
-            
-            transform = transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-            ])
-            
-            dummy_data = [{'image_data': '', 'label': i % 10, 'filename': f'dummy_{i}.png'} for i in range(100)]
-            dummy_dataset = CustomDataset(dummy_data, transform)
-            dummy_loader = DataLoader(dummy_dataset, batch_size=32, shuffle=True)
-            
-            data_wrapper = DataWrapper({
-                'train_loader': dummy_loader,
-                'test_loader': dummy_loader,
-                'num_classes': 10,
-                'image_size': 224,
-                'batch_size': 32,
-                'class_names': [f'class_{i}' for i in range(10)],
-                'label_to_idx': {f'class_{i}': i for i in range(10)},
-                'dataset_info': {
-                    'total_samples': 100,
-                    'classes': [f'class_{i}' for i in range(10)],
-                    'data_source_type': 'cdn_download_fallback'
-                }
-            })
-        else:
-            # Load the pickle file
-            try:
-                with open(pickle_temp, 'rb') as f:
-                    data_wrapper = pickle.load(f)
-                print(f"Successfully loaded DataWrapper from pickle")
-                
-                # Log DataWrapper structure
-                print(f"DataWrapper type: {type(data_wrapper)}")
-                if hasattr(data_wrapper, '__dict__'):
-                    attrs = [attr for attr in dir(data_wrapper) if not attr.startswith('__')]
-                    print(f"DataWrapper attributes: {attrs}")
-                    
-                    # Check for required attributes
-                    required_attrs = ['train_loader', 'test_loader', 'num_classes']
-                    for attr in required_attrs:
-                        if not hasattr(data_wrapper, attr):
-                            print(f"Warning: DataWrapper missing attribute: {attr}")
-                            # Set default value
-                            if attr == 'num_classes':
-                                setattr(data_wrapper, attr, 10)
-                            else:
-                                setattr(data_wrapper, attr, None)
-                
-            except Exception as e:
-                print(f"Error loading pickle file: {e}")
-                # Create dummy wrapper as fallback
-                data_wrapper = DataWrapper({
-                    'train_loader': None,
-                    'test_loader': None,
-                    'num_classes': 10,
-                    'image_size': 224,
-                    'batch_size': 32,
-                    'class_names': ['class_0', 'class_1'],
-                    'dataset_info': {'error': str(e), 'original_url': args.pickle_cdn_url}
-                })
+        if not download_from_cdn(pickle_url, pickle_temp, "dataset pickle"):
+            print(f"\\n CRITICAL: Failed to download dataset pickle!")
+            print(f"URL used: {pickle_url[:200]}...")
+            print(f"Please check:")
+            print(f"1. URL is correct")
+            print(f"2. Bearer token is valid")
+            print(f"3. File exists on CDN")
+            print(f"4. Network connectivity")
+            raise Exception(f"Failed to download dataset from CDN: {pickle_url[:100]}...")
         
         # Download config file
         config_temp = "/tmp/downloaded_config.json"
-        config_download_success = download_from_cdn(config_url, config_temp)
+        print(f"\\n{'='*60}")
+        print("ATTEMPTING TO DOWNLOAD CONFIG FILE")
+        print('='*60)
         
-        if config_download_success:
-            try:
-                with open(config_temp, 'r') as f:
-                    config_content = f.read()
-                print(f"Successfully downloaded config: {len(config_content)} bytes")
+        if not download_from_cdn(config_url, config_temp, "config file"):
+            print(f"\\n CRITICAL: Failed to download config file!")
+            print(f"URL used: {config_url[:200]}...")
+            raise Exception(f"Failed to download config from CDN: {config_url[:100]}...")
+        
+        # Load and verify the pickle file
+        print(f"\\n{'='*60}")
+        print("LOADING AND VERIFYING DATASET PICKLE")
+        print('='*60)
+        
+        try:
+            with open(pickle_temp, 'rb') as f:
+                data_wrapper = pickle.load(f)
+            print(f"✓ Successfully loaded pickle file")
+            
+            # Display information about the loaded object
+            print(f"\\n=== DataWrapper Information ===")
+            print(f"Type: {type(data_wrapper)}")
+            
+            if hasattr(data_wrapper, '__dict__'):
+                attrs = [attr for attr in dir(data_wrapper) if not attr.startswith('__')]
+                print(f"Attributes: {attrs}")
                 
-                # Try to parse and validate JSON
-                json.loads(config_content)  # This will raise if invalid JSON
-                print("Config is valid JSON")
-            except json.JSONDecodeError as e:
-                print(f"Warning: Config is not valid JSON: {e}")
-                # Wrap in JSON structure
-                config_content = json.dumps({
-                    'raw_content': config_content,
-                    'parse_error': str(e),
-                    'preprocessing_complete': False
-                }, indent=2)
-            except Exception as e:
-                print(f"Error reading config: {e}")
-                config_content = json.dumps({
-                    'error': str(e),
-                    'preprocessing_complete': False
-                }, indent=2)
-        else:
-            config_content = json.dumps({
-                'status': 'fallback',
-                'message': 'Failed to download config from CDN',
-                'preprocessing_complete': True,
-                'image_size': 224,
-                'batch_size': 32,
-                'num_classes': 10,
-                'original_url': args.config_cdn_url
-            }, indent=2)
-            print("Using fallback config")
+                # Display key attributes
+                for attr in attrs:
+                    try:
+                        value = getattr(data_wrapper, attr)
+                        if attr in ['train_loader', 'test_loader', 'num_classes', 'image_size', 'batch_size']:
+                            print(f"  {attr}: {value}")
+                    except:
+                        pass
+            
+            # Save the DataWrapper
+            with open(args.data_wrapper_pickle, 'wb') as f:
+                pickle.dump(data_wrapper, f)
+            print(f"✓ Saved DataWrapper to: {args.data_wrapper_pickle}")
+            
+        except Exception as e:
+            print(f" Error loading pickle file: {e}")
+            print(f"Pickle file contents (first 500 bytes):")
+            display_file_contents(pickle_temp)
+            raise Exception(f"Failed to load pickle file: {e}")
         
-        # Save outputs
-        os.makedirs(os.path.dirname(args.data_wrapper_pickle) or '.', exist_ok=True)
-        with open(args.data_wrapper_pickle, 'wb') as f:
-            pickle.dump(data_wrapper, f)
+        # Load and verify the config file
+        print(f"\\n{'='*60}")
+        print("LOADING AND VERIFYING CONFIG FILE")
+        print('='*60)
         
-        os.makedirs(os.path.dirname(args.config_json) or '.', exist_ok=True)
-        with open(args.config_json, 'w') as f:
-            f.write(config_content)
+        try:
+            with open(config_temp, 'r') as f:
+                config_content = f.read()
+            print(f"✓ Config file size: {len(config_content)} bytes")
+            
+            # Try to parse as JSON
+            config_data = json.loads(config_content)
+            print(f"✓ Config is valid JSON")
+            print(f"Config keys: {list(config_data.keys())}")
+            
+            # Save the config
+            with open(args.config_json, 'w') as f:
+                f.write(config_content)
+            print(f"✓ Saved config to: {args.config_json}")
+            
+        except json.JSONDecodeError as e:
+            print(f" Config is not valid JSON: {e}")
+            print(f"Config content (first 500 chars):")
+            print(config_content[:500])
+            raise Exception(f"Config file is not valid JSON: {e}")
+        except Exception as e:
+            print(f"Error reading config file: {e}")
+            raise Exception(f"Failed to read config file: {e}")
         
-        # Cleanup
+        # Cleanup temp files
         for temp_file in [pickle_temp, config_temp]:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
         
-        print(f"\\nDownload process completed!")
-        print(f"DataWrapper saved to: {args.data_wrapper_pickle}")
-        print(f"Config saved to: {args.config_json}")
-        
-        # Final summary
-        if hasattr(data_wrapper, 'num_classes'):
-            print(f"Dataset has {data_wrapper.num_classes} classes")
-        if hasattr(data_wrapper, 'train_loader'):
-            print(f"Train loader: {'Available' if data_wrapper.train_loader else 'Not available'}")
-        if hasattr(data_wrapper, 'test_loader'):
-            print(f"Test loader: {'Available' if data_wrapper.test_loader else 'Not available'}")
+        print(f"\\n{'='*60}")
+        print("DOWNLOAD COMPLETED SUCCESSFULLY")
+        print('='*60)
+        print(f"Output files:")
+        print(f"  DataWrapper: {args.data_wrapper_pickle}")
+        print(f"  Config JSON: {args.config_json}")
     args:
       - --pickle_cdn_url
       - {inputValue: pickle_cdn_url}
