@@ -3,7 +3,7 @@ description: Triggers an Elyra Kubeflow pipeline for CNN training with DQN optim
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the uploaded pickle file"}
   - {name: config_cdn_url, type: String, description: "URL to the uploaded config string"}
-  - {name: access_token, type: string, description: "Bearer token for pipeline trigger authentication"}
+  - {name: access_token, type: String, description: "Bearer token for pipeline trigger authentication"}
   - {name: domain, type: String, description: "Domain for the pipeline trigger API (e.g., https://ig.mobiusdtaas.ai)"}
   - {name: pipeline_id, type: String, description: "ID of the Elyra Kubeflow pipeline to trigger"}
   - {name: experiment_id, type: String, description: "ID of the Kubeflow experiment"}
