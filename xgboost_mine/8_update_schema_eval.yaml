@@ -1,9 +1,9 @@
-name: XGBoost Evaluation Schema Updater
+name: XGBoost Evaluation Schema Updater v200
 description: Updates the evaluation schema with XGBoost evaluation metrics
 
 inputs:
   - { name: schema_id, type: String, description: "The ID of the evaluation schema to update." }
-  - { name: schema_evaluation_metrics, type: Dataset, description: "Schema evaluation metrics Dataset from Evaluator output." }
+  - { name: schema_evaluation_metrics, type: String, description: "Schema evaluation metrics JSON string from Evaluator output." }  # CHANGED TO String
   - { name: model_id, type: String, description: "The ID of the model." }
   - { name: execution_id, type: String, description: "The ID of the execution." }
   - { name: tenant_id, type: String, description: "The ID of the tenant." }
@@ -38,7 +38,7 @@ implementation:
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
-        parser.add_argument('--schema_evaluation_metrics', type=str, required=True)  # Dataset path - IGNORED
+        parser.add_argument('--schema_evaluation_metrics', type=str, required=True)  # JSON string path
         parser.add_argument('--model_id', type=str, required=True)
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--tenant_id', type=str, required=True)
@@ -55,15 +55,27 @@ implementation:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-        # IGNORE THE DATASET INPUT - it's too large/binary
-        # Just acknowledge we received it but won't process it
-        print(f"Dataset file received at: {args.schema_evaluation_metrics}")
+        # Read the JSON file
+        print(f"Reading schema metrics from: {args.schema_evaluation_metrics}")
         print(f"File exists: {os.path.exists(args.schema_evaluation_metrics)}")
-        if os.path.exists(args.schema_evaluation_metrics):
-            file_size = os.path.getsize(args.schema_evaluation_metrics)
-            print(f"File size: {file_size} bytes")
-            if file_size > 1024 * 1024:  # > 1MB
-                print(f"Warning: Dataset file is large ({file_size/1024/1024:.2f} MB). Skipping processing.")
+        
+        try:
+            with open(args.schema_evaluation_metrics, 'r') as f:
+                schema_metrics = json.load(f)
+            print(f"Successfully loaded schema metrics JSON")
+            print(f"Schema metrics keys: {list(schema_metrics.keys())}")
+            
+            # Print what we received
+            for key, value in schema_metrics.items():
+                if key != 'confusion_matrix':
+                    print(f"  {key}: {value} (type: {type(value).__name__})")
+                else:
+                    print(f"  {key}: {len(value) if isinstance(value, list) else 'N/A'} values")
+                    
+        except Exception as e:
+            print(f"Error reading schema metrics JSON: {e}")
+            print(f"Falling back to empty metrics")
+            schema_metrics = {}
         
         with open(args.bearer_auth_token, 'r') as f:
             bearer_auth_token = f.read().strip()
@@ -85,30 +97,52 @@ implementation:
             except:
                 return float(default)
 
-        # CREATE EMPTY/PLACEHOLDER EVALUATION DATA
-        # Since we can't read the binary dataset, use default/placeholder values
-        # Or you could get these from other sources if available
+        # Parse confusion_matrix - ensure it's a list of floats
+        confusion_matrix = []
+        if "confusion_matrix" in schema_metrics:
+            cm = schema_metrics["confusion_matrix"]
+            if isinstance(cm, list):
+                confusion_matrix = [float(x) for x in cm]
+            else:
+                print(f"Warning: confusion_matrix is not a list: {type(cm)}")
+
+        # IMPORTANT: For 'loss' field, use the string value from schema_metrics
+        # The schema_metrics dict has 'loss' as a string already
+        loss_value = schema_metrics.get('loss', '0.0')
+        if isinstance(loss_value, (int, float)):
+            loss_value = str(loss_value)
+        
+        # For other metrics, convert to float
+        accuracy = safe_float(schema_metrics.get('accuracy', 0.0))
+        precision_score_val = safe_float(schema_metrics.get('precision', 0.0))
+        recall_val = safe_float(schema_metrics.get('recall', 0.0))
+        f1_score_val = safe_float(schema_metrics.get('f1_score', 0.0))
+        roc_auc_val = safe_float(schema_metrics.get('roc_auc', 0.0))
+        r2_score_val = safe_float(schema_metrics.get('r2_score', 0.0))
+        mse_val = 0.0  # Not in schema_metrics, use 0.0
+        rmse_score_val = safe_float(schema_metrics.get('rmse', 0.0))
+
+        # Create evaluation schema row
         evaluation_row = {
             "execution_id": execution_id_int,
             "model_id": args.model_id,
             "projectId": args.project_id,
-            "accuracy": 0.0,  # Default value
-            "precision_score": 0.0,  # Default value
-            "recall": 0.0,  # Default value
-            "f1_score": 0.0,  # Default value
-            "roc_auc": 0.0,  # Default value
-            "loss": "0.0",  # STRING as per schema
-            "confusion_matrix": [0.0, 0.0, 0.0, 0.0],  # Empty confusion matrix
+            "accuracy": accuracy,
+            "precision_score": precision_score_val,
+            "recall": recall_val,
+            "f1_score": f1_score_val,
+            "roc_auc": roc_auc_val,
+            "loss": loss_value,  # Keep as string from schema_metrics
+            "confusion_matrix": confusion_matrix,
             "tenant_id": tenant_id,
             "model_name": args.model_name,
             "model_type": args.model_type,
-            "r2_score": 0.0,  # Default value
-            "mse": 0.0,  # Default value
-            "rmse_score": 0.0  # Default value
+            "r2_score": r2_score_val,
+            "mse": mse_val,  # Not in schema_metrics, use 0.0
+            "rmse_score": rmse_score_val
         }
 
-        print(f"Evaluation row being sent (using placeholder values): {json.dumps(evaluation_row, indent=2)}")
-        print(f"Note: Using placeholder values because dataset file is binary/too large to process.")
+        print(f"Evaluation row being sent: {json.dumps(evaluation_row, indent=2)}")
 
         # Set up API call
         headers = {
@@ -147,7 +181,7 @@ implementation:
             response_data = response.json()
             
             if response_data.get("content"):
-                print("Evaluation record found: Updating row with placeholder values")
+                print("Evaluation record found: Updating row")
                 update_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
                 update_payload = {
                     "dbType": "TIDB",
@@ -178,21 +212,21 @@ implementation:
                 
                 response = http.patch(update_url, headers=headers, json=update_payload, timeout=60)
                 response.raise_for_status()
-                print("Successfully updated evaluation record with placeholder values.")
+                print("Successfully updated evaluation record.")
             else:
-                print("No evaluation record found: Creating new row with placeholder values")
+                print("No evaluation record found: Creating new row")
                 create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
                 create_payload = {"data": [evaluation_row]}
                 
                 response = http.post(create_url, headers=headers, json=create_payload, timeout=60)
                 response.raise_for_status()
-                print("Successfully created new evaluation record with placeholder values.")
+                print("Successfully created new evaluation record.")
             
             print(f"Response: {response.json()}")
             
             # Write success confirmation
             with open(args.evaluation_schema_updated, 'w') as f:
-                json.dump({"status": "success", "message": "Evaluation schema updated successfully (placeholder values used)"}, f)
+                json.dump({"status": "success", "message": "Evaluation schema updated successfully"}, f)
 
         except requests.exceptions.RequestException as e:
             print(f"Error: {e}")
@@ -207,7 +241,7 @@ implementation:
       - --schema_id
       - {inputValue: schema_id}
       - --schema_evaluation_metrics
-      - {inputPath: schema_evaluation_metrics}  # Dataset input - IGNORED
+      - {inputPath: schema_evaluation_metrics}  # Changed to String input
       - --model_id
       - {inputValue: model_id}
       - --execution_id
