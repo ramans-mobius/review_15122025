@@ -1,8 +1,10 @@
-name: Trigger XGBoost Pipeline with CDN 
-description: Creates CDN URLs for all data/metadata and triggers XGBoost pipeline
+name: Trigger XGBoost Pipeline with CDN v4
+description: Creates CDN URLs for train data/metadata and triggers XGBoost pipeline using existing CDN URLs
 inputs:
-  # Data inputs (from previous pipeline outputs)
-  - {name: test_data, type: Dataset, description: "Test dataset file (CSV/Parquet from Data Loader)"}
+  # CDN URLs from Upload to CDN v4 brick
+  - {name: test_data, type: String, description: "Test dataset CDN URL (from Upload to CDN brick)"}
+  
+  # Data files to upload (train data and models)
   - {name: train_x, type: Dataset, description: "Training features dataset (from Feature Selection)"}
   - {name: train_y, type: Dataset, description: "Training labels dataset (from Feature Selection)"}
   - {name: preprocessor_pickle, type: Data, description: "Preprocessor pickle file (from Feature Selection)"}
@@ -67,15 +69,15 @@ implementation:
 
         parser = argparse.ArgumentParser()
 
-        # Data inputs - ALL should be file paths (Datasets and Data)
-        parser.add_argument('--test_data', required=True)
-        parser.add_argument('--train_x', required=True)
-        parser.add_argument('--train_y', required=True)
-        parser.add_argument('--preprocessor_pickle', required=True)
-        parser.add_argument('--preprocessor_metadata', required=True)
-        parser.add_argument('--feature_selector', required=True)
-        parser.add_argument('--pca_model', required=True)
-        parser.add_argument('--pca_metadata', required=True)
+        # Inputs - test_data is String (CDN URL), others are file paths
+        parser.add_argument('--test_data', required=True)  # String CDN URL
+        parser.add_argument('--train_x', required=True)    # Dataset file
+        parser.add_argument('--train_y', required=True)    # Dataset file
+        parser.add_argument('--preprocessor_pickle', required=True)  # Data file
+        parser.add_argument('--preprocessor_metadata', required=True)  # Data file
+        parser.add_argument('--feature_selector', required=True)  # Data file
+        parser.add_argument('--pca_model', required=True)  # Data file
+        parser.add_argument('--pca_metadata', required=True)  # Data file
         
         # Authentication
         parser.add_argument('--bearer_token', required=True)
@@ -116,6 +118,9 @@ implementation:
         print("="*80)
         print("TRIGGER XGBoost PIPELINE WITH CDN UPLOAD")
         print("="*80)
+        print(f"test_data input (CDN URL): {args.test_data[:100]}...")
+        print(f"train_x input (file): {args.train_x}")
+        print(f"train_y input (file): {args.train_y}")
 
         # Function to encode URLs with proper replacements
         def encode_cdn_url(url):
@@ -221,20 +226,21 @@ implementation:
                 shutil.copy2(input_path, output_file)
                 return output_file
 
-        # Step 1: Upload all files to CDN
-        print("[STEP 1] Uploading files to CDN...")
+        # Step 1: Upload train data and model files to CDN
+        print("[STEP 1] Uploading train data and model files to CDN...")
         
         cdn_urls = {}
         
-        # Upload datasets (convert to CSV first)
+        # Store the test_data CDN URL (already uploaded by previous brick)
+        cdn_urls["test_data_cdn"] = args.test_data
+        print(f"Using existing test_data CDN URL: {args.test_data[:100]}...")
+        
+        # Upload train datasets (convert to CSV first)
         train_x_csv = ensure_csv_format(args.train_x, "_train_x")
         cdn_urls["train_x_cdn"] = upload_to_cdn(train_x_csv, "train_x.csv")
         
         train_y_csv = ensure_csv_format(args.train_y, "_train_y")
         cdn_urls["train_y_cdn"] = upload_to_cdn(train_y_csv, "train_y.csv")
-        
-        test_data_csv = ensure_csv_format(args.test_data, "_test")
-        cdn_urls["test_data_cdn"] = upload_to_cdn(test_data_csv, "test_data.csv")
         
         # Upload pickle files
         cdn_urls["preprocessor_pickle_cdn"] = upload_to_cdn(args.preprocessor_pickle, "preprocessor.pkl")
@@ -276,8 +282,8 @@ implementation:
         os.unlink(config_pickle.name)
         
         # Clean up temp CSV files
-        for temp_file in [train_x_csv, train_y_csv, test_data_csv]:
-            if temp_file != args.train_x and temp_file != args.train_y and temp_file != args.test_data:
+        for temp_file in [train_x_csv, train_y_csv]:
+            if temp_file != args.train_x and temp_file != args.train_y:
                 if os.path.exists(temp_file):
                     os.unlink(temp_file)
                     os.rmdir(os.path.dirname(temp_file))
@@ -438,9 +444,9 @@ implementation:
         print("="*80)
             
     args:
-      # Data inputs - ALL ARE FILE PATHS (Datasets or Data files)
+      # Inputs - test_data is String, others are file paths
       - --test_data
-      - {inputPath: test_data}
+      - {inputPath: test_data}  # This reads the CDN URL string from file
       - --train_x
       - {inputPath: train_x}
       - --train_y
