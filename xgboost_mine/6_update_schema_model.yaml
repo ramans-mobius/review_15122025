@@ -1,4 +1,4 @@
-name: XGBoost Model Schema Updater
+name: XGBoost Model Schema Updater vinfinity
 description: Updates the model schema with XGBoost model metadata and configuration
 
 inputs:
@@ -95,6 +95,13 @@ implementation:
             print(f"Warning: execution_id '{args.execution_id}' is not a valid integer. Using 0 as default.")
             execution_id_int = 0
 
+        # Parse experiment_id to int (must be number, not string)
+        try:
+            experiment_id_int = int(args.model_id)
+        except (ValueError, TypeError):
+            print(f"Warning: model_id '{args.model_id}' cannot be converted to integer for experiment_id. Using 0.")
+            experiment_id_int = 0
+
         # Create model name if not provided
         if not args.model_name:
             model_name = f"XGBoost_{model_info.get('task', 'model')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -105,15 +112,18 @@ implementation:
         input_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, {feature_info.get('final_features', 0)}]"
         output_shape = f"[{data_info.get('train_X_shape', [0, 0])[0]}, 1]"
 
-        # Create model schema row - FIXED created_at format
+        # Create model_specific_config as empty JSON
+        model_specific_config = json.dumps({})
+
+        # Create model schema row
         model_row = {
             "execution_id": execution_id_int,  # INTEGER
-            "experiment_id": args.model_id,
+            "experiment_id": experiment_id_int,  # NUMBER (not string)
             "model_id": args.model_id,
             "tenant_id": tenant_id,
             "projectId": args.project_id,
             "name": model_name,
-            "architecture_type": "GRM",
+            "architecture_type": "GRM",  # Must be: CNN, GRM, transformer, or FFN
             "symbolic_profile": json.dumps({
                 "algorithm": model_info.get("algorithm", "XGBoost"),
                 "task": model_info.get("task", "classification"),
@@ -123,10 +133,10 @@ implementation:
             "output_shape": output_shape,
             "model_weights_cdn": "N/A",
             "parameter_count": str(feature_info.get('final_features', 0)),
-            "source": args.source,
+            "source": args.source,  # Must be: auto-generated, wizard, or manual
             "created_by": "system",
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # FIXED FORMAT
-            # REMOVED: "model_specific_config": model_specific_config_str
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model_specific_config": model_specific_config  # Empty JSON
         }
 
         # Set up API call
@@ -187,7 +197,9 @@ implementation:
                             {"operation": "REPLACE", "path": "parameter_count", "value": model_row["parameter_count"]},
                             {"operation": "REPLACE", "path": "experiment_id", "value": model_row["experiment_id"]},
                             {"operation": "REPLACE", "path": "architecture_type", "value": model_row["architecture_type"]},
-                            {"operation": "REPLACE", "path": "source", "value": model_row["source"]}
+                            {"operation": "REPLACE", "path": "source", "value": model_row["source"]},
+                            {"operation": "REPLACE", "path": "model_specific_config", "value": model_row["model_specific_config"]}
+                            # REMOVED: created_at from patch operations - it should only be set during creation
                         ]
                     }]
                 }
