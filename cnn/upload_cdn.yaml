@@ -91,6 +91,13 @@ implementation:
                     print(f"Full response: {process.stdout}")
                     raise ValueError("Missing cdnUrl in response")
                 
+                # CRITICAL: Replace $$ with $$$ to preserve the pattern
+                # This will help downstream components identify and fix the pattern
+                print(f"Original relative URL: {relative_cdn_url}")
+                if "$$" in relative_cdn_url:
+                    relative_cdn_url = relative_cdn_url.replace("$$", "$$$")
+                    print(f"Changed $$ to $$$ in URL")
+                
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
                 print(f"Generated URL: {full_url}")
                 
