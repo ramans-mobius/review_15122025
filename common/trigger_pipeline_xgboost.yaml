@@ -1,4 +1,4 @@
-name: Trigger XGBoost Pipeline with CDN v4
+name: Trigger XGBoost Pipeline with CDN 
 description: Creates CDN URLs for train data/metadata and triggers XGBoost pipeline using existing CDN URLs
 inputs:
   # CDN URLs from Upload to CDN v4 brick
@@ -23,12 +23,12 @@ inputs:
   - {name: experiment_id, type: String, description: "Experiment ID"}
   - {name: model_id, type: String, description: "Model ID"}
   - {name: project_id, type: String, description: "Project ID"}
-  - {name: execution_id, type: String, description: "Execution ID (can be string)"}
+  - {name: execution_id, type: String, description: "Execution ID (must be string for XGBoost pipeline)"}
   - {name: model_type, type: String, description: "Model type (classification/regression)"}
   - {name: target_column, type: String, description: "Target column name"}
   - {name: config_str, type: String, description: "Configuration JSON string"}
   
-  # Additional parameters for XGBoost pipeline
+  # Additional parameters for XGBoost pipeline (note: lowercase as per XGBoost pipeline)
   - {name: userName, type: String, description: "Username for IAM authentication"}
   - {name: password, type: String, description: "Password for IAM authentication"}
   - {name: requesttype, type: String, description: "Request type for IAM authentication"}
@@ -38,6 +38,7 @@ inputs:
   - {name: eval_schema, type: String, description: "Schema ID for evaluation metrics"}
   - {name: architecture_type, type: String, default: "GRM", description: "Architecture type"}
   - {name: source, type: String, default: "auto-generated", description: "Source"}
+  - {name: model_name, type: String, default: "XGBoost", description: "Model name"}
 
 outputs:
   - {name: trigger_response, type: String, description: "Raw response from pipeline trigger API"}
@@ -89,7 +90,7 @@ implementation:
         parser.add_argument('--experiment_id', required=True)
         parser.add_argument('--model_id', required=True)
         parser.add_argument('--project_id', required=True)
-        parser.add_argument('--execution_id', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)  # Keep as string
         parser.add_argument('--model_type', required=True)
         parser.add_argument('--target_column', required=True)
         parser.add_argument('--config_str', required=True)
@@ -104,6 +105,7 @@ implementation:
         parser.add_argument('--eval_schema', required=True)
         parser.add_argument('--architecture_type', default="GRM")
         parser.add_argument('--source', default="auto-generated")
+        parser.add_argument('--model_name', default="XGBoost")  # Added model_name
         
         # Outputs
         parser.add_argument('--trigger_response', required=True)
@@ -118,13 +120,13 @@ implementation:
         print("="*80)
         print("TRIGGER XGBoost PIPELINE WITH CDN UPLOAD")
         print("="*80)
-        print(f"test_data input (CDN URL): {args.test_data[:100]}...")
+        print(f"test_data input (CDN URL): {args.test_data}...")
         print(f"train_x input (file): {args.train_x}")
         print(f"train_y input (file): {args.train_y}")
+        print(f"execution_id (as string): {args.execution_id}")
 
         # Function to encode URLs with proper replacements
         def encode_cdn_url(url):
-            
             if not url:
                 return url
             
@@ -140,12 +142,11 @@ implementation:
             url = url.replace("{", "%7B")
             url = url.replace("}", "%7D")
             
-            print(f"Encoded URL preview: {url[:100]}...")
+            print(f"Encoded URL preview: {url}...")
             return url
 
         # Function to upload file to CDN
         def upload_to_cdn(file_path, file_name=None):
-       
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
             
@@ -188,7 +189,6 @@ implementation:
 
         # Function to ensure CSV format for datasets
         def ensure_csv_format(input_path, suffix=""):
-          
             if input_path.endswith('.csv'):
                 return input_path
             
@@ -233,7 +233,7 @@ implementation:
         
         # Store the test_data CDN URL (already uploaded by previous brick)
         cdn_urls["test_data_cdn"] = args.test_data
-        print(f"Using existing test_data CDN URL: {args.test_data[:100]}...")
+        print(f"Using existing test_data CDN URL: {args.test_data}...")
         
         # Upload train datasets (convert to CSV first)
         train_x_csv = ensure_csv_format(args.train_x, "_train_x")
@@ -296,14 +296,9 @@ implementation:
         # Construct trigger URL
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
         
-        # Try to convert execution_id to integer if possible, otherwise keep as string
-        try:
-            execution_id_int = int(args.execution_id)
-            execution_id_for_payload = execution_id_int
-            print(f"Converted execution_id '{args.execution_id}' to integer: {execution_id_int}")
-        except (ValueError, TypeError):
-            execution_id_for_payload = args.execution_id
-            print(f"Keeping execution_id as string: '{args.execution_id}'")
+        # KEEP execution_id as string (DO NOT convert to integer)
+        execution_id_for_payload = args.execution_id
+        print(f"Keeping execution_id as string: '{args.execution_id}'")
         
         # Build payload with all parameters - CORRECTED FOR XGBOOST PIPELINE
         payload = {
@@ -312,7 +307,7 @@ implementation:
             "experimentId": args.experiment_id,
             "enableCaching": True,
             "parameters": {
-                # CDN URLs - these will be downloaded by CDN Download brick
+                # CDN URLs - these will be downloaded by XGBoost Data Downloader
                 "pickle_cdn_url": cdn_urls["pickle_cdn_url"],
                 "config_cdn_url": cdn_urls["config_cdn_url"],
                 "train_x_cdn": cdn_urls["train_x_cdn"],
@@ -325,21 +320,21 @@ implementation:
                 "pca_metadata_cdn": cdn_urls["pca_metadata_cdn"],
                 
                 # Model parameters
-                "model_name": f"XGBoost_{args.model_type}",
-                "config_str": args.config_str,  # Direct JSON string (XGBoost pipeline expects this)
-                "model_type": args.model_type,  # For CDN Download brick to understand data format
+                "model_name": args.model_name,  # From input parameter
+                "config_str": args.config_str,
+                "model_type": args.model_type,
                 "target_column": args.target_column,
                 
-                # IDs
+                # IDs (execution_id must be string for schema updaters)
                 "execution_id": execution_id_for_payload,
                 "model_id": args.model_id,
                 "project_id": args.project_id,
                 
-                # Authentication - WITH CORRECT CASE for XGBoost pipeline
+                # Authentication - MATCH XGBoost pipeline parameter names (lowercase)
                 "userName": args.userName,
                 "password": args.password,
-                "requestType": args.requesttype,  # CORRECT CASE: requestType (not requesttype)
-                "productId": args.productid,      # CORRECT CASE: productId (not productid)
+                "requesttype": args.requesttype,  # lowercase as per XGBoost pipeline
+                "productid": args.productid,      # lowercase as per XGBoost pipeline
                 "domain": args.domain,
                 
                 # Schema IDs
@@ -347,7 +342,7 @@ implementation:
                 "train_schema": args.train_schema,
                 "eval_schema": args.eval_schema,
                 
-                # Additional parameters
+                # Additional parameters for schema updaters
                 "architecture_type": args.architecture_type,
                 "source": args.source
             },
@@ -357,7 +352,7 @@ implementation:
         print(f"Trigger URL: {trigger_url}")
         print(f"Pipeline ID: {args.pipeline_id}")
         print(f"Experiment ID: {args.experiment_id}")
-        print(f"Execution ID (type: {type(execution_id_for_payload).__name__}): {execution_id_for_payload}")
+        print(f"Execution ID (as string): {execution_id_for_payload}")
         
         # Make the request
         headers = {
@@ -507,6 +502,8 @@ implementation:
       - {inputValue: architecture_type}
       - --source
       - {inputValue: source}
+      - --model_name
+      - {inputValue: model_name}
       
       # Outputs
       - --trigger_response
