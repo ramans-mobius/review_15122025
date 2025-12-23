@@ -1,18 +1,18 @@
-name: Trigger XGBoost Pipeline with CDN v4
+name: Trigger XGBoost Pipeline with CDN 
 description: Creates CDN URLs for all data/metadata and triggers XGBoost pipeline
 inputs:
   # Data inputs (from previous pipeline outputs)
-  - {name: test_data, type: Dataset, description: "Test dataset file"}
-  - {name: train_x, type: Dataset, description: "Training features dataset"}
-  - {name: train_y, type: Dataset, description: "Training labels dataset"}
-  - {name: preprocessor_pickle, type: Data, description: "Preprocessor pickle file"}
-  - {name: preprocessor_metadata, type: Data, description: "Preprocessor metadata JSON"}
-  - {name: feature_selector, type: Data, description: "Feature selector pickle"}
-  - {name: pca_model, type: Data, description: "PCA model pickle file"}
-  - {name: pca_metadata, type: Data, description: "PCA metadata JSON"}
+  - {name: test_data, type: Dataset, description: "Test dataset file (CSV/Parquet from Data Loader)"}
+  - {name: train_x, type: Dataset, description: "Training features dataset (from Feature Selection)"}
+  - {name: train_y, type: Dataset, description: "Training labels dataset (from Feature Selection)"}
+  - {name: preprocessor_pickle, type: Data, description: "Preprocessor pickle file (from Feature Selection)"}
+  - {name: preprocessor_metadata, type: Data, description: "Preprocessor metadata JSON (from Feature Selection)"}
+  - {name: feature_selector, type: Data, description: "Feature selector pickle (from Feature Selection)"}
+  - {name: pca_model, type: Data, description: "PCA model pickle file (from PCA Transformer)"}
+  - {name: pca_metadata, type: Data, description: "PCA metadata JSON (from PCA Transformer)"}
   
   # Authentication and configuration
-  - {name: bearer_token, type: string, description: "Bearer token for CDN authentication"}
+  - {name: bearer_token, type: string, description: "Bearer token for CDN authentication (from IAM Login)"}
   - {name: domain, type: String, description: "Upload service base domain"}
   - {name: get_cdn, type: String, description: "Public CDN base domain"}
   
@@ -67,7 +67,7 @@ implementation:
 
         parser = argparse.ArgumentParser()
 
-        # Data inputs
+        # Data inputs - ALL should be file paths (Datasets and Data)
         parser.add_argument('--test_data', required=True)
         parser.add_argument('--train_x', required=True)
         parser.add_argument('--train_y', required=True)
@@ -438,7 +438,7 @@ implementation:
         print("="*80)
             
     args:
-      # Data inputs
+      # Data inputs - ALL ARE FILE PATHS (Datasets or Data files)
       - --test_data
       - {inputPath: test_data}
       - --train_x
