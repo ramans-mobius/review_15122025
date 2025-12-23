@@ -1,4 +1,4 @@
-name: Trigger CNN Pipeline v5
+name: Trigger CNN Pipeline v6
 description: Triggers an Elyra Kubeflow pipeline for CNN training with DQN optimization.
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the uploaded pickle file"}
@@ -73,7 +73,7 @@ implementation:
         def fix_cdn_url(url):
            
             print(f"\\n=== Processing URL ===")
-            print(f"Input URL: {url[:100]}...")
+            print(f"Input URL: {url[:]}...")
             
             # Step 1: First, decode any existing URL encoding
             try:
@@ -81,7 +81,7 @@ implementation:
             except:
                 pass
             
-            print(f"After unquote: {url[:100]}...")
+            print(f"After unquote: {url[:]}...")
             
             # Step 2: CRITICAL - Restore the $$ pattern
             # Look for patterns like: _$_ or %24_%24 or _%24_
@@ -115,7 +115,7 @@ implementation:
             if "$$" in url:
                 print(f"Found $$ pattern in URL - GOOD!")
             
-            print(f"After $$ restoration: {url[:100]}...")
+            print(f"After $$ restoration: {url[:]}...")
             
             # Step 3: Handle _ENC( pattern
             if "_ENC(" in url:
@@ -127,7 +127,7 @@ implementation:
             # Step 4: Remove any spaces
             url = url.replace(" ", "")
             
-            print(f"After cleanup: {url[:100]}...")
+            print(f"After cleanup: {url[:]}...")
             
             # Step 5: Properly encode the URL for curl
             # Split into parts and encode only the path
@@ -145,7 +145,7 @@ implementation:
                 # Fallback: encode everything
                 final_url = urllib.parse.quote(url, safe="/:?=&%")
             
-            print(f"Final encoded URL: {final_url[:100]}...")
+            print(f"Final encoded URL: {final_url[:]}...")
             print(f"Contains $$: {'$$' in final_url}")
             print(f"Contains _ENC(: {'_ENC(' in final_url}")
             
@@ -191,7 +191,7 @@ implementation:
                 "train_schema": args.train_schema,
                 "eval_schema": args.eval_schema,
                 "pipeline_id": args.dqn_pipeline_id,
-                "rlaf_schema": args.rlaf_schema  # Added RLAF schema parameter
+                "rlaf_schema": args.rlaf_schema  
             },
             "version": 1
         }
@@ -202,8 +202,8 @@ implementation:
         print(f"RLAF Schema ID: {args.rlaf_schema}")
         
         print(f"\\n=== FINAL PARAMETERS ===")
-        print(f"pickle_cdn_url (first 100 chars): {args.pickle_cdn_url[:100]}")
-        print(f"config_cdn_url (first 100 chars): {args.config_cdn_url[:100]}")
+        print(f"pickle_cdn_url (first 100 chars): {args.pickle_cdn_url[:]}")
+        print(f"config_cdn_url (first 100 chars): {args.config_cdn_url[:]}")
 
         # Print the full curl command
         print("\\n=== FULL CURL COMMAND ===")
