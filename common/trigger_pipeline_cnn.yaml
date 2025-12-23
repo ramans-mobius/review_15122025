@@ -70,41 +70,90 @@ implementation:
         parser.add_argument('--rlaf_schema', type=str, required=True, help='Schema ID for RLAF metrics.')  # Added RLAF schema argument
         args = parser.parse_args()
 
-        # URL encode problematic characters in CDN URLs
-        def encode_cdn_url(url):
-            # First, replace known problematic patterns
-            url = url.replace("(", "%28")
-            url = url.replace(")", "%29")
-            url = url.replace("_$_", "_$$_")
-            url = url.replace("$", "%24")
-            url = url.replace(" ", "%20")
+        def fix_cdn_url(url):
+           
+            print(f"\\n=== Processing URL ===")
+            print(f"Input URL: {url[:100]}...")
             
-            # Additional encoding for other special characters
-            url = url.replace("[", "%5B")
-            url = url.replace("]", "%5D")
-            url = url.replace("{", "%7B")
-            url = url.replace("}", "%7D")
+            # Step 1: First, decode any existing URL encoding
+            try:
+                url = urllib.parse.unquote(url)
+            except:
+                pass
             
-            # For the _ENC pattern that appears in CDN URLs
-            url = url.replace("_ENC", "_ENC")
+            print(f"After unquote: {url[:100]}...")
             
-            print(f"Original URL: {url[:]}...")
+            # Step 2: CRITICAL - Restore the $$ pattern
+            # Look for patterns like: _$_ or %24_%24 or _%24_
+            # Replace with $$
             
-            # Additional URL encoding for safety
+            # Pattern 1: _$_ (already single dollar)
+            if "_$_" in url:
+                print(f"Found _$_ pattern, restoring to $$")
+                url = url.replace("_$_", "_$$_")
+            
+            # Pattern 2: %24_%24 (URL encoded dollar signs)
+            if "%24_%24" in url:
+                print(f"Found %24_%24 pattern, restoring to $$")
+                url = url.replace("%24_%24", "$$")
+            
+            # Pattern 3: _%24_ (mixed pattern)
+            if "_%24_" in url:
+                print(f"Found _%24_ pattern, restoring to $$")
+                url = url.replace("_%24_", "_$$_")
+            
+            # Pattern 4: Single $ that should be $$
+            # This is tricky - we need to identify where single $ should be double
+            # Look for pattern: something_$something
+            import re
+            # Find all occurrences of _ followed by $ followed by _
+            matches = re.finditer(r'(_\$_)', url)
+            for match in matches:
+                print(f"Found single dollar pattern at position {match.start()}")
+            
+            # For now, let's just ensure we preserve any existing $$
+            if "$$" in url:
+                print(f"Found $$ pattern in URL - GOOD!")
+            
+            print(f"After $$ restoration: {url[:100]}...")
+            
+            # Step 3: Handle _ENC( pattern
+            if "_ENC(" in url:
+                print(f"Found _ENC( pattern - preserving")
+            elif "_ENC%28" in url:
+                print(f"Found _ENC%28 pattern, converting to _ENC(")
+                url = url.replace("_ENC%28", "_ENC(")
+            
+            # Step 4: Remove any spaces
+            url = url.replace(" ", "")
+            
+            print(f"After cleanup: {url[:100]}...")
+            
+            # Step 5: Properly encode the URL for curl
+            # Split into parts and encode only the path
             if "://" in url:
-                protocol, rest = url.split("://", 1)
-                # Encode the rest of the URL
-                rest = urllib.parse.quote(rest, safe="/:?=&%_")
-                url = f"{protocol}://{rest}"
+                parts = list(urllib.parse.urlsplit(url))
+                # Encode the path but preserve / and other safe chars
+                parts[2] = urllib.parse.quote(parts[2], safe="/")
+                # Encode query and fragment if present
+                if parts[3]:  # query
+                    parts[3] = urllib.parse.quote(parts[3], safe="=&")
+                if parts[4]:  # fragment
+                    parts[4] = urllib.parse.quote(parts[4], safe="")
+                final_url = urllib.parse.urlunsplit(parts)
             else:
-                url = urllib.parse.quote(url, safe="/:?=&%_")
+                # Fallback: encode everything
+                final_url = urllib.parse.quote(url, safe="/:?=&%")
             
-            print(f"Encoded URL: {url[:]}...")
-            return url
+            print(f"Final encoded URL: {final_url[:100]}...")
+            print(f"Contains $$: {'$$' in final_url}")
+            print(f"Contains _ENC(: {'_ENC(' in final_url}")
+            
+            return final_url
 
-        # Encode both CDN URLs
-        args.pickle_cdn_url = encode_cdn_url(args.pickle_cdn_url)
-        args.config_cdn_url = encode_cdn_url(args.config_cdn_url)
+        # Fix both CDN URLs
+        args.pickle_cdn_url = fix_cdn_url(args.pickle_cdn_url)
+        args.config_cdn_url = fix_cdn_url(args.config_cdn_url)
 
         # The pipeline_id argument is used in the trigger URL
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
@@ -147,44 +196,14 @@ implementation:
             "version": 1
         }
 
-        print(f"Triggering CNN pipeline at: {trigger_url}")
+        print(f"\\nTriggering CNN pipeline at: {trigger_url}")
         print(f"CNN Pipeline ID (to trigger): {args.pipeline_id}")
         print(f"DQN Pipeline ID (parameter): {args.dqn_pipeline_id}")
-        print(f"RLAF Schema ID: {args.rlaf_schema}")  # Added RLAF schema print
-        print(f"Payload parameters preview:")
+        print(f"RLAF Schema ID: {args.rlaf_schema}")
         
-        # Group parameters for better readability
-        print("\\n=== CDN URLs ===")
-        print(f"pickle_cdn_url: {args.pickle_cdn_url[:80]}...")
-        print(f"config_cdn_url: {args.config_cdn_url[:80]}...")
-        
-        print("\\n=== Model Parameters ===")
-        print(f"model_name: {args.model_name}")
-        print(f"model_id: {args.model_id}")
-        print(f"model_schema: {args.model_schema}")
-        
-        print("\\n=== Pipeline IDs ===")
-        print(f"pipeline_id (for trigger URL): {args.pipeline_id}")
-        print(f"dqn_pipeline_id (parameter): {args.dqn_pipeline_id}")
-        print(f"experiment_id: {args.experiment_id}")
-        print(f"execution_id: {args.execution_id}")
-        
-        print("\\n=== Schema IDs ===")  # Consolidated schema section
-        print(f"project_id: {args.project_id}")
-        print(f"train_schema: {args.train_schema}")
-        print(f"eval_schema: {args.eval_schema}")
-        print(f"rlaf_schema: {args.rlaf_schema}")  # Added RLAF schema
-        
-        print("\\n=== Continual Learning ===")
-        print(f"splitting_strategy: {args.splitting_strategy}")
-        print(f"num_tasks: {args.num_tasks}")
-        
-        print("\\n=== Authentication ===")
-        print(f"userName: {args.userName}")
-        print(f"password: [REDACTED]")
-        print(f"requesttype: {args.requesttype}")
-        print(f"productid: {args.productid}")
-        print(f"domain: {args.domain}")
+        print(f"\\n=== FINAL PARAMETERS ===")
+        print(f"pickle_cdn_url (first 100 chars): {args.pickle_cdn_url[:100]}")
+        print(f"config_cdn_url (first 100 chars): {args.config_cdn_url[:100]}")
 
         # Print the full curl command
         print("\\n=== FULL CURL COMMAND ===")
@@ -238,7 +257,6 @@ implementation:
                 print(f"Stdout: {e.stdout}")
                 
                 if i < retries - 1:
-                    # Check if the error is a 5xx server error to retry
                     if e.returncode == 22:
                          print(f"Retrying in {retry_delay} seconds...")
                          time.sleep(retry_delay)
@@ -296,4 +314,4 @@ implementation:
       - --dqn_pipeline_id
       - {inputValue: dqn_pipeline_id}
       - --rlaf_schema
-      - {inputValue: rlaf_schema}  # Added RLAF schema argument
+      - {inputValue: rlaf_schema}
