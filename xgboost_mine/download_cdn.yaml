@@ -1,0 +1,495 @@
+name: XGBoost Data Downloader
+description: Downloads all data from CDN URLs and prepares for XGBoost pipeline
+inputs:
+  # CDN URLs from trigger
+  - {name: pickle_cdn_url, type: String, description: "URL to combined pickle file"}
+  - {name: config_cdn_url, type: String, description: "URL to config pickle file"}
+  - {name: train_x_cdn, type: String, description: "URL to train X CSV"}
+  - {name: train_y_cdn, type: String, description: "URL to train y CSV"}
+  - {name: test_data_cdn, type: String, description: "URL to test data CSV"}
+  - {name: preprocessor_cdn, type: String, description: "URL to preprocessor pickle"}
+  - {name: preprocessor_metadata_cdn, type: String, description: "URL to preprocessor metadata"}
+  - {name: feature_selector_cdn, type: String, description: "URL to feature selector pickle"}
+  - {name: pca_cdn, type: String, description: "URL to PCA model pickle"}
+  - {name: pca_metadata_cdn, type: String, description: "URL to PCA metadata"}
+  
+  # Configuration
+  - {name: config_str, type: String, description: "Unified configuration JSON string"}
+  - {name: target_column, type: String, description: "Target column name"}
+  
+  # Pipeline parameters (for info)
+  - {name: model_id, type: String, description: "Model ID"}
+  - {name: execution_id, type: String, description: "Execution ID"}
+  - {name: project_id, type: String, description: "Project ID"}
+
+outputs:
+  # Dataset outputs (same as DataLoader)
+  - {name: train_X, type: Dataset, description: "Training features in XGBoost format"}
+  - {name: train_y, type: Dataset, description: "Training target in XGBoost format"}
+  - {name: test_X, type: Dataset, description: "Test features in XGBoost format"}
+  - {name: test_y, type: Dataset, description: "Test target in XGBoost format"}
+  - {name: data_info, type: String, description: "Data information JSON"}
+  
+  # Preprocessor outputs (same as Preprocessor)
+  - {name: processed_train_X, type: Dataset, description: "Processed training features"}
+  - {name: processed_train_y, type: Dataset, description: "Processed training target"}
+  - {name: preprocessing_pipeline, type: Model, description: "Preprocessing pipeline"}
+  - {name: feature_info, type: String, description: "Feature information"}
+  - {name: weight_out, type: String, description: "Weight configuration"}
+  
+  # Additional outputs for downstream components
+  - {name: preprocessor_pickle, type: Data, description: "Preprocessor pickle file"}
+  - {name: preprocessor_metadata, type: Data, description: "Preprocessor metadata JSON"}
+  - {name: feature_selector, type: Data, description: "Feature selector pickle"}
+  - {name: pca_model, type: Data, description: "PCA model pickle"}
+  - {name: pca_metadata, type: Data, description: "PCA metadata JSON"}
+
+implementation:
+  container:
+    image: kumar2004/mobius:1.0
+    command:
+      - sh
+      - -c
+      - |
+        python3 -m pip install --quiet requests pandas numpy scikit-learn
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import pickle
+        import json
+        import requests
+        import pandas as pd
+        import numpy as np
+        from io import BytesIO
+        import tempfile
+        import urllib.parse
+
+        parser = argparse.ArgumentParser()
+        
+        # CDN URL inputs
+        parser.add_argument('--pickle_cdn_url', type=str, required=True)
+        parser.add_argument('--config_cdn_url', type=str, required=True)
+        parser.add_argument('--train_x_cdn', type=str, required=True)
+        parser.add_argument('--train_y_cdn', type=str, required=True)
+        parser.add_argument('--test_data_cdn', type=str, required=True)
+        parser.add_argument('--preprocessor_cdn', type=str, required=True)
+        parser.add_argument('--preprocessor_metadata_cdn', type=str, required=True)
+        parser.add_argument('--feature_selector_cdn', type=str, required=True)
+        parser.add_argument('--pca_cdn', type=str, required=True)
+        parser.add_argument('--pca_metadata_cdn', type=str, required=True)
+        
+        # Configuration
+        parser.add_argument('--config_str', type=str, required=True)
+        parser.add_argument('--target_column', type=str, required=True)
+        
+        # Pipeline parameters
+        parser.add_argument('--model_id', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)
+        parser.add_argument('--project_id', type=str, required=True)
+        
+        # Dataset outputs
+        parser.add_argument('--train_X', type=str, required=True)
+        parser.add_argument('--train_y', type=str, required=True)
+        parser.add_argument('--test_X', type=str, required=True)
+        parser.add_argument('--test_y', type=str, required=True)
+        parser.add_argument('--data_info', type=str, required=True)
+        
+        # Preprocessor outputs
+        parser.add_argument('--processed_train_X', type=str, required=True)
+        parser.add_argument('--processed_train_y', type=str, required=True)
+        parser.add_argument('--preprocessing_pipeline', type=str, required=True)
+        parser.add_argument('--feature_info', type=str, required=True)
+        parser.add_argument('--weight_out', type=str, required=True)
+        
+        # Additional outputs
+        parser.add_argument('--preprocessor_pickle', type=str, required=True)
+        parser.add_argument('--preprocessor_metadata', type=str, required=True)
+        parser.add_argument('--feature_selector', type=str, required=True)
+        parser.add_argument('--pca_model', type=str, required=True)
+        parser.add_argument('--pca_metadata', type=str, required=True)
+
+        args = parser.parse_args()
+
+        print("="*80)
+        print("XGBOOST DATA DOWNLOADER")
+        print("="*80)
+
+        # Function to decode URLs with proper handling
+        def decode_cdn_url(url):
+         
+            if not url:
+                return url
+            
+            # Remove any spaces first (should already be done, but just in case)
+            url = url.replace(" ", "")
+            
+            # First decode URL-encoded characters
+            try:
+                url = urllib.parse.unquote(url)
+            except:
+                pass
+            
+            # Special handling for encoded characters that might be in URLs
+            # Replace back any double-encoded patterns if needed
+            url = url.replace("%2524", "$")  # Double-encoded $
+            url = url.replace("%2528", "(")  # Double-encoded (
+            url = url.replace("%2529", ")")  # Double-encoded )
+            
+            print(f"Decoded URL preview: {url[:100]}...")
+            return url
+
+        # Function to download from CDN
+        def download_from_cdn(url, description=""):
+            
+            try:
+                # Decode URL first
+                decoded_url = decode_cdn_url(url)
+                print(f"Downloading {description} from: {decoded_url[:100]}...")
+                
+                response = requests.get(decoded_url, timeout=60)
+                response.raise_for_status()
+                
+                return response.content
+                
+            except Exception as e:
+                print(f"Error downloading {description}: {e}")
+                raise
+
+        # Function to save output
+        def save_output(path, data, is_pickle=True):
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            if is_pickle:
+                with open(path, 'wb') as f:
+                    pickle.dump(data, f)
+            else:
+                with open(path, 'w') as f:
+                    json.dump(data, f, indent=2)
+            print(f"Saved: {path}")
+
+        print("[STEP 1] Downloading all data from CDN URLs...")
+        
+        # Download all files
+        print("\\n1. Downloading CSV datasets...")
+        train_x_content = download_from_cdn(args.train_x_cdn, "train X CSV")
+        train_y_content = download_from_cdn(args.train_y_cdn, "train y CSV")
+        test_data_content = download_from_cdn(args.test_data_cdn, "test data CSV")
+        
+        print("\\n2. Downloading pickle files...")
+        preprocessor_content = download_from_cdn(args.preprocessor_cdn, "preprocessor pickle")
+        feature_selector_content = download_from_cdn(args.feature_selector_cdn, "feature selector pickle")
+        pca_model_content = download_from_cdn(args.pca_cdn, "PCA model pickle")
+        
+        print("\\n3. Downloading metadata files...")
+        preprocessor_metadata_content = download_from_cdn(args.preprocessor_metadata_cdn, "preprocessor metadata")
+        pca_metadata_content = download_from_cdn(args.pca_metadata_cdn, "PCA metadata")
+        
+        print("\\n4. Downloading combined files...")
+        pickle_content = download_from_cdn(args.pickle_cdn_url, "combined pickle")
+        config_content = download_from_cdn(args.config_cdn_url, "config pickle")
+        
+        print("[STEP 1 COMPLETE] All files downloaded")
+
+        print("\\n[STEP 2] Processing downloaded data...")
+        
+        # Parse CSV data
+        train_x_df = pd.read_csv(BytesIO(train_x_content))
+        train_y_df = pd.read_csv(BytesIO(train_y_content))
+        test_data_df = pd.read_csv(BytesIO(test_data_content))
+        
+        # For test data, we need to separate features from target
+        # Assuming test_data contains both features and target
+        if args.target_column in test_data_df.columns:
+            test_x_df = test_data_df.drop(columns=[args.target_column])
+            test_y_df = test_data_df[[args.target_column]]
+        else:
+            # If target column not found, use all columns as features
+            test_x_df = test_data_df.copy()
+            # Create dummy target
+            test_y_df = pd.DataFrame(np.zeros(len(test_x_df)), columns=[args.target_column])
+        
+        # Get feature names
+        feature_names = train_x_df.columns.tolist()
+        
+        # Parse config
+        config = json.loads(args.config_str)
+        pipeline_config = config.get('pipeline', {})
+        preprocessing_config = config.get('preprocessing', {})
+        
+        task_type = pipeline_config.get('task', 'classification')
+        
+        # Parse pickled objects
+        preprocessor = pickle.loads(preprocessor_content)
+        feature_selector = pickle.loads(feature_selector_content)
+        pca_model = pickle.loads(pca_model_content)
+        
+        # Parse metadata
+        preprocessor_metadata = json.loads(preprocessor_metadata_content)
+        pca_metadata = json.loads(pca_metadata_content)
+        combined_pickle_data = pickle.loads(pickle_content)
+        config_data = pickle.loads(config_content)
+        
+        print(f"Train X shape: {train_x_df.shape}")
+        print(f"Train y shape: {train_y_df.shape}")
+        print(f"Test X shape: {test_x_df.shape}")
+        print(f"Test y shape: {test_y_df.shape}")
+        print(f"Features: {len(feature_names)}")
+        print(f"Task type: {task_type}")
+        print(f"Target column: {args.target_column}")
+
+        print("\\n[STEP 3] Creating XGBoost format outputs...")
+        
+        # Create data info
+        y_train_values = train_y_df[args.target_column].values if args.target_column in train_y_df.columns else train_y_df.iloc[:, 0].values
+        
+        data_info = {
+            'model_id': args.model_id,
+            'execution_id': args.execution_id,
+            'project_id': args.project_id,
+            'original_samples': len(train_x_df) + len(test_x_df),
+            'final_samples': len(train_x_df) + len(test_x_df),
+            'features_count': len(feature_names),
+            'feature_names': feature_names,
+            'task_type': task_type,
+            'target_column': args.target_column,
+            'target_statistics': {
+                'min': float(np.min(y_train_values)),
+                'max': float(np.max(y_train_values)),
+                'mean': float(np.mean(y_train_values)),
+                'std': float(np.std(y_train_values))
+            } if task_type == 'regression' else {
+                'classes': int(np.unique(y_train_values).size),
+                'class_distribution': pd.Series(y_train_values).value_counts().to_dict()
+            },
+            'train_samples': len(train_x_df),
+            'test_samples': len(test_x_df),
+            'train_X_shape': train_x_df.shape,
+            'train_y_shape': train_y_df.shape,
+            'test_X_shape': test_x_df.shape,
+            'test_y_shape': test_y_df.shape,
+            'data_source': 'CDN',
+            'cdn_urls': {
+                'pickle_cdn_url': args.pickle_cdn_url[:100] + '...',
+                'train_x_cdn': args.train_x_cdn[:100] + '...',
+                'train_y_cdn': args.train_y_cdn[:100] + '...',
+                'test_data_cdn': args.test_data_cdn[:100] + '...'
+            }
+        }
+
+        # Create Dataset format outputs for XGBoost
+        train_X_dict = {
+            'X': train_x_df.values,
+            'feature_names': feature_names,
+            'config': config
+        }
+        
+        train_y_dict = {
+            'y': train_y_df.values.ravel(),
+            'target_name': args.target_column,
+            'task_type': task_type,
+            'config': config
+        }
+        
+        test_X_dict = {
+            'X': test_x_df.values,
+            'feature_names': feature_names,
+            'config': config
+        }
+        
+        test_y_dict = {
+            'y': test_y_df.values.ravel(),
+            'target_name': args.target_column,
+            'task_type': task_type,
+            'config': config
+        }
+        
+        # Create processed outputs (apply preprocessing if available)
+        if hasattr(preprocessor, 'transform_features'):
+            processed_X = preprocessor.transform_features(train_x_df.values)
+        else:
+            processed_X = train_x_df.values
+        
+        if hasattr(preprocessor, 'transform_target'):
+            processed_y = preprocessor.transform_target(train_y_df.values.ravel())
+        else:
+            processed_y = train_y_df.values.ravel()
+        
+        processed_train_X_dict = {
+            'X': processed_X,
+            'feature_names': feature_names,
+            'config': config,
+            'preprocessing_info': {
+                'scaling_applied': preprocessing_config.get('scaling', 'none'),
+                'feature_selection_applied': preprocessing_config.get('feature_selection', 'none')
+            }
+        }
+        
+        processed_train_y_dict = {
+            'y': processed_y,
+            'target_name': args.target_column,
+            'task_type': task_type,
+            'config': config
+        }
+        
+        # Create feature info
+        feature_info = {
+            'original_features': len(feature_names),
+            'final_features': len(feature_names),
+            'feature_names': feature_names,
+            'task_type': task_type,
+            'target_name': args.target_column,
+            'preprocessing_applied': [],
+            'train_shape': train_x_df.shape,
+            'scaling_method': 'none',
+            'feature_selection_method': 'none',
+            'k_features_selected': len(feature_names),
+            'cdn_source': True
+        }
+        
+        # Create weight configuration
+        weight_config = {
+            'preprocessing_complete': True,
+            'preprocessing_config': {
+                'scaling': 'none',
+                'feature_selection': 'none',
+                'task_type': task_type,
+                'target_name': args.target_column
+            },
+            'feature_info': {
+                'original_feature_count': len(feature_names),
+                'final_feature_count': len(feature_names),
+                'selected_features': feature_names
+            },
+            'dataset_stats': {
+                'train_samples': len(train_x_df),
+                'feature_dimension': len(feature_names),
+                'target_distribution': data_info['target_statistics']
+            },
+            'preprocessing_steps': [],
+            'original_config': config,
+            'pipeline_capabilities': {
+                'can_transform_features': hasattr(preprocessor, 'transform_features'),
+                'can_transform_target': hasattr(preprocessor, 'transform_target'),
+                'can_inverse_transform_target': hasattr(preprocessor, 'inverse_transform_target')
+            },
+            'cdn_download': True
+        }
+
+        print("\\n[STEP 4] Saving all outputs...")
+        
+        # Save Dataset outputs
+        save_output(args.train_X, train_X_dict)
+        save_output(args.train_y, train_y_dict)
+        save_output(args.test_X, test_X_dict)
+        save_output(args.test_y, test_y_dict)
+        save_output(args.data_info, data_info, False)
+        
+        # Save Preprocessor outputs
+        save_output(args.processed_train_X, processed_train_X_dict)
+        save_output(args.processed_train_y, processed_train_y_dict)
+        save_output(args.preprocessing_pipeline, preprocessor)
+        save_output(args.feature_info, feature_info, False)
+        save_output(args.weight_out, weight_config, False)
+        
+        # Save additional outputs
+        save_output(args.preprocessor_pickle, preprocessor)
+        save_output(args.preprocessor_metadata, preprocessor_metadata, False)
+        save_output(args.feature_selector, feature_selector)
+        save_output(args.pca_model, pca_model)
+        save_output(args.pca_metadata, pca_metadata, False)
+        
+        print("\\n[STEP 5] Summary...")
+        print("="*80)
+        print("XGBOOST DATA DOWNLOADER COMPLETE")
+        print("="*80)
+        print(f"✓ Downloaded {len(feature_names)} features")
+        print(f"✓ Train data: {train_x_df.shape[0]} samples")
+        print(f"✓ Test data: {test_x_df.shape[0]} samples")
+        print(f"✓ Target: {args.target_column}")
+        print(f"✓ Task type: {task_type}")
+        print(f"✓ Preprocessor: {'Available' if preprocessor else 'Not available'}")
+        print(f"✓ Feature selector: {'Available' if feature_selector else 'Not available'}")
+        print(f"✓ PCA model: {'Available' if pca_model else 'Not available'}")
+        print("="*80)
+        print(f"Outputs saved:")
+        print(f"  - Dataset files: 4 files")
+        print(f"  - Data info: {args.data_info}")
+        print(f"  - Preprocessor outputs: 5 files")
+        print(f"  - Additional outputs: 5 files")
+        print("="*80)
+        
+    args:
+      # CDN URL inputs
+      - --pickle_cdn_url
+      - {inputValue: pickle_cdn_url}
+      - --config_cdn_url
+      - {inputValue: config_cdn_url}
+      - --train_x_cdn
+      - {inputValue: train_x_cdn}
+      - --train_y_cdn
+      - {inputValue: train_y_cdn}
+      - --test_data_cdn
+      - {inputValue: test_data_cdn}
+      - --preprocessor_cdn
+      - {inputValue: preprocessor_cdn}
+      - --preprocessor_metadata_cdn
+      - {inputValue: preprocessor_metadata_cdn}
+      - --feature_selector_cdn
+      - {inputValue: feature_selector_cdn}
+      - --pca_cdn
+      - {inputValue: pca_cdn}
+      - --pca_metadata_cdn
+      - {inputValue: pca_metadata_cdn}
+      
+      # Configuration
+      - --config_str
+      - {inputValue: config_str}
+      - --target_column
+      - {inputValue: target_column}
+      
+      # Pipeline parameters
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --project_id
+      - {inputValue: project_id}
+      
+      # Dataset outputs
+      - --train_X
+      - {outputPath: train_X}
+      - --train_y
+      - {outputPath: train_y}
+      - --test_X
+      - {outputPath: test_X}
+      - --test_y
+      - {outputPath: test_y}
+      - --data_info
+      - {outputPath: data_info}
+      
+      # Preprocessor outputs
+      - --processed_train_X
+      - {outputPath: processed_train_X}
+      - --processed_train_y
+      - {outputPath: processed_train_y}
+      - --preprocessing_pipeline
+      - {outputPath: preprocessing_pipeline}
+      - --feature_info
+      - {outputPath: feature_info}
+      - --weight_out
+      - {outputPath: weight_out}
+      
+      # Additional outputs
+      - --preprocessor_pickle
+      - {outputPath: preprocessor_pickle}
+      - --preprocessor_metadata
+      - {outputPath: preprocessor_metadata}
+      - --feature_selector
+      - {outputPath: feature_selector}
+      - --pca_model
+      - {outputPath: pca_model}
+      - --pca_metadata
+      - {outputPath: pca_metadata}
