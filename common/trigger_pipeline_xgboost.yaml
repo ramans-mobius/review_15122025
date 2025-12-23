@@ -1,17 +1,17 @@
-name: Trigger XGBoost Pipeline with CDN 
-description: Creates CDN URLs for train data/metadata and triggers XGBoost pipeline using existing CDN URLs
+name: Trigger XGBoost Pipeline with CDN v5
+description: Uploads test_data to CDN and uses existing CDN URLs for other files to trigger XGBoost pipeline
 inputs:
-  # CDN URLs from Upload to CDN v4 brick
-  - {name: test_data, type: String, description: "Test dataset CDN URL (from Upload to CDN brick)"}
+  # Dataset file to upload (from Data Loader)
+  - {name: test_data, type: Dataset, description: "Test dataset file (from Data Loader - needs upload)"}
   
-  # Data files to upload (train data and models)
-  - {name: train_x, type: Dataset, description: "Training features dataset (from Feature Selection)"}
-  - {name: train_y, type: Dataset, description: "Training labels dataset (from Feature Selection)"}
-  - {name: preprocessor_pickle, type: Data, description: "Preprocessor pickle file (from Feature Selection)"}
-  - {name: preprocessor_metadata, type: Data, description: "Preprocessor metadata JSON (from Feature Selection)"}
-  - {name: feature_selector, type: Data, description: "Feature selector pickle (from Feature Selection)"}
-  - {name: pca_model, type: Data, description: "PCA model pickle file (from PCA Transformer)"}
-  - {name: pca_metadata, type: Data, description: "PCA metadata JSON (from PCA Transformer)"}
+  # Existing CDN URLs from Upload to CDN v4 brick
+  - {name: train_x_cdn_url, type: String, description: "Train X CDN URL (already uploaded)"}
+  - {name: train_y_cdn_url, type: String, description: "Train Y CDN URL (already uploaded)"}
+  - {name: preprocessor_pickle_cdn_url, type: String, description: "Preprocessor pickle CDN URL (already uploaded)"}
+  - {name: preprocessor_metadata_cdn_url, type: String, description: "Preprocessor metadata CDN URL (already uploaded)"}
+  - {name: feature_selector_cdn_url, type: String, description: "Feature selector CDN URL (already uploaded)"}
+  - {name: pca_model_cdn_url, type: String, description: "PCA model CDN URL (already uploaded)"}
+  - {name: pca_metadata_cdn_url, type: String, description: "PCA metadata CDN URL (already uploaded)"}
   
   # Authentication and configuration
   - {name: bearer_token, type: string, description: "Bearer token for CDN authentication (from IAM Login)"}
@@ -28,7 +28,7 @@ inputs:
   - {name: target_column, type: String, description: "Target column name"}
   - {name: config_str, type: String, description: "Configuration JSON string"}
   
-  # Additional parameters for XGBoost pipeline (note: lowercase as per XGBoost pipeline)
+  # Additional parameters for XGBoost pipeline
   - {name: userName, type: String, description: "Username for IAM authentication"}
   - {name: password, type: String, description: "Password for IAM authentication"}
   - {name: requesttype, type: String, description: "Request type for IAM authentication"}
@@ -42,7 +42,7 @@ inputs:
 
 outputs:
   - {name: trigger_response, type: String, description: "Raw response from pipeline trigger API"}
-  - {name: cdn_urls_json, type: String, description: "JSON with all CDN URLs created"}
+  - {name: cdn_urls_json, type: String, description: "JSON with all CDN URLs passed to XGBoost"}
 
 implementation:
   container:
@@ -70,15 +70,15 @@ implementation:
 
         parser = argparse.ArgumentParser()
 
-        # Inputs - test_data is String (CDN URL), others are file paths
-        parser.add_argument('--test_data', required=True)  # String CDN URL
-        parser.add_argument('--train_x', required=True)    # Dataset file
-        parser.add_argument('--train_y', required=True)    # Dataset file
-        parser.add_argument('--preprocessor_pickle', required=True)  # Data file
-        parser.add_argument('--preprocessor_metadata', required=True)  # Data file
-        parser.add_argument('--feature_selector', required=True)  # Data file
-        parser.add_argument('--pca_model', required=True)  # Data file
-        parser.add_argument('--pca_metadata', required=True)  # Data file
+        # Inputs - test_data is Dataset file, others are CDN URL strings
+        parser.add_argument('--test_data', required=True)    # Dataset file
+        parser.add_argument('--train_x_cdn_url', required=True)    # CDN URL string
+        parser.add_argument('--train_y_cdn_url', required=True)    # CDN URL string
+        parser.add_argument('--preprocessor_pickle_cdn_url', required=True)  # CDN URL string
+        parser.add_argument('--preprocessor_metadata_cdn_url', required=True)  # CDN URL string
+        parser.add_argument('--feature_selector_cdn_url', required=True)  # CDN URL string
+        parser.add_argument('--pca_model_cdn_url', required=True)    # CDN URL string
+        parser.add_argument('--pca_metadata_cdn_url', required=True) # CDN URL string
         
         # Authentication
         parser.add_argument('--bearer_token', required=True)
@@ -90,7 +90,7 @@ implementation:
         parser.add_argument('--experiment_id', required=True)
         parser.add_argument('--model_id', required=True)
         parser.add_argument('--project_id', required=True)
-        parser.add_argument('--execution_id', type=str, required=True)  # Keep as string
+        parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--model_type', required=True)
         parser.add_argument('--target_column', required=True)
         parser.add_argument('--config_str', required=True)
@@ -105,7 +105,7 @@ implementation:
         parser.add_argument('--eval_schema', required=True)
         parser.add_argument('--architecture_type', default="GRM")
         parser.add_argument('--source', default="auto-generated")
-        parser.add_argument('--model_name', default="XGBoost")  # Added model_name
+        parser.add_argument('--model_name', default="XGBoost")
         
         # Outputs
         parser.add_argument('--trigger_response', required=True)
@@ -120,9 +120,9 @@ implementation:
         print("="*80)
         print("TRIGGER XGBoost PIPELINE WITH CDN UPLOAD")
         print("="*80)
-        print(f"test_data input (CDN URL): {args.test_data}...")
-        print(f"train_x input (file): {args.train_x}")
-        print(f"train_y input (file): {args.train_y}")
+        print(f"test_data input (file): {args.test_data}")
+        print(f"train_x_cdn_url: {args.train_x_cdn_url[:100]}...")
+        print(f"train_y_cdn_url: {args.train_y_cdn_url[:100]}...")
         print(f"execution_id (as string): {args.execution_id}")
 
         # Function to encode URLs with proper replacements
@@ -142,7 +142,7 @@ implementation:
             url = url.replace("{", "%7B")
             url = url.replace("}", "%7D")
             
-            print(f"Encoded URL preview: {url}...")
+            print(f"Encoded URL preview: {url[:100]}...")
             return url
 
         # Function to upload file to CDN
@@ -187,69 +187,56 @@ implementation:
             
             return encoded_url
 
-        # Function to ensure CSV format for datasets
-        def ensure_csv_format(input_path, suffix=""):
-            if input_path.endswith('.csv'):
-                return input_path
+        # Function to ensure CSV format for datasets (from your Upload brick)
+        def ensure_csv(path):
+            # If path already ends with .csv, return as-is
+            if path.endswith(".csv"):
+                return path
             
-            temp_dir = tempfile.mkdtemp()
-            output_file = os.path.join(temp_dir, f"data{suffix}.csv")
+            # If path ends with .parquet, convert to CSV
+            if path.endswith(".parquet"):
+                df = pd.read_parquet(path)
+                tmp_csv = tempfile.mkstemp(suffix=".csv")[1]
+                df.to_csv(tmp_csv, index=False)
+                return tmp_csv
             
+            # For files without extension (like 'data'), try to detect format
+            # First, try reading as parquet (most common in ML pipelines)
             try:
-                if input_path.endswith('.parquet'):
-                    df = pd.read_parquet(input_path)
-                elif input_path.endswith(('.pkl', '.pickle')):
-                    import pickle
-                    with open(input_path, 'rb') as f:
-                        data = pickle.load(f)
-                    if isinstance(data, pd.DataFrame):
-                        df = data
-                    elif isinstance(data, dict) and 'X' in data:
-                        X = data['X']
-                        feature_names = data.get('feature_names', [f'feature_{i}' for i in range(X.shape[1])])
-                        df = pd.DataFrame(X, columns=feature_names)
-                    else:
-                        raise ValueError(f"Unsupported pickle format: {type(data)}")
-                else:
-                    try:
-                        df = pd.read_csv(input_path)
-                    except:
-                        df = pd.read_table(input_path)
-                
-                df.to_csv(output_file, index=False)
-                print(f"Converted {os.path.basename(input_path)} to CSV: {df.shape}")
-                return output_file
-                
-            except Exception as e:
-                print(f"Error converting {input_path}: {e}")
-                import shutil
-                shutil.copy2(input_path, output_file)
-                return output_file
+                df = pd.read_parquet(path)
+                tmp_csv = tempfile.mkstemp(suffix=".csv")[1]
+                df.to_csv(tmp_csv, index=False)
+                return tmp_csv
+            except Exception:
+                pass
+            
+            # If parquet fails, try reading as CSV
+            try:
+                # Test if it's already a valid CSV
+                pd.read_csv(path, nrows=1)
+                return path
+            except Exception:
+                pass
+            
+            raise ValueError(f"Unsupported dataset format or unable to read: {path}")
 
-        # Step 1: Upload train data and model files to CDN
-        print("[STEP 1] Uploading train data and model files to CDN...")
+        # Step 1: Upload test_data (only file that needs uploading)
+        print("[STEP 1] Uploading test_data to CDN...")
         
         cdn_urls = {}
         
-        # Store the test_data CDN URL (already uploaded by previous brick)
-        cdn_urls["test_data_cdn"] = args.test_data
-        print(f"Using existing test_data CDN URL: {args.test_data}...")
+        # Upload test_data (convert to CSV if needed)
+        test_data_csv = ensure_csv(args.test_data)
+        cdn_urls["test_data_cdn"] = upload_to_cdn(test_data_csv, "test_data.csv")
         
-        # Upload train datasets (convert to CSV first)
-        train_x_csv = ensure_csv_format(args.train_x, "_train_x")
-        cdn_urls["train_x_cdn"] = upload_to_cdn(train_x_csv, "train_x.csv")
-        
-        train_y_csv = ensure_csv_format(args.train_y, "_train_y")
-        cdn_urls["train_y_cdn"] = upload_to_cdn(train_y_csv, "train_y.csv")
-        
-        # Upload pickle files
-        cdn_urls["preprocessor_pickle_cdn"] = upload_to_cdn(args.preprocessor_pickle, "preprocessor.pkl")
-        cdn_urls["feature_selector_cdn"] = upload_to_cdn(args.feature_selector, "feature_selector.pkl")
-        cdn_urls["pca_model_cdn"] = upload_to_cdn(args.pca_model, "pca_model.pkl")
-        
-        # Upload metadata files
-        cdn_urls["preprocessor_metadata_cdn"] = upload_to_cdn(args.preprocessor_metadata, "preprocessor_metadata.json")
-        cdn_urls["pca_metadata_cdn"] = upload_to_cdn(args.pca_metadata, "pca_metadata.json")
+        # Use existing CDN URLs for everything else
+        cdn_urls["train_x_cdn"] = encode_cdn_url(args.train_x_cdn_url)
+        cdn_urls["train_y_cdn"] = encode_cdn_url(args.train_y_cdn_url)
+        cdn_urls["preprocessor_pickle_cdn"] = encode_cdn_url(args.preprocessor_pickle_cdn_url)
+        cdn_urls["preprocessor_metadata_cdn"] = encode_cdn_url(args.preprocessor_metadata_cdn_url)
+        cdn_urls["feature_selector_cdn"] = encode_cdn_url(args.feature_selector_cdn_url)
+        cdn_urls["pca_model_cdn"] = encode_cdn_url(args.pca_model_cdn_url)
+        cdn_urls["pca_metadata_cdn"] = encode_cdn_url(args.pca_metadata_cdn_url)
         
         # Create a combined pickle URL (for backward compatibility)
         import pickle
@@ -281,26 +268,25 @@ implementation:
         cdn_urls["config_cdn_url"] = upload_to_cdn(config_pickle.name, "config.pkl")
         os.unlink(config_pickle.name)
         
-        # Clean up temp CSV files
-        for temp_file in [train_x_csv, train_y_csv]:
-            if temp_file != args.train_x and temp_file != args.train_y:
-                if os.path.exists(temp_file):
-                    os.unlink(temp_file)
-                    os.rmdir(os.path.dirname(temp_file))
+        # Clean up temp test_data CSV file
+        if test_data_csv != args.test_data and os.path.exists(test_data_csv):
+            os.unlink(test_data_csv)
+            if os.path.exists(os.path.dirname(test_data_csv)):
+                os.rmdir(os.path.dirname(test_data_csv))
         
-        print("[STEP 1 COMPLETE] All files uploaded to CDN")
+        print("[STEP 1 COMPLETE] test_data uploaded to CDN, using existing CDN URLs for other files")
         
         # Step 2: Trigger the XGBoost pipeline
-        print("\\n[STEP 2] Triggering XGBoost pipeline...")
+        print("\n[STEP 2] Triggering XGBoost pipeline...")
         
         # Construct trigger URL
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
         
-        # KEEP execution_id as string (DO NOT convert to integer)
+        # KEEP execution_id as string
         execution_id_for_payload = args.execution_id
         print(f"Keeping execution_id as string: '{args.execution_id}'")
         
-        # Build payload with all parameters - CORRECTED FOR XGBOOST PIPELINE
+        # Build payload with all parameters
         payload = {
             "pipelineType": "ML",
             "containerResources": {},
@@ -320,21 +306,21 @@ implementation:
                 "pca_metadata_cdn": cdn_urls["pca_metadata_cdn"],
                 
                 # Model parameters
-                "model_name": args.model_name,  # From input parameter
+                "model_name": args.model_name,
                 "config_str": args.config_str,
                 "model_type": args.model_type,
                 "target_column": args.target_column,
                 
-                # IDs (execution_id must be string for schema updaters)
+                # IDs
                 "execution_id": execution_id_for_payload,
                 "model_id": args.model_id,
                 "project_id": args.project_id,
                 
-                # Authentication - MATCH XGBoost pipeline parameter names (lowercase)
+                # Authentication
                 "userName": args.userName,
                 "password": args.password,
-                "requesttype": args.requesttype,  # lowercase as per XGBoost pipeline
-                "productid": args.productid,      # lowercase as per XGBoost pipeline
+                "requesttype": args.requesttype,
+                "productid": args.productid,
                 "domain": args.domain,
                 
                 # Schema IDs
@@ -342,7 +328,7 @@ implementation:
                 "train_schema": args.train_schema,
                 "eval_schema": args.eval_schema,
                 
-                # Additional parameters for schema updaters
+                # Additional parameters
                 "architecture_type": args.architecture_type,
                 "source": args.source
             },
@@ -412,7 +398,7 @@ implementation:
                     raise
         
         # Step 3: Save CDN URLs JSON
-        print("\\n[STEP 3] Saving CDN URLs...")
+        print("\n[STEP 3] Saving CDN URLs...")
         cdn_info = {
             "timestamp": int(time.time()),
             "pipeline_id": args.pipeline_id,
@@ -439,23 +425,23 @@ implementation:
         print("="*80)
             
     args:
-      # Inputs - test_data is String, others are file paths
+      # Inputs - test_data is Dataset file, others are CDN URL strings
       - --test_data
-      - {inputPath: test_data}  # This reads the CDN URL string from file
-      - --train_x
-      - {inputPath: train_x}
-      - --train_y
-      - {inputPath: train_y}
-      - --preprocessor_pickle
-      - {inputPath: preprocessor_pickle}
-      - --preprocessor_metadata
-      - {inputPath: preprocessor_metadata}
-      - --feature_selector
-      - {inputPath: feature_selector}
-      - --pca_model
-      - {inputPath: pca_model}
-      - --pca_metadata
-      - {inputPath: pca_metadata}
+      - {inputPath: test_data}
+      - --train_x_cdn_url
+      - {inputPath: train_x_cdn_url}
+      - --train_y_cdn_url
+      - {inputPath: train_y_cdn_url}
+      - --preprocessor_pickle_cdn_url
+      - {inputPath: preprocessor_pickle_cdn_url}
+      - --preprocessor_metadata_cdn_url
+      - {inputPath: preprocessor_metadata_cdn_url}
+      - --feature_selector_cdn_url
+      - {inputPath: feature_selector_cdn_url}
+      - --pca_model_cdn_url
+      - {inputPath: pca_model_cdn_url}
+      - --pca_metadata_cdn_url
+      - {inputPath: pca_metadata_cdn_url}
       
       # Authentication
       - --bearer_token
