@@ -1,4 +1,4 @@
-name: Trigger XGBoost Pipeline with CDN v3
+name: Trigger XGBoost Pipeline with CDN v2
 description: Reads CDN URLs from files and triggers XGBoost pipeline
 inputs:
   # ALL inputs are FILE PATHS containing CDN URLs from Upload brick
@@ -166,7 +166,7 @@ implementation:
         print(f"Read {len(cdn_urls)} CDN URLs from Upload brick files")
         
         # Step 2: Create combined pickle URL (needs to be uploaded)
-        print("\n[STEP 2] Creating combined pickle and uploading it...")
+        print("\\n[STEP 2] Creating combined pickle and uploading it...")
         
         # Function to upload file to CDN
         def upload_to_cdn(file_path, file_name=None):
@@ -243,7 +243,7 @@ implementation:
         print("[STEP 2 COMPLETE] Created and uploaded combined pickle and config pickle")
         
         # Step 3: Trigger the XGBoost pipeline
-        print("\n[STEP 3] Triggering XGBoost pipeline...")
+        print("\\n[STEP 3] Triggering XGBoost pipeline...")
         
         # Construct trigger URL
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
@@ -363,7 +363,7 @@ implementation:
                     raise
         
         # Step 4: Save CDN URLs JSON
-        print("\n[STEP 4] Saving CDN URLs...")
+        print("\\n[STEP 4] Saving CDN URLs...")
         cdn_info = {
             "timestamp": int(time.time()),
             "pipeline_id": args.pipeline_id,
