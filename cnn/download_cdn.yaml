@@ -9,7 +9,7 @@ outputs:
   - {name: config_json, type: String, description: "Downloaded config as JSON string"}
 implementation:
   container:
-    image: python:3.8-slim
+    image: gurpreetgandhi/nesy-factory:v19
     command:
       - sh
       - -ec
