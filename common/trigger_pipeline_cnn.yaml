@@ -1,4 +1,4 @@
-name: Trigger CNN Pipeline v6
+name: Trigger CNN Pipeline v7
 description: Triggers an Elyra Kubeflow pipeline for CNN training with DQN optimization.
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the uploaded pickle file"}
@@ -71,7 +71,7 @@ implementation:
         args = parser.parse_args()
 
         def fix_cdn_url(url):
-           
+          
             print(f"\\n=== Processing URL ===")
             print(f"Input URL: {url[:]}...")
             
@@ -83,74 +83,83 @@ implementation:
             
             print(f"After unquote: {url[:]}...")
             
-            # Step 2: CRITICAL - Restore the $$ pattern
-            # Look for patterns like: _$_ or %24_%24 or _%24_
-            # Replace with $$
-            
-            # Pattern 1: _$_ (already single dollar)
+            # Step 2: CRITICAL - Restore the $$ pattern from _$_
+            # Replace _$_ with _$$_ (double dollar)
             if "_$_" in url:
-                print(f"Found _$_ pattern, restoring to $$")
+                print(f"Found _$_ pattern at positions: {[i for i in range(len(url)) if url.startswith('_$_', i)]}")
                 url = url.replace("_$_", "_$$_")
+                print(f"Restored to _$$_: {url[:]}...")
             
-            # Pattern 2: %24_%24 (URL encoded dollar signs)
-            if "%24_%24" in url:
-                print(f"Found %24_%24 pattern, restoring to $$")
-                url = url.replace("%24_%24", "$$")
-            
-            # Pattern 3: _%24_ (mixed pattern)
-            if "_%24_" in url:
-                print(f"Found _%24_ pattern, restoring to $$")
-                url = url.replace("_%24_", "_$$_")
-            
-            # Pattern 4: Single $ that should be $$
-            # This is tricky - we need to identify where single $ should be double
-            # Look for pattern: something_$something
+            # Step 3: Also check for other single dollar patterns that should be double
+            # Look for pattern: _X$X_ where X is any character or end of string
             import re
-            # Find all occurrences of _ followed by $ followed by _
-            matches = re.finditer(r'(_\$_)', url)
-            for match in matches:
-                print(f"Found single dollar pattern at position {match.start()}")
             
-            # For now, let's just ensure we preserve any existing $$
-            if "$$" in url:
-                print(f"Found $$ pattern in URL - GOOD!")
+            # Find patterns like: something_$something (single dollar between underscores)
+            single_dollar_patterns = re.findall(r'([a-zA-Z0-9]+)_\$([a-zA-Z0-9]+)', url)
+            if single_dollar_patterns:
+                print(f"Found other single dollar patterns: {single_dollar_patterns}")
+                # For each match, replace with double dollar
+                for before, after in single_dollar_patterns:
+                    pattern = f"{before}_${after}"
+                    replacement = f"{before}_$${after}"
+                    url = url.replace(pattern, replacement)
             
-            print(f"After $$ restoration: {url[:]}...")
+            print(f"After dollar restoration: {url[:]}...")
             
-            # Step 3: Handle _ENC( pattern
+            # Step 4: Handle _ENC( pattern
             if "_ENC(" in url:
                 print(f"Found _ENC( pattern - preserving")
             elif "_ENC%28" in url:
                 print(f"Found _ENC%28 pattern, converting to _ENC(")
                 url = url.replace("_ENC%28", "_ENC(")
             
-            # Step 4: Remove any spaces
+            # Step 5: Remove any spaces
             url = url.replace(" ", "")
             
-            print(f"After cleanup: {url[:]}...")
+            print(f"After cleanup: {url}...")
             
-            # Step 5: Properly encode the URL for curl
-            # Split into parts and encode only the path
+            # Step 6: Now properly URL encode for JSON transmission
+            # We need to encode $ as %24, so _$$_ becomes _%24%24_
+            # Also encode parentheses: ( -> %28, ) -> %29
+            
+            # First, handle special patterns we want to preserve
+            # Replace _ENC( with placeholder
+            url = url.replace("_ENC(", "__ENC_PAREN_PLACEHOLDER__")
+            
+            # Now encode the URL
             if "://" in url:
                 parts = list(urllib.parse.urlsplit(url))
-                # Encode the path but preserve / and other safe chars
+                # Encode the path
                 parts[2] = urllib.parse.quote(parts[2], safe="/")
-                # Encode query and fragment if present
-                if parts[3]:  # query
+                # Encode query
+                if parts[3]:
                     parts[3] = urllib.parse.quote(parts[3], safe="=&")
-                if parts[4]:  # fragment
+                # Encode fragment
+                if parts[4]:
                     parts[4] = urllib.parse.quote(parts[4], safe="")
-                final_url = urllib.parse.urlunsplit(parts)
+                encoded_url = urllib.parse.urlunsplit(parts)
             else:
-                # Fallback: encode everything
-                final_url = urllib.parse.quote(url, safe="/:?=&%")
+                encoded_url = urllib.parse.quote(url, safe="/:?=&%")
             
-            print(f"Final encoded URL: {final_url[:]}...")
-            print(f"Contains $$: {'$$' in final_url}")
-            print(f"Contains _ENC(: {'_ENC(' in final_url}")
+            # Restore _ENC( pattern
+            encoded_url = encoded_url.replace("__ENC_PAREN_PLACEHOLDER__", "_ENC%28")
             
-            return final_url
-
+            # Also encode closing parenthesis if it follows _ENC%28
+            if "_ENC%28" in encoded_url and ")" in encoded_url:
+                # Find the position and encode the closing paren
+                enc_pos = encoded_url.find("_ENC%28")
+                # Find the matching closing paren
+                # This is simplified - assumes ) appears after _ENC%28
+                paren_pos = encoded_url.find(")", enc_pos)
+                if paren_pos != -1:
+                    encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
+            
+            print(f"Final encoded URL: {encoded_url[:]}...")
+            print(f"Contains %24%24 (double dollar encoded): {'%24%24' in encoded_url}")
+            print(f"Contains _ENC%28: {'_ENC%28' in encoded_url}")
+            
+            return encoded_url
+            
         # Fix both CDN URLs
         args.pickle_cdn_url = fix_cdn_url(args.pickle_cdn_url)
         args.config_cdn_url = fix_cdn_url(args.config_cdn_url)
