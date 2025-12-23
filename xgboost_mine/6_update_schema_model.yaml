@@ -134,9 +134,7 @@ implementation:
             "model_weights_cdn": "N/A",
             "parameter_count": str(feature_info.get('final_features', 0)),
             "source": args.source,  # Must be: auto-generated, wizard, or manual
-            "created_by": "system",
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "model_specific_config": model_specific_config  # Empty JSON
+            "created_by": "system"
         }
 
         # Set up API call
@@ -197,8 +195,7 @@ implementation:
                             {"operation": "REPLACE", "path": "parameter_count", "value": model_row["parameter_count"]},
                             {"operation": "REPLACE", "path": "experiment_id", "value": model_row["experiment_id"]},
                             {"operation": "REPLACE", "path": "architecture_type", "value": model_row["architecture_type"]},
-                            {"operation": "REPLACE", "path": "source", "value": model_row["source"]},
-                            {"operation": "REPLACE", "path": "model_specific_config", "value": model_row["model_specific_config"]}
+                            {"operation": "REPLACE", "path": "source", "value": model_row["source"]}
                             # REMOVED: created_at from patch operations - it should only be set during creation
                         ]
                     }]
