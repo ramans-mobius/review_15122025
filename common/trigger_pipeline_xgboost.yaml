@@ -1,4 +1,4 @@
-name: Trigger XGBoost Pipeline with CDN v3
+name: Trigger XGBoost Pipeline with CDN v4
 description: Creates CDN URLs for all data/metadata and triggers XGBoost pipeline
 inputs:
   # Data inputs (from previous pipeline outputs)
@@ -36,7 +36,6 @@ inputs:
   - {name: eval_schema, type: String, description: "Schema ID for evaluation metrics"}
   - {name: architecture_type, type: String, default: "GRM", description: "Architecture type"}
   - {name: source, type: String, default: "auto-generated", description: "Source"}
-  - {name: next_pipeline_id, type: String, description: "ID of next pipeline to trigger"}
 
 outputs:
   - {name: trigger_response, type: String, description: "Raw response from pipeline trigger API"}
@@ -103,7 +102,6 @@ implementation:
         parser.add_argument('--eval_schema', required=True)
         parser.add_argument('--architecture_type', default="GRM")
         parser.add_argument('--source', default="auto-generated")
-        parser.add_argument('--next_pipeline_id', required=True)
         
         # Outputs
         parser.add_argument('--trigger_response', required=True)
@@ -116,7 +114,7 @@ implementation:
             bearer_token = f.read().strip()
 
         print("="*80)
-        print("TRIGGER XGBOOST PIPELINE WITH CDN UPLOAD")
+        print("TRIGGER XGBoost PIPELINE WITH CDN UPLOAD")
         print("="*80)
 
         # Function to encode URLs with proper replacements
@@ -503,8 +501,6 @@ implementation:
       - {inputValue: architecture_type}
       - --source
       - {inputValue: source}
-      - --next_pipeline_id
-      - {inputValue: next_pipeline_id}
       
       # Outputs
       - --trigger_response
