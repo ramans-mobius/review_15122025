@@ -277,7 +277,7 @@ implementation:
         print("[STEP 1 COMPLETE] test_data uploaded to CDN, using existing CDN URLs for other files")
         
         # Step 2: Trigger the XGBoost pipeline
-        print("\n[STEP 2] Triggering XGBoost pipeline...")
+        print("\\n[STEP 2] Triggering XGBoost pipeline...")
         
         # Construct trigger URL
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
@@ -398,7 +398,7 @@ implementation:
                     raise
         
         # Step 3: Save CDN URLs JSON
-        print("\n[STEP 3] Saving CDN URLs...")
+        print("\\n[STEP 3] Saving CDN URLs...")
         cdn_info = {
             "timestamp": int(time.time()),
             "pipeline_id": args.pipeline_id,
