@@ -1,0 +1,515 @@
+name: Trigger XGBoost Pipeline with CDN
+description: Creates CDN URLs for all data/metadata and triggers XGBoost pipeline
+inputs:
+  # Data inputs (from previous pipeline outputs)
+  - {name: test_data, type: Dataset, description: "Test dataset file"}
+  - {name: train_x, type: Dataset, description: "Training features dataset"}
+  - {name: train_y, type: Dataset, description: "Training labels dataset"}
+  - {name: preprocessor_pickle, type: Data, description: "Preprocessor pickle file"}
+  - {name: preprocessor_metadata, type: Data, description: "Preprocessor metadata JSON"}
+  - {name: feature_selector, type: Data, description: "Feature selector pickle"}
+  - {name: pca_model, type: Data, description: "PCA model pickle file"}
+  - {name: pca_metadata, type: Data, description: "PCA metadata JSON"}
+  
+  # Authentication and configuration
+  - {name: bearer_token, type: string, description: "Bearer token for CDN authentication"}
+  - {name: domain, type: String, description: "Upload service base domain"}
+  - {name: get_cdn, type: String, description: "Public CDN base domain"}
+  
+  # Pipeline trigger parameters
+  - {name: pipeline_id, type: String, description: "Pipeline ID to trigger"}
+  - {name: experiment_id, type: String, description: "Experiment ID"}
+  - {name: model_id, type: String, description: "Model ID"}
+  - {name: project_id, type: String, description: "Project ID"}
+  - {name: execution_id, type: Integer, description: "Execution ID"}
+  - {name: model_type, type: String, description: "Model type (classification/regression)"}
+  - {name: target_column, type: String, description: "Target column name"}
+  - {name: config_str, type: String, description: "Configuration JSON string"}
+  
+  # Additional parameters for XGBoost pipeline
+  - {name: userName, type: String, description: "Username for IAM authentication"}
+  - {name: password, type: String, description: "Password for IAM authentication"}
+  - {name: requesttype, type: String, description: "Request type for IAM authentication"}
+  - {name: productid, type: String, description: "Product ID for IAM authentication"}
+  - {name: model_schema, type: String, description: "Schema ID for model metrics"}
+  - {name: train_schema, type: String, description: "Schema ID for training history"}
+  - {name: eval_schema, type: String, description: "Schema ID for evaluation metrics"}
+  - {name: architecture_type, type: String, default: "GRM", description: "Architecture type"}
+  - {name: source, type: String, default: "auto-generated", description: "Source"}
+  - {name: next_pipeline_id, type: String, description: "ID of next pipeline to trigger"}
+
+outputs:
+  - {name: trigger_response, type: String, description: "Raw response from pipeline trigger API"}
+  - {name: cdn_urls_json, type: String, description: "JSON with all CDN URLs created"}
+
+implementation:
+  container:
+    image: kumar2004/mobius:1.0
+    command:
+      - sh
+      - -ec
+      - |
+        if ! command -v curl >/dev/null 2>&1; then
+          apt-get update >/dev/null && apt-get install -y curl >/dev/null
+        fi
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import subprocess
+        import json
+        import os
+        import time
+        import tempfile
+        import pandas as pd
+        import urllib.parse
+
+        parser = argparse.ArgumentParser()
+
+        # Data inputs
+        parser.add_argument('--test_data', required=True)
+        parser.add_argument('--train_x', required=True)
+        parser.add_argument('--train_y', required=True)
+        parser.add_argument('--preprocessor_pickle', required=True)
+        parser.add_argument('--preprocessor_metadata', required=True)
+        parser.add_argument('--feature_selector', required=True)
+        parser.add_argument('--pca_model', required=True)
+        parser.add_argument('--pca_metadata', required=True)
+        
+        # Authentication
+        parser.add_argument('--bearer_token', required=True)
+        parser.add_argument('--domain', required=True)
+        parser.add_argument('--get_cdn', required=True)
+        
+        # Pipeline parameters
+        parser.add_argument('--pipeline_id', required=True)
+        parser.add_argument('--experiment_id', required=True)
+        parser.add_argument('--model_id', required=True)
+        parser.add_argument('--project_id', required=True)
+        parser.add_argument('--execution_id', type=int, required=True)
+        parser.add_argument('--model_type', required=True)
+        parser.add_argument('--target_column', required=True)
+        parser.add_argument('--config_str', required=True)
+        
+        # Additional parameters
+        parser.add_argument('--userName', required=True)
+        parser.add_argument('--password', required=True)
+        parser.add_argument('--requesttype', required=True)
+        parser.add_argument('--productid', required=True)
+        parser.add_argument('--model_schema', required=True)
+        parser.add_argument('--train_schema', required=True)
+        parser.add_argument('--eval_schema', required=True)
+        parser.add_argument('--architecture_type', default="GRM")
+        parser.add_argument('--source', default="auto-generated")
+        parser.add_argument('--next_pipeline_id', required=True)
+        
+        # Outputs
+        parser.add_argument('--trigger_response', required=True)
+        parser.add_argument('--cdn_urls_json', required=True)
+
+        args = parser.parse_args()
+
+        # Read bearer token
+        with open(args.bearer_token, "r") as f:
+            bearer_token = f.read().strip()
+
+        print("="*80)
+        print("TRIGGER XGBOOST PIPELINE WITH CDN UPLOAD")
+        print("="*80)
+
+        # Function to encode URLs with proper replacements
+        def encode_cdn_url(url):
+           
+            if not url:
+                return url
+            
+            # Remove any spaces first
+            url = url.replace(" ", "")
+            
+            # Replace special characters before URL encoding
+            url = url.replace("$", "%24")
+            url = url.replace("(", "%28")
+            url = url.replace(")", "%29")
+            url = url.replace("[", "%5B")
+            url = url.replace("]", "%5D")
+            url = url.replace("{", "%7B")
+            url = url.replace("}", "%7D")
+            
+            print(f"Encoded URL preview: {url[:100]}...")
+            return url
+
+        # Function to upload file to CDN
+        def upload_to_cdn(file_path, file_name=None):
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+            
+            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fbottle%2Flimka%2Fsoda%2F"
+            
+            if file_name:
+                # Use the provided file name
+                cmd = [
+                    "curl",
+                    "--location", upload_url,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--form", f"file=@{file_path};filename={file_name}",
+                    "--fail",
+                    "--show-error",
+                    "--silent"
+                ]
+            else:
+                cmd = [
+                    "curl",
+                    "--location", upload_url,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--form", f"file=@{file_path}",
+                    "--fail",
+                    "--show-error",
+                    "--silent"
+                ]
+            
+            print(f"Uploading: {os.path.basename(file_path)} ({os.path.getsize(file_path)} bytes)")
+            
+            result = subprocess.run(cmd, capture_output=True, check=True, text=True)
+            response = json.loads(result.stdout)
+            
+            relative_url = response.get("cdnUrl")
+            if not relative_url:
+                raise RuntimeError(f"cdnUrl missing in response: {response}")
+            
+            full_url = f"{args.get_cdn}{relative_url}"
+            encoded_url = encode_cdn_url(full_url)
+            
+            return encoded_url
+
+        # Function to ensure CSV format for datasets
+        def ensure_csv_format(input_path, suffix=""):
+            # If already CSV, return as-is
+            if input_path.endswith('.csv'):
+                return input_path
+            
+            # Create temp CSV file
+            temp_dir = tempfile.mkdtemp()
+            output_file = os.path.join(temp_dir, f"data{suffix}.csv")
+            
+            try:
+                # Try reading as parquet
+                if input_path.endswith('.parquet'):
+                    df = pd.read_parquet(input_path)
+                # Try reading as pickle
+                elif input_path.endswith(('.pkl', '.pickle')):
+                    import pickle
+                    with open(input_path, 'rb') as f:
+                        data = pickle.load(f)
+                    if isinstance(data, pd.DataFrame):
+                        df = data
+                    elif isinstance(data, dict) and 'X' in data:
+                        # Convert from XGBoost format
+                        X = data['X']
+                        feature_names = data.get('feature_names', [f'feature_{i}' for i in range(X.shape[1])])
+                        df = pd.DataFrame(X, columns=feature_names)
+                    else:
+                        raise ValueError(f"Unsupported pickle format: {type(data)}")
+                else:
+                    # Try reading as CSV with fallback
+                    try:
+                        df = pd.read_csv(input_path)
+                    except:
+                        # Last resort: try to read with pandas default
+                        df = pd.read_table(input_path)
+                
+                # Save as CSV
+                df.to_csv(output_file, index=False)
+                print(f"Converted {os.path.basename(input_path)} to CSV: {df.shape}")
+                return output_file
+                
+            except Exception as e:
+                print(f"Error converting {input_path}: {e}")
+                # Fallback: copy file as-is
+                import shutil
+                shutil.copy2(input_path, output_file)
+                return output_file
+
+        # Step 1: Upload all files to CDN
+        print("[STEP 1] Uploading files to CDN...")
+        
+        cdn_urls = {}
+        
+        # Upload datasets (convert to CSV first)
+        train_x_csv = ensure_csv_format(args.train_x, "_train_x")
+        cdn_urls["train_x_cdn"] = upload_to_cdn(train_x_csv, "train_x.csv")
+        
+        train_y_csv = ensure_csv_format(args.train_y, "_train_y")
+        cdn_urls["train_y_cdn"] = upload_to_cdn(train_y_csv, "train_y.csv")
+        
+        test_data_csv = ensure_csv_format(args.test_data, "_test")
+        cdn_urls["test_data_cdn"] = upload_to_cdn(test_data_csv, "test_data.csv")
+        
+        # Upload pickle files
+        cdn_urls["preprocessor_pickle_cdn"] = upload_to_cdn(args.preprocessor_pickle, "preprocessor.pkl")
+        cdn_urls["feature_selector_cdn"] = upload_to_cdn(args.feature_selector, "feature_selector.pkl")
+        cdn_urls["pca_model_cdn"] = upload_to_cdn(args.pca_model, "pca_model.pkl")
+        
+        # Upload metadata files
+        cdn_urls["preprocessor_metadata_cdn"] = upload_to_cdn(args.preprocessor_metadata, "preprocessor_metadata.json")
+        cdn_urls["pca_metadata_cdn"] = upload_to_cdn(args.pca_metadata, "pca_metadata.json")
+        
+        # Create a combined pickle URL (for backward compatibility)
+        # Create a simple combined pickle file
+        import pickle
+        combined_data = {
+            "train_X": cdn_urls["train_x_cdn"],
+            "train_y": cdn_urls["train_y_cdn"],
+            "test_X": cdn_urls["test_data_cdn"],
+            "test_y": cdn_urls["test_data_cdn"],  # Same as test_X for simplicity
+            "metadata": {
+                "model_type": args.model_type,
+                "target_column": args.target_column,
+                "config": args.config_str
+            }
+        }
+        
+        combined_pickle = tempfile.NamedTemporaryFile(suffix='.pkl', delete=False)
+        pickle.dump(combined_data, combined_pickle)
+        combined_pickle.close()
+        
+        cdn_urls["pickle_cdn_url"] = upload_to_cdn(combined_pickle.name, "combined_data.pkl")
+        os.unlink(combined_pickle.name)
+        
+        # Create config pickle URL
+        config_data = json.loads(args.config_str)
+        config_pickle = tempfile.NamedTemporaryFile(suffix='.pkl', delete=False)
+        pickle.dump(config_data, config_pickle)
+        config_pickle.close()
+        
+        cdn_urls["config_cdn_url"] = upload_to_cdn(config_pickle.name, "config.pkl")
+        os.unlink(config_pickle.name)
+        
+        # Clean up temp CSV files
+        for temp_file in [train_x_csv, train_y_csv, test_data_csv]:
+            if temp_file != args.train_x and temp_file != args.train_y and temp_file != args.test_data:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+                    os.rmdir(os.path.dirname(temp_file))
+        
+        print("[STEP 1 COMPLETE] All files uploaded to CDN")
+        
+        # Step 2: Trigger the XGBoost pipeline
+        print("\\n[STEP 2] Triggering XGBoost pipeline...")
+        
+        # Construct trigger URL
+        trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
+        
+        # Build payload with all parameters
+        payload = {
+            "pipelineType": "ML",
+            "containerResources": {},
+            "experimentId": args.experiment_id,
+            "enableCaching": True,
+            "parameters": {
+                # CDN URLs
+                "pickle_cdn_url": cdn_urls["pickle_cdn_url"],
+                "config_cdn_url": cdn_urls["config_cdn_url"],
+                "train_x_cdn": cdn_urls["train_x_cdn"],
+                "train_y_cdn": cdn_urls["train_y_cdn"],
+                "test_data_cdn": cdn_urls["test_data_cdn"],
+                "preprocessor_cdn": cdn_urls["preprocessor_pickle_cdn"],
+                "preprocessor_metadata_cdn": cdn_urls["preprocessor_metadata_cdn"],
+                "feature_selector_cdn": cdn_urls["feature_selector_cdn"],
+                "pca_cdn": cdn_urls["pca_model_cdn"],
+                "pca_metadata_cdn": cdn_urls["pca_metadata_cdn"],
+                
+                # Model parameters
+                "model_name": f"XGBoost_{args.model_type}",
+                "model_config": args.config_str,
+                "model_type": args.model_type,
+                "target_column": args.target_column,
+                
+                # IDs
+                "execution_id": args.execution_id,
+                "experiment_id": args.experiment_id,
+                "model_id": args.model_id,
+                "project_id": args.project_id,
+                "pipeline_id": args.next_pipeline_id,
+                
+                # Authentication
+                "userName": args.userName,
+                "password": args.password,
+                "requesttype": args.requesttype,
+                "productid": args.productid,
+                "domain": args.domain,
+                
+                # Schema IDs
+                "model_schema": args.model_schema,
+                "train_schema": args.train_schema,
+                "eval_schema": args.eval_schema,
+                
+                # Additional parameters
+                "architecture_type": args.architecture_type,
+                "source": args.source,
+                "splitting_strategy": "none",
+                "num_tasks": 1
+            },
+            "version": 1
+        }
+
+        print(f"Trigger URL: {trigger_url}")
+        print(f"Pipeline ID: {args.pipeline_id}")
+        print(f"Experiment ID: {args.experiment_id}")
+        
+        # Make the request
+        headers = {
+            "accept": "application/json",
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json"
+        }
+        
+        curl_command = [
+            "curl",
+            "--location", trigger_url,
+            "--header", f"accept: {headers['accept']}",
+            "--header", f"Authorization: {headers['Authorization']}",
+            "--header", f"Content-Type: {headers['Content-Type']}",
+            "--data", json.dumps(payload),
+            "--fail",
+            "--show-error",
+            "--connect-timeout", "30",
+            "--silent"
+        ]
+        
+        print("Sending trigger request...")
+        retries = 3
+        for i in range(retries):
+            try:
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    check=True,
+                    text=True
+                )
+                
+                print("Trigger successful!")
+                response_text = process.stdout
+                
+                # Save trigger response
+                os.makedirs(os.path.dirname(args.trigger_response), exist_ok=True)
+                with open(args.trigger_response, "w") as f:
+                    f.write(response_text)
+                
+                # Parse and print response
+                try:
+                    response_json = json.loads(response_text)
+                    print(f"Response: {json.dumps(response_json, indent=2)}")
+                except:
+                    print(f"Raw response: {response_text}")
+                
+                break
+                
+            except subprocess.CalledProcessError as e:
+                print(f"Attempt {i+1} failed: {e.returncode}")
+                print(f"Error: {e.stderr}")
+                if i < retries - 1:
+                    print(f"Retrying in 10 seconds...")
+                    time.sleep(10)
+                else:
+                    raise
+        
+        # Step 3: Save CDN URLs JSON
+        print("\\n[STEP 3] Saving CDN URLs...")
+        cdn_info = {
+            "timestamp": int(time.time()),
+            "pipeline_id": args.pipeline_id,
+            "experiment_id": args.experiment_id,
+            "model_id": args.model_id,
+            "execution_id": args.execution_id,
+            "cdn_urls": cdn_urls,
+            "trigger_payload": payload
+        }
+        
+        os.makedirs(os.path.dirname(args.cdn_urls_json), exist_ok=True)
+        with open(args.cdn_urls_json, "w") as f:
+            json.dump(cdn_info, f, indent=2)
+        
+        print("="*80)
+        print("TRIGGER PROCESS COMPLETE")
+        print("="*80)
+        print(f"Created {len(cdn_urls)} CDN URLs:")
+        for key, url in cdn_urls.items():
+            print(f"  {key}: {url[:80]}...")
+        print(f"Trigger response saved to: {args.trigger_response}")
+        print(f"CDN URLs saved to: {args.cdn_urls_json}")
+        print("="*80)
+            
+    args:
+      # Data inputs
+      - --test_data
+      - {inputPath: test_data}
+      - --train_x
+      - {inputPath: train_x}
+      - --train_y
+      - {inputPath: train_y}
+      - --preprocessor_pickle
+      - {inputPath: preprocessor_pickle}
+      - --preprocessor_metadata
+      - {inputPath: preprocessor_metadata}
+      - --feature_selector
+      - {inputPath: feature_selector}
+      - --pca_model
+      - {inputPath: pca_model}
+      - --pca_metadata
+      - {inputPath: pca_metadata}
+      
+      # Authentication
+      - --bearer_token
+      - {inputPath: bearer_token}
+      - --domain
+      - {inputValue: domain}
+      - --get_cdn
+      - {inputValue: get_cdn}
+      
+      # Pipeline parameters
+      - --pipeline_id
+      - {inputValue: pipeline_id}
+      - --experiment_id
+      - {inputValue: experiment_id}
+      - --model_id
+      - {inputValue: model_id}
+      - --project_id
+      - {inputValue: project_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --model_type
+      - {inputValue: model_type}
+      - --target_column
+      - {inputValue: target_column}
+      - --config_str
+      - {inputValue: config_str}
+      
+      # Additional parameters
+      - --userName
+      - {inputValue: userName}
+      - --password
+      - {inputValue: password}
+      - --requesttype
+      - {inputValue: requesttype}
+      - --productid
+      - {inputValue: productid}
+      - --model_schema
+      - {inputValue: model_schema}
+      - --train_schema
+      - {inputValue: train_schema}
+      - --eval_schema
+      - {inputValue: eval_schema}
+      - --architecture_type
+      - {inputValue: architecture_type}
+      - --source
+      - {inputValue: source}
+      - --next_pipeline_id
+      - {inputValue: next_pipeline_id}
+      
+      # Outputs
+      - --trigger_response
+      - {outputPath: trigger_response}
+      - --cdn_urls_json
+      - {outputPath: cdn_urls_json}
