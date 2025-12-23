@@ -1,4 +1,4 @@
-name: Trigger XGBoost Pipeline with CDN v2
+name: Trigger XGBoost Pipeline with CDN v3
 description: Creates CDN URLs for all data/metadata and triggers XGBoost pipeline
 inputs:
   # Data inputs (from previous pipeline outputs)
@@ -21,7 +21,7 @@ inputs:
   - {name: experiment_id, type: String, description: "Experiment ID"}
   - {name: model_id, type: String, description: "Model ID"}
   - {name: project_id, type: String, description: "Project ID"}
-  - {name: execution_id, type: String, description: "Execution ID (can be string)"}  # CHANGED TO STRING
+  - {name: execution_id, type: String, description: "Execution ID (can be string)"}
   - {name: model_type, type: String, description: "Model type (classification/regression)"}
   - {name: target_column, type: String, description: "Target column name"}
   - {name: config_str, type: String, description: "Configuration JSON string"}
@@ -88,7 +88,7 @@ implementation:
         parser.add_argument('--experiment_id', required=True)
         parser.add_argument('--model_id', required=True)
         parser.add_argument('--project_id', required=True)
-        parser.add_argument('--execution_id', type=str, required=True)  # CHANGED TO str
+        parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--model_type', required=True)
         parser.add_argument('--target_column', required=True)
         parser.add_argument('--config_str', required=True)
@@ -301,14 +301,14 @@ implementation:
             execution_id_for_payload = args.execution_id
             print(f"Keeping execution_id as string: '{args.execution_id}'")
         
-        # Build payload with all parameters
+        # Build payload with all parameters - CORRECTED FOR XGBOOST PIPELINE
         payload = {
             "pipelineType": "ML",
             "containerResources": {},
             "experimentId": args.experiment_id,
             "enableCaching": True,
             "parameters": {
-                # CDN URLs
+                # CDN URLs - these will be downloaded by CDN Download brick
                 "pickle_cdn_url": cdn_urls["pickle_cdn_url"],
                 "config_cdn_url": cdn_urls["config_cdn_url"],
                 "train_x_cdn": cdn_urls["train_x_cdn"],
@@ -322,22 +322,20 @@ implementation:
                 
                 # Model parameters
                 "model_name": f"XGBoost_{args.model_type}",
-                "model_config": args.config_str,
-                "model_type": args.model_type,
+                "config_str": args.config_str,  # Direct JSON string (XGBoost pipeline expects this)
+                "model_type": args.model_type,  # For CDN Download brick to understand data format
                 "target_column": args.target_column,
                 
                 # IDs
-                "execution_id": execution_id_for_payload,  # Can be string or integer
-                "experiment_id": args.experiment_id,
+                "execution_id": execution_id_for_payload,
                 "model_id": args.model_id,
                 "project_id": args.project_id,
-                "pipeline_id": args.next_pipeline_id,
                 
-                # Authentication
+                # Authentication - WITH CORRECT CASE for XGBoost pipeline
                 "userName": args.userName,
                 "password": args.password,
-                "requesttype": args.requesttype,
-                "productid": args.productid,
+                "requestType": args.requesttype,  # CORRECT CASE: requestType (not requesttype)
+                "productId": args.productid,      # CORRECT CASE: productId (not productid)
                 "domain": args.domain,
                 
                 # Schema IDs
@@ -347,9 +345,7 @@ implementation:
                 
                 # Additional parameters
                 "architecture_type": args.architecture_type,
-                "source": args.source,
-                "splitting_strategy": "none",
-                "num_tasks": 1
+                "source": args.source
             },
             "version": 1
         }
@@ -423,7 +419,7 @@ implementation:
             "pipeline_id": args.pipeline_id,
             "experiment_id": args.experiment_id,
             "model_id": args.model_id,
-            "execution_id": args.execution_id,  # Keep original string
+            "execution_id": args.execution_id,
             "project_id": args.project_id,
             "cdn_urls": cdn_urls,
             "trigger_payload": payload
@@ -480,7 +476,7 @@ implementation:
       - --project_id
       - {inputValue: project_id}
       - --execution_id
-      - {inputValue: execution_id}  # Now accepts string
+      - {inputValue: execution_id}
       - --model_type
       - {inputValue: model_type}
       - --target_column
