@@ -1,4 +1,4 @@
-name: Trigger CNN Pipeline v4
+name: Trigger CNN Pipeline v5
 description: Triggers an Elyra Kubeflow pipeline for CNN training with DQN optimization.
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the uploaded pickle file"}
@@ -75,7 +75,7 @@ implementation:
             # First, replace known problematic patterns
             url = url.replace("(", "%28")
             url = url.replace(")", "%29")
-            url = url.replace("$", "$$")
+            url = url.replace("_$_", "_$$_")
             url = url.replace("$", "%24")
             url = url.replace(" ", "%20")
             
@@ -88,7 +88,7 @@ implementation:
             # For the _ENC pattern that appears in CDN URLs
             url = url.replace("_ENC", "_ENC")
             
-            print(f"Original URL: {url[:100]}...")
+            print(f"Original URL: {url[:]}...")
             
             # Additional URL encoding for safety
             if "://" in url:
@@ -99,7 +99,7 @@ implementation:
             else:
                 url = urllib.parse.quote(url, safe="/:?=&%_")
             
-            print(f"Encoded URL: {url[:100]}...")
+            print(f"Encoded URL: {url[:]}...")
             return url
 
         # Encode both CDN URLs
