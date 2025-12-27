@@ -1,4 +1,4 @@
-name: CNNBuildOrLoadModel
+name: Build or Load Model
 description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN
 inputs:
   - name: config_str
