@@ -1,0 +1,184 @@
+name: CNNBuildOrLoadModel
+description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN
+inputs:
+  - name: config_str
+    type: String
+    description: Model configuration as JSON string (required if building new)
+    optional: true
+  - name: model_name
+    type: String
+    description: CNN model architecture name (required if building new)
+    optional: true
+  - name: load_from_cdn
+    type: Boolean
+    description: Whether to load model from CDN instead of building from scratch
+    default: false
+  - name: cdn_url
+    type: String
+    description: CDN URL pointing to model checkpoint (required if load_from_cdn=true)
+    optional: true
+outputs:
+  - name: model_out
+    type: Model
+  - name: config_updated
+    type: String
+  - name: model_info_out
+    type: String
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v19
+    command:
+      - sh
+      - -c
+      - |
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import torch, argparse, json, os, sys, tempfile
+        import urllib.request
+        from nesy_factory.CNNs.factory import CNNFactory
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--config_str', type=str, default='')
+        parser.add_argument('--model_name', type=str, default='')
+        parser.add_argument('--load_from_cdn', type=str, default='false')
+        parser.add_argument('--cdn_url', type=str, default='')
+        parser.add_argument('--model_out', type=str, required=True)
+        parser.add_argument('--config_updated', type=str, required=True)
+        parser.add_argument('--model_info_out', type=str, required=True)
+        args = parser.parse_args()
+        
+        load_from_cdn = args.load_from_cdn.lower() == 'true'
+        
+        # Create output directories
+        os.makedirs(os.path.dirname(args.model_out), exist_ok=True)
+        os.makedirs(os.path.dirname(args.config_updated), exist_ok=True)
+        os.makedirs(os.path.dirname(args.model_info_out), exist_ok=True)
+        
+        if load_from_cdn:
+            # MODE 1: Download model from CDN
+            if not args.cdn_url:
+                print("ERROR: cdn_url is required when load_from_cdn=true")
+                sys.exit(1)
+                
+            print(f"Loading model from CDN: {args.cdn_url}")
+            
+            # Download the model
+            try:
+                # Create a temporary file for download
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
+                    tmp_path = tmp_file.name
+                
+                print(f"Downloading from {args.cdn_url}...")
+                urllib.request.urlretrieve(args.cdn_url, tmp_path)
+                print("Download completed")
+                
+                # Load the checkpoint
+                checkpoint = torch.load(tmp_path, map_location='cpu')
+                
+                # Save to the output path
+                torch.save(checkpoint, args.model_out)
+                print(f"Model loaded from CDN and saved to: {args.model_out}")
+                
+                # For CDN mode, we don't have config or model info
+                # Create minimal outputs
+                if args.config_str:
+                    config = json.loads(args.config_str)
+                else:
+                    config = {}
+                
+                config['model_source'] = 'cdn'
+                config['cdn_url'] = args.cdn_url
+                
+                with open(args.config_updated, 'w') as f:
+                    json.dump(config, f, indent=2)
+                
+                model_info = {
+                    'model_source': 'cdn',
+                    'cdn_url': args.cdn_url,
+                    'checkpoint_type': 'full_model' if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint else 'state_dict'
+                }
+                with open(args.model_info_out, 'w') as f:
+                    json.dump(model_info, f, indent=2)
+                    
+                # Clean up temp file
+                os.unlink(tmp_path)
+                
+            except Exception as e:
+                print(f"Failed to load model from CDN: {e}")
+                sys.exit(1)
+                
+        else:
+            # MODE 2: Build new model from configuration using nesyfactory
+            if not args.config_str or not args.model_name:
+                print("ERROR: config_str and model_name are required when load_from_cdn=false")
+                sys.exit(1)
+                
+            # Parse configuration
+            config = json.loads(args.config_str)
+            model_config = config.get('model', {})
+            model_config['architecture'] = args.model_name
+            
+            # Set default values if not provided
+            defaults = {
+                'output_dim': 10,
+                'input_channels': 3,
+                'input_size': [224, 224],
+                'pretrained': True,
+                'use_cafo': False,
+                'use_forward_forward': False
+            }
+            
+            for param, default_value in defaults.items():
+                if param not in model_config:
+                    print(f"{param} not found, using default: {default_value}")
+                    model_config[param] = default_value
+
+            try:
+                # Use nesyfactory's CNNFactory to create model
+                model = CNNFactory.create_model(model_config['architecture'], model_config)
+                print(f"Model created with {model.get_num_parameters():,} parameters")
+                
+                # Get model info using nesyfactory's method
+                model_info = model.get_model_info()
+                model_info['model_name'] = args.model_name
+                model_info['model_source'] = 'fresh_build'
+                
+            except Exception as e:
+                print(f"Failed to create model using CNNFactory: {e}")
+                sys.exit(1)
+
+            # Save model using nesyfactory's save_model method
+            model.save_model(args.model_out)
+
+            # Save updated config
+            config['model'] = model_config
+            with open(args.config_updated, 'w') as f:
+                json.dump(config, f, indent=2)
+                
+            # Save model info
+            with open(args.model_info_out, 'w') as f:
+                json.dump(model_info, f, indent=2)
+
+            print(f"Model built from scratch and saved to: {args.model_out}")
+            print(f"Updated config saved to: {args.config_updated}")
+            print(f"Model info saved to: {args.model_info_out}")
+
+    args:
+      - --model_name
+      - {inputValue: model_name}
+      - --config_str
+      - {inputValue: config_str}
+      - --load_from_cdn
+      - {inputValue: load_from_cdn}
+      - --cdn_url
+      - {inputValue: cdn_url}
+      - --model_out
+      - {outputPath: model_out}
+      - --config_updated
+      - {outputPath: config_updated}
+      - --model_info_out
+      - {outputPath: model_info_out}
