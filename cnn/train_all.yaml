@@ -1,4 +1,4 @@
-name: Train v2
+name: Train v1
 description: Trains a CNN model using nesyfactory and processes training history into flattened format
 inputs:
   - name: data_path
@@ -540,7 +540,8 @@ implementation:
             except:
                 print("Warning: Could not parse mapping JSON")
         
-        # Create processed history output
+        # Create processed history output - SIMPLIFIED FORMAT
+        # This should match what downstream components expect
         processed_history = {
             "training_mode": training_mode,
             "model_source": model_source,
