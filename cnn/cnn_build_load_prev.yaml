@@ -1,22 +1,19 @@
-name: Build or Load Model
+name: Build or Load Model v2
 description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN
 inputs:
   - name: config_str
     type: String
     description: Model configuration as JSON string (required if building new)
-    optional: true
   - name: model_name
     type: String
     description: CNN model architecture name (required if building new)
-    optional: true
   - name: load_from_cdn
     type: Boolean
     description: Whether to load model from CDN instead of building from scratch
-    default: false
+    default: "false"
   - name: cdn_url
     type: String
     description: CDN URL pointing to model checkpoint (required if load_from_cdn=true)
-    optional: true
 outputs:
   - name: model_out
     type: Model
@@ -124,7 +121,7 @@ implementation:
             
             # Set default values if not provided
             defaults = {
-                'output_dim': 2,
+                'output_dim': 10,
                 'input_channels': 3,
                 'input_size': [224, 224],
                 'pretrained': True,
