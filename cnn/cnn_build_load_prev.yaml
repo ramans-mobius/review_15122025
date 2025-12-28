@@ -1,4 +1,4 @@
-name: Build or Load Model v2
+name: Build or Load Model v3
 description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN
 inputs:
   - name: config_str
@@ -8,8 +8,8 @@ inputs:
     type: String
     description: CNN model architecture name (required if building new)
   - name: load_from_cdn
-    type: Boolean
-    description: Whether to load model from CDN instead of building from scratch
+    type: String
+    description: Whether to load model from CDN instead of building from scratch ("true" or "false")
     default: "false"
   - name: cdn_url
     type: String
