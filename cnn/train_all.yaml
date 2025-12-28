@@ -1,4 +1,4 @@
-name: Train
+name: Train v2
 description: Trains a CNN model using nesyfactory and processes training history into flattened format
 inputs:
   - name: data_path
