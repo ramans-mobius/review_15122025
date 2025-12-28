@@ -1,4 +1,4 @@
-name: Build or Load Model v3
+name: Build or Load Model v4
 description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN
 inputs:
   - name: config_str
@@ -24,7 +24,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v34
+    image: gurpreetgandhi/nesy-factory:v19
     command:
       - sh
       - -c
@@ -148,8 +148,15 @@ implementation:
                 print(f"Failed to create model using CNNFactory: {e}")
                 sys.exit(1)
 
-            # Save model using nesyfactory's save_model method
-            model.save_model(args.model_out)
+            # Save model in the format expected by the Train component
+            # Create a checkpoint dictionary with config and state dict
+            checkpoint = {
+                'config': model_config,
+                'model_state_dict': model.state_dict(),
+                'model_info': model_info
+            }
+            
+            torch.save(checkpoint, args.model_out)
 
             # Save updated config
             config['model'] = model_config
