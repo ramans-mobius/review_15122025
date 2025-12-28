@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v2
+name: XGBoost Data Downloader v3
 description: Downloads all data from CDN URLs and prepares for XGBoost pipeline
 inputs:
   # CDN URLs from trigger
@@ -67,6 +67,8 @@ implementation:
         from io import BytesIO
         import tempfile
         import urllib.parse
+        import gzip
+        import re
 
         parser = argparse.ArgumentParser()
         
@@ -120,12 +122,11 @@ implementation:
 
         # Function to decode URLs with proper handling
         def decode_cdn_url(url):
-         
             if not url:
                 return url
             
-            # Remove any spaces first (should already be done, but just in case)
-            url = url.replace(" ", "")
+            # Remove any spaces first
+            url = url.strip()
             
             # First decode URL-encoded characters
             try:
@@ -133,42 +134,110 @@ implementation:
             except:
                 pass
             
-            # Special handling for encoded characters that might be in URLs
-            # Replace back any double-encoded patterns if needed
-            url = url.replace("%2524", "$")  # Double-encoded $
-            url = url.replace("%2528", "(")  # Double-encoded (
-            url = url.replace("%2529", ")")  # Double-encoded )
-            
-            print(f"Decoded URL preview: {url}...")
+            print(f"Decoded URL preview: {url[:100]}...")
             return url
 
-        # Function to download from CDN
+        # Function to check if content is gzipped
+        def is_gzipped(content):
+            return len(content) >= 2 and content[0] == 0x1f and content[1] == 0x8b
+
+        # Function to decompress gzipped content
+        def decompress_gzip(content):
+            """Decompress gzipped content."""
+            try:
+                with gzip.GzipFile(fileobj=BytesIO(content)) as gz:
+                    return gz.read()
+            except Exception as e:
+                print(f"Warning: Failed to decompress gzip: {e}")
+                # Try alternative decompression
+                try:
+                    import zlib
+                    return zlib.decompress(content, 16 + zlib.MAX_WBITS)
+                except:
+                    raise ValueError(f"Failed to decompress gzipped content: {e}")
+
+        # Function to download from CDN with auto-decompression
         def download_from_cdn(url, description=""):
-            
             try:
                 # Decode URL first
                 decoded_url = decode_cdn_url(url)
-                print(f"Downloading {description} from: {decoded_url}...")
+                print(f"Downloading {description} from: {decoded_url[:100]}...")
                 
                 response = requests.get(decoded_url, timeout=60)
                 response.raise_for_status()
                 
-                return response.content
+                content = response.content
+                
+                # Check if content is gzipped and decompress if needed
+                if is_gzipped(content):
+                    print(f"  Detected gzipped content ({len(content)} bytes), decompressing...")
+                    content = decompress_gzip(content)
+                    print(f"  After decompression: {len(content)} bytes")
+                
+                return content
                 
             except Exception as e:
                 print(f"Error downloading {description}: {e}")
                 raise
 
-        # Function to save output
-        def save_output(path, data, is_pickle=True):
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            if is_pickle:
-                with open(path, 'wb') as f:
-                    pickle.dump(data, f)
-            else:
-                with open(path, 'w') as f:
-                    json.dump(data, f, indent=2)
-            print(f"Saved: {path}")
+        # Function to safely load pickle that might be gzipped
+        def safe_load_pickle(content, description=""):
+            """Load pickle content, handling gzipped content."""
+            print(f"  Loading {description}...")
+            
+            # Check if content is still gzipped (in case download function didn't handle it)
+            if is_gzipped(content):
+                print(f"  Content is gzipped, decompressing first...")
+                content = decompress_gzip(content)
+            
+            # Now try to unpickle
+            try:
+                data = pickle.loads(content)
+                print(f"  Successfully loaded {description}")
+                return data
+            except pickle.UnpicklingError as e:
+                print(f"  Pickle error: {e}")
+                
+                # Save for debugging
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as f:
+                    f.write(content)
+                    print(f"  Saved problematic content to: {f.name}")
+                
+                # Check if it might be JSON instead
+                if content.startswith(b'{') or content.startswith(b'['):
+                    print("  Content appears to be JSON, trying to parse as JSON...")
+                    try:
+                        return json.loads(content.decode('utf-8'))
+                    except:
+                        pass
+                
+                raise
+            except Exception as e:
+                print(f"  Unexpected error: {type(e).__name__}: {e}")
+                raise
+
+        # Function to load CSV that might be gzipped
+        def load_csv_content(content, description=""):
+            """Load CSV content, handling gzipped content."""
+            print(f"  Loading {description}...")
+            
+            if is_gzipped(content):
+                print(f"  CSV is gzipped, decompressing...")
+                content = decompress_gzip(content)
+            
+            return pd.read_csv(BytesIO(content))
+
+        # Function to load JSON that might be gzipped
+        def load_json_content(content, description=""):
+            """Load JSON content, handling gzipped content."""
+            print(f"  Loading {description}...")
+            
+            if is_gzipped(content):
+                print(f"  JSON is gzipped, decompressing...")
+                content = decompress_gzip(content)
+            
+            return json.loads(content.decode('utf-8'))
 
         print("[STEP 1] Downloading all data from CDN URLs...")
         
@@ -196,12 +265,12 @@ implementation:
         print("\\n[STEP 2] Processing downloaded data...")
         
         # Parse CSV data
-        train_x_df = pd.read_csv(BytesIO(train_x_content))
-        train_y_df = pd.read_csv(BytesIO(train_y_content))
-        test_data_df = pd.read_csv(BytesIO(test_data_content))
+        print("\\nParsing CSV files...")
+        train_x_df = load_csv_content(train_x_content, "train X CSV")
+        train_y_df = load_csv_content(train_y_content, "train y CSV")
+        test_data_df = load_csv_content(test_data_content, "test data CSV")
         
         # For test data, we need to separate features from target
-        # Assuming test_data contains both features and target
         if args.target_column in test_data_df.columns:
             test_x_df = test_data_df.drop(columns=[args.target_column])
             test_y_df = test_data_df[[args.target_column]]
@@ -222,16 +291,21 @@ implementation:
         task_type = pipeline_config.get('task', 'classification')
         
         # Parse pickled objects
-        preprocessor = pickle.loads(preprocessor_content)
-        feature_selector = pickle.loads(feature_selector_content)
-        pca_model = pickle.loads(pca_model_content)
+        print("\\nLoading pickle files...")
+        preprocessor = safe_load_pickle(preprocessor_content, "preprocessor pickle")
+        feature_selector = safe_load_pickle(feature_selector_content, "feature selector pickle")
+        pca_model = safe_load_pickle(pca_model_content, "PCA model pickle")
         
         # Parse metadata
-        preprocessor_metadata = json.loads(preprocessor_metadata_content)
-        pca_metadata = json.loads(pca_metadata_content)
-        combined_pickle_data = pickle.loads(pickle_content)
-        config_data = pickle.loads(config_content)
+        print("\\nLoading metadata files...")
+        preprocessor_metadata = load_json_content(preprocessor_metadata_content, "preprocessor metadata")
+        pca_metadata = load_json_content(pca_metadata_content, "PCA metadata")
         
+        print("\\nLoading combined files...")
+        combined_pickle_data = safe_load_pickle(pickle_content, "combined pickle")
+        config_data = safe_load_pickle(config_content, "config pickle")
+        
+        print(f"\\nData Summary:")
         print(f"Train X shape: {train_x_df.shape}")
         print(f"Train y shape: {train_y_df.shape}")
         print(f"Test X shape: {test_x_df.shape}")
@@ -271,12 +345,7 @@ implementation:
             'test_X_shape': test_x_df.shape,
             'test_y_shape': test_y_df.shape,
             'data_source': 'CDN',
-            'cdn_urls': {
-                'pickle_cdn_url': args.pickle_cdn_url,
-                'train_x_cdn': args.train_x_cdn,
-                'train_y_cdn': args.train_y_cdn,
-                'test_data_cdn': args.test_data_cdn
-            }
+            'compression_detected': True  # Indicate that we handled gzip
         }
 
         # Create Dataset format outputs for XGBoost
@@ -375,8 +444,20 @@ implementation:
                 'can_transform_target': hasattr(preprocessor, 'transform_target'),
                 'can_inverse_transform_target': hasattr(preprocessor, 'inverse_transform_target')
             },
-            'cdn_download': True
+            'cdn_download': True,
+            'gzip_handled': True
         }
+
+        # Function to save output
+        def save_output(path, data, is_pickle=True):
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            if is_pickle:
+                with open(path, 'wb') as f:
+                    pickle.dump(data, f)
+            else:
+                with open(path, 'w') as f:
+                    json.dump(data, f, indent=2)
+            print(f"Saved: {path}")
 
         print("\\n[STEP 4] Saving all outputs...")
         
@@ -413,6 +494,7 @@ implementation:
         print(f"✓ Preprocessor: {'Available' if preprocessor else 'Not available'}")
         print(f"✓ Feature selector: {'Available' if feature_selector else 'Not available'}")
         print(f"✓ PCA model: {'Available' if pca_model else 'Not available'}")
+        print(f"✓ Gzip handling: {'Enabled' if True else 'Disabled'}")
         print("="*80)
         print(f"Outputs saved:")
         print(f"  - Dataset files: 4 files")
