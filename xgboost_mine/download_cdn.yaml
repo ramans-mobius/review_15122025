@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader
+name: XGBoost Data Downloader v2
 description: Downloads all data from CDN URLs and prepares for XGBoost pipeline
 inputs:
   # CDN URLs from trigger
@@ -139,7 +139,7 @@ implementation:
             url = url.replace("%2528", "(")  # Double-encoded (
             url = url.replace("%2529", ")")  # Double-encoded )
             
-            print(f"Decoded URL preview: {url[:100]}...")
+            print(f"Decoded URL preview: {url}...")
             return url
 
         # Function to download from CDN
@@ -148,7 +148,7 @@ implementation:
             try:
                 # Decode URL first
                 decoded_url = decode_cdn_url(url)
-                print(f"Downloading {description} from: {decoded_url[:100]}...")
+                print(f"Downloading {description} from: {decoded_url}...")
                 
                 response = requests.get(decoded_url, timeout=60)
                 response.raise_for_status()
@@ -272,10 +272,10 @@ implementation:
             'test_y_shape': test_y_df.shape,
             'data_source': 'CDN',
             'cdn_urls': {
-                'pickle_cdn_url': args.pickle_cdn_url[:100] + '...',
-                'train_x_cdn': args.train_x_cdn[:100] + '...',
-                'train_y_cdn': args.train_y_cdn[:100] + '...',
-                'test_data_cdn': args.test_data_cdn[:100] + '...'
+                'pickle_cdn_url': args.pickle_cdn_url,
+                'train_x_cdn': args.train_x_cdn,
+                'train_y_cdn': args.train_y_cdn,
+                'test_data_cdn': args.test_data_cdn
             }
         }
 
