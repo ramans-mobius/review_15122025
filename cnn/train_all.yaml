@@ -1,4 +1,4 @@
-name: Train
+name: Train v2
 description: Trains a CNN model using nesyfactory and processes training history into flattened format
 inputs:
   - name: data_path
@@ -8,17 +8,14 @@ inputs:
   - name: model_input
     type: Model
     description: "Input model (either freshly built or loaded from CDN)"
-    optional: true
   - name: mapping_json
     type: String
     description: "Mapping configuration for history processing"
-    optional: true
+    default: "{}"
   - name: max_history_rows
     type: Integer
     description: "Maximum number of history rows to output"
-    default: 5
-    optional: true
-
+    default: "5"
 outputs:
   - name: trained_model
     type: Model
