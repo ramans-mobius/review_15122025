@@ -1,4 +1,4 @@
-name: Build or Load Model v2
+name: Build or Load Model
 description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN
 inputs:
   - name: config_str
@@ -124,7 +124,7 @@ implementation:
             
             # Set default values if not provided
             defaults = {
-                'output_dim': 10,
+                'output_dim': 2,
                 'input_channels': 3,
                 'input_size': [224, 224],
                 'pretrained': True,
@@ -166,6 +166,7 @@ implementation:
             print(f"Model built from scratch and saved to: {args.model_out}")
             print(f"Updated config saved to: {args.config_updated}")
             print(f"Model info saved to: {args.model_info_out}")
+        
     args:
       - --model_name
       - {inputValue: model_name}
