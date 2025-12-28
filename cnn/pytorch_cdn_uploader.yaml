@@ -1,0 +1,193 @@
+name: PyTorch CDN Uploader
+description: Uploads PyTorch model files (.pt, .pth) to CDN and returns the public URL. Handles both file paths and dataset inputs.
+inputs:
+  - {name: trained_model, description: "Trained PyTorch model file or directory containing model files (.pt, .pth)"}
+  - {name: bearer_token, type: String, description: "Bearer token for authentication"}
+outputs:
+  - {name: model_cdn_url, type: String, description: "CDN URL where the uploaded .pt model file is accessible"}
+implementation:
+  container:
+    image: python:3.9-slim
+    command:
+      - sh
+      - -c
+      - |
+        apt-get update && apt-get install -y curl
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import subprocess
+        import json
+        import os
+        import glob
+
+        parser = argparse.ArgumentParser(description="Upload PyTorch model to CDN.")
+        parser.add_argument('--trained_model', type=str, required=True, 
+                           help='Path to the trained PyTorch model file or directory.')
+        parser.add_argument('--bearer_token', type=str, required=True, 
+                           help='Bearer token for authentication.')
+        parser.add_argument('--model_cdn_url', type=str, required=True, 
+                           help='Path to save the resulting CDN URL.')
+        args = parser.parse_args()
+
+        bearer_token = args.bearer_token
+
+        def find_model_file(model_path):
+            '''Find the actual .pt or .pth model file from the input path'''
+            print(f"Searching for model files in: {model_path}")
+            
+            # If it's a file, check if it's a model file
+            if os.path.isfile(model_path):
+                if model_path.endswith(('.pt', '.pth')):
+                    print(f"Found model file: {model_path}")
+                    return model_path
+                else:
+                    print(f"Warning: Input file {model_path} is not a .pt or .pth file")
+                    return model_path  # Still try to upload it
+            
+            # If it's a directory, search for model files
+            if os.path.isdir(model_path):
+                # Look for common PyTorch model file patterns
+                model_patterns = ['*.pt', '*.pth', 'model.*', '*.bin']
+                found_files = []
+                
+                for pattern in model_patterns:
+                    matches = glob.glob(os.path.join(model_path, pattern))
+                    found_files.extend(matches)
+                
+                # Also check for common model filenames
+                common_names = [
+                    'model.pt', 'model.pth', 'pytorch_model.bin',
+                    'weights.pt', 'weights.pth', 'checkpoint.pt', 'checkpoint.pth'
+                ]
+                
+                for name in common_names:
+                    full_path = os.path.join(model_path, name)
+                    if os.path.exists(full_path):
+                        found_files.append(full_path)
+                
+                # Remove duplicates and sort by priority (.pt first)
+                found_files = list(set(found_files))
+                found_files.sort(key=lambda x: (x.endswith('.pt'), x), reverse=True)
+                
+                if found_files:
+                    print(f"Found {len(found_files)} model files:")
+                    for f in found_files:
+                        print(f"  - {f}")
+                    main_model = found_files[0]
+                    print(f"Using main model file: {main_model}")
+                    return main_model
+                else:
+                    # If no specific patterns found, get all files and look for the largest one
+                    all_files = [os.path.join(model_path, f) for f in os.listdir(model_path) 
+                               if os.path.isfile(os.path.join(model_path, f))]
+                    
+                    if all_files:
+                        # Find the largest file (likely the model weights)
+                        largest_file = max(all_files, key=lambda x: os.path.getsize(x))
+                        print(f"No specific model files found. Using largest file: {largest_file}")
+                        return largest_file
+                    else:
+                        raise FileNotFoundError(f"No files found in directory: {model_path}")
+            
+            raise FileNotFoundError(f"Model path not found or inaccessible: {model_path}")
+
+        def upload_model_to_cdn(model_path, output_url_path):
+            '''Upload the model file to CDN and return the URL'''
+            
+            actual_model_path = find_model_file(model_path)
+            filename = os.path.basename(actual_model_path)
+            file_size = os.path.getsize(actual_model_path)
+            
+            print(f"Preparing to upload model:")
+            print(f"  File: {filename}")
+            print(f"  Size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+            print(f"  Type: {os.path.splitext(filename)[1]}")
+            
+            # Create upload URL with model-specific parameters
+            upload_url = f"https://igs.gov-cloud.ai/mobius-content-service/v1.0/content/upload?filePath=models/pytorch/{filename}&contentTags=pytorch,model,ai,ml"
+            
+            curl_command = [
+                "curl",
+                "--location", upload_url,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--form", f"file=@{actual_model_path}",
+                "--fail",
+                "--show-error"
+            ]
+            
+            print("Starting upload...")
+            
+            try:
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    check=True,
+                    text=True
+                )
+                
+                print("Upload completed successfully!")
+                response_json = json.loads(process.stdout)
+                relative_cdn_url = response_json.get("cdnUrl")
+                
+                if not relative_cdn_url:
+                    raise ValueError("CDN response missing 'cdnUrl' field")
+                
+                full_cdn_url = f"https://cdn-new.gov-cloud.ai{relative_cdn_url}"
+                print(f"Model uploaded to: {full_cdn_url}")
+                
+                # Save the CDN URL to output path
+                output_dir = os.path.dirname(output_url_path)
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                
+                with open(output_url_path, "w") as f:
+                    f.write(full_cdn_url)
+                
+                print(f"CDN URL saved to: {output_url_path}")
+                return full_cdn_url
+                
+            except subprocess.CalledProcessError as e:
+                print(f"Upload failed with exit code {e.returncode}")
+                print(f"Error output: {e.stderr}")
+                if e.stdout:
+                    print(f"Server response: {e.stdout}")
+                raise
+            except json.JSONDecodeError as e:
+                print(f"Failed to parse server response as JSON: {e}")
+                print(f"Raw response: {process.stdout}")
+                raise
+            except Exception as e:
+                print(f"Unexpected error during upload: {e}")
+                raise
+
+        try:
+            print("=== PyTorch Model CDN Uploader ===")
+            print(f"Input path: {args.trained_model}")
+            
+            # Verify input exists
+            if not os.path.exists(args.trained_model):
+                raise FileNotFoundError(f"Input path does not exist: {args.trained_model}")
+            
+            cdn_url = upload_model_to_cdn(args.trained_model, args.model_cdn_url)
+            
+            print("=== UPLOAD SUCCESS ===")
+            print(f"Your trained model is now available at:")
+            print(f"  {cdn_url}")
+            print("You can use this URL to load the model in other applications.")
+            
+        except Exception as e:
+            print("=== UPLOAD FAILED ===")
+            print(f"Error: {e}")
+            raise
+
+    args:
+      - --trained_model
+      - {inputPath: trained_model}
+      - --bearer_token
+      - {inputValue: bearer_token}
+      - --model_cdn_url
+      - {outputPath: model_cdn_url}
