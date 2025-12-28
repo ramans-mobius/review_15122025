@@ -1,4 +1,4 @@
-name: Trigger XGBoost Pipeline with CDN v2
+name: Trigger XGBoost Pipeline with CDN v4
 description: Reads CDN URLs from files and triggers XGBoost pipeline
 inputs:
   # ALL inputs are FILE PATHS containing CDN URLs from Upload brick
@@ -126,7 +126,7 @@ implementation:
             with open(file_path, "r") as f:
                 cdn_url = f.read().strip()
             
-            print(f"Read from {os.path.basename(file_path)}: {cdn_url[:100]}...")
+            print(f"Read from {os.path.basename(file_path)}: {cdn_url}...")
             return cdn_url
 
         # Function to encode URLs with proper replacements
