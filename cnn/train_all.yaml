@@ -1,4 +1,4 @@
-name: Train v1
+name: Train v2
 description: Trains a CNN model using nesyfactory and processes training history into flattened format
 inputs:
   - name: data_path
@@ -162,9 +162,8 @@ implementation:
                 "total_epochs": epochs
             }
 
-        # History processing functions
+        # History processing functions - MODIFIED TO MATCH ProcessHistory brick
         def flatten_forward_forward_history(history, max_rows=5):
-
             rows = []
             epoch = 0
 
@@ -176,8 +175,6 @@ implementation:
                     for loss_idx, loss in enumerate(losses):
                         rows.append({
                             "epoch": epoch,
-                            "block": block_idx + 1,
-                            "epoch_in_block": loss_idx + 1,
                             "loss": float(loss)
                         })
                         epoch += 1
@@ -186,7 +183,6 @@ implementation:
             return rows[:max_rows]
 
         def flatten_cafo_history(history, max_rows=5):
-        
             rows = []
             epoch = 0
 
@@ -195,48 +191,32 @@ implementation:
                 
                 for block_idx, block in enumerate(block_results):
                     train_losses = block.get("train_losses", [])
-                    val_losses = block.get("val_losses", [])
                     
                     for loss_idx in range(len(train_losses)):
-                        row = {
+                        rows.append({
                             "epoch": epoch,
-                            "block": block_idx + 1,
-                            "epoch_in_block": loss_idx + 1,
-                            "train_loss": float(train_losses[loss_idx]) if loss_idx < len(train_losses) else None
-                        }
-                        
-                        if val_losses and loss_idx < len(val_losses):
-                            row["val_loss"] = float(val_losses[loss_idx])
-                            
-                        rows.append(row)
+                            "loss": float(train_losses[loss_idx]) if loss_idx < len(train_losses) else None
+                        })
                         epoch += 1
             
             return rows[:max_rows]
 
         def flatten_backprop_history(history, max_rows=5):
-            
             rows = []
             
             if "results" in history:
                 results = history["results"]
                 train_losses = results.get("train_losses", [])
-                val_losses = results.get("val_losses", [])
                 
                 for epoch_idx in range(len(train_losses)):
-                    row = {
+                    rows.append({
                         "epoch": epoch_idx + 1,
-                        "train_loss": float(train_losses[epoch_idx]) if epoch_idx < len(train_losses) else None
-                    }
-                    
-                    if val_losses and epoch_idx < len(val_losses):
-                        row["val_loss"] = float(val_losses[epoch_idx])
-                        
-                    rows.append(row)
+                        "loss": float(train_losses[epoch_idx]) if epoch_idx < len(train_losses) else None
+                    })
             
             return rows[:max_rows]
 
         def process_training_history(history, max_rows=5):
-        
             training_mode = history.get("training_mode", "").lower()
             
             if "forward" in training_mode or "ff" in training_mode:
@@ -531,34 +511,21 @@ implementation:
         print("\\nProcessing training history...")
         processed_rows = process_training_history(history, args.max_history_rows)
         
-        # Load mapping JSON if provided
-        mapping = {}
-        if args.mapping_json:
-            try:
-                mapping = json.loads(args.mapping_json)
-                print(f"Loaded mapping with {len(mapping)} entries")
-            except:
-                print("Warning: Could not parse mapping JSON")
-        
-        # Create processed history output - SIMPLIFIED FORMAT
-        # This should match what downstream components expect
-        processed_history = {
-            "training_mode": training_mode,
-            "model_source": model_source,
-            "num_classes": num_classes,
-            "max_rows": args.max_history_rows,
-            "data": processed_rows,
-            "mapping": mapping
+        # Create processed history output - MATCHING ProcessHistory brick format
+        output = {
+            "data": processed_rows
         }
         
         with open(args.processed_history_json, "w") as f:
-            json.dump(processed_history, f, indent=2)
+            json.dump(output, f, indent=2)
 
         print(f"\\n✓ {training_mode} training completed successfully!")
         print(f"✓ Model saved to: {args.trained_model}")
         print(f"✓ Full history saved to: {args.training_history}")
         print(f"✓ Processed history saved to: {args.processed_history_json}")
         print(f"✓ Processed {len(processed_rows)} history rows")
+        print("\\nProcessed training history:")
+        print(json.dumps(output, indent=2))
         
     args:
       - --data_path
