@@ -1,5 +1,5 @@
-name: Train v2
-description: Trains a CNN model using nesyfactory and processes training history into flattened format
+name: Train v3
+description: Trains a CNN model using nesyfactory with CAFO and Forward-Forward support
 inputs:
   - name: data_path
     type: Dataset
@@ -104,40 +104,43 @@ implementation:
                 y.append(by)
             return torch.cat(X), torch.cat(y)
 
-        # Standard backpropagation training using nesyfactory's train_step
+        # Standard backpropagation training
         def train_backpropagation(model, X_train, y_train, X_val=None, y_val=None, 
                                   learning_rate=0.001, epochs=50, batch_size=32, verbose=True):
-         
             device = next(model.parameters()).device
-            
-            # Set optimizer parameters if needed
-            model.learning_rate = learning_rate
             
             # Create data loaders
             train_dataset = TensorDataset(X_train, y_train)
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
             
-            # Initialize optimizer and criterion using nesyfactory's method
-            model._init_optimizer_and_criterion()
+            # Setup optimizer and criterion
+            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+            criterion = torch.nn.CrossEntropyLoss()
             
             # Training metrics
             train_losses = []
             val_losses = []
             
-            # Training loop using nesyfactory's train_step
+            # Training loop
             for epoch in range(epochs):
                 model.train()
                 epoch_loss = 0.0
                 
                 for batch_X, batch_y in train_loader:
                     batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-                    loss = model.train_step(batch_X, batch_y)
-                    epoch_loss += loss
+                    optimizer.zero_grad()
+                    
+                    outputs = model(batch_X)
+                    loss = criterion(outputs, batch_y)
+                    loss.backward()
+                    optimizer.step()
+                    
+                    epoch_loss += loss.item()
                 
                 avg_train_loss = epoch_loss / len(train_loader)
                 train_losses.append(avg_train_loss)
                 
-                # Validation using nesyfactory's eval_step
+                # Validation
                 if X_val is not None and y_val is not None:
                     model.eval()
                     val_dataset = TensorDataset(X_val, y_val)
@@ -146,8 +149,9 @@ implementation:
                     val_loss = 0.0
                     for batch_X, batch_y in val_loader:
                         batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-                        metrics = model.eval_step(batch_X, batch_y)
-                        val_loss += metrics['loss']
+                        outputs = model(batch_X)
+                        loss = criterion(outputs, batch_y)
+                        val_loss += loss.item()
                     
                     avg_val_loss = val_loss / len(val_loader)
                     val_losses.append(avg_val_loss)
@@ -162,7 +166,7 @@ implementation:
                 "total_epochs": epochs
             }
 
-        # History processing functions - MODIFIED TO MATCH ProcessHistory brick
+        # History processing functions
         def flatten_forward_forward_history(history, max_rows=5):
             rows = []
             epoch = 0
@@ -179,7 +183,6 @@ implementation:
                         })
                         epoch += 1
             
-            # Take top N rows only (first N epochs)
             return rows[:max_rows]
 
         def flatten_cafo_history(history, max_rows=5):
@@ -207,12 +210,19 @@ implementation:
             if "results" in history:
                 results = history["results"]
                 train_losses = results.get("train_losses", [])
+                val_losses = results.get("val_losses", [])
                 
                 for epoch_idx in range(len(train_losses)):
-                    rows.append({
+                    row = {
                         "epoch": epoch_idx + 1,
                         "loss": float(train_losses[epoch_idx]) if epoch_idx < len(train_losses) else None
-                    })
+                    }
+                    
+                    # Add validation loss if available
+                    if epoch_idx < len(val_losses):
+                        row["validation_loss"] = float(val_losses[epoch_idx])
+                    
+                    rows.append(row)
             
             return rows[:max_rows]
 
@@ -247,7 +257,6 @@ implementation:
         train_loader = processed.train_loader
         test_loader = getattr(processed, "test_loader", None)
         num_classes = processed.num_classes
-        image_size = processed.image_size
 
         X_train, y_train = extract_tensors(train_loader)
         X_val, y_val = (extract_tensors(test_loader) if test_loader else (None, None))
@@ -258,7 +267,7 @@ implementation:
         model_cfg = cfg.get("model", {})
         training_cfg = cfg.get("training", {})
         
-        # Extract training mode flags from config
+        # Extract training mode flags
         use_cafo = model_cfg.get("use_cafo", False)
         use_forward_forward = model_cfg.get("use_forward_forward", False)
         
@@ -276,24 +285,17 @@ implementation:
         
         print(f"Training mode: {training_mode}")
 
-        # Build ResNet config for nesyfactory
+        # Build config for model
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Extract optimizer config
-        optimizer_cfg = training_cfg.get("optimizer", {})
         
         # Start with base config
         model_config = {}
         
         # Copy model configuration
-        if 'input_channels' in model_cfg:
-            model_config['input_channels'] = model_cfg['input_channels']
-        if 'variant' in model_cfg:
-            model_config['variant'] = model_cfg['variant']
-        if 'pretrained' in model_cfg:
-            model_config['pretrained'] = model_cfg['pretrained']
-        if 'dropout' in model_cfg:
-            model_config['dropout'] = model_cfg['dropout']
+        model_config['input_channels'] = model_cfg.get('input_channels', 3)
+        model_config['variant'] = model_cfg.get('variant', 'resnet50')
+        model_config['pretrained'] = model_cfg.get('pretrained', True)
+        model_config['dropout'] = model_cfg.get('dropout', 0.0)
         
         # Set output dimension
         model_config['output_dim'] = num_classes
@@ -307,53 +309,34 @@ implementation:
         
         # Training params (for backpropagation)
         if training_mode == "Backpropagation":
-            if 'learning_rate' in optimizer_cfg:
-                model_config['learning_rate'] = optimizer_cfg['learning_rate']
-            if 'epochs' in training_cfg:
-                model_config['epochs'] = training_cfg['epochs']
-            else:
-                model_config['epochs'] = 50
-            if 'batch_size' in training_cfg:
-                model_config['batch_size'] = training_cfg['batch_size']
-            else:
-                model_config['batch_size'] = 32
+            optimizer_cfg = training_cfg.get("optimizer", {})
+            model_config['learning_rate'] = optimizer_cfg.get('learning_rate', 0.001)
+            model_config['epochs'] = training_cfg.get('epochs', 50)
+            model_config['batch_size'] = training_cfg.get('batch_size', 32)
         
         # Add CAFO-specific params if CAFO mode
         if use_cafo:
-            if 'cafo_blocks' in model_cfg:
-                model_config['cafo_blocks'] = model_cfg['cafo_blocks']
-            if 'epochs_per_block' in model_cfg:
-                model_config['epochs_per_block'] = model_cfg['epochs_per_block']
-            if 'block_lr' in model_cfg:
-                model_config['block_lr'] = model_cfg['block_lr']
+            model_config['cafo_blocks'] = model_cfg.get('cafo_blocks', 4)
+            model_config['epochs_per_block'] = model_cfg.get('epochs_per_block', 50)
+            model_config['block_lr'] = model_cfg.get('block_lr', 0.001)
         
         # Add Forward-Forward params if FF mode
         if use_forward_forward:
             ff_cfg = model_cfg.get("forward_forward", {})
-            if 'ff_blocks' in ff_cfg:
-                model_config['ff_blocks'] = ff_cfg['ff_blocks']
-            if 'ff_epochs_per_block' in ff_cfg:
-                model_config['ff_epochs_per_block'] = ff_cfg['ff_epochs_per_block']
-            if 'ff_lr' in ff_cfg:
-                model_config['ff_lr'] = ff_cfg['ff_lr']
-            if 'threshold' in ff_cfg:
-                model_config['ff_threshold'] = ff_cfg['threshold']
-            if 'ff_goodness_dim' in ff_cfg:
-                model_config['ff_goodness_dim'] = ff_cfg['ff_goodness_dim']
+            model_config['ff_blocks'] = ff_cfg.get('ff_blocks', 4)
+            model_config['ff_epochs_per_block'] = ff_cfg.get('ff_epochs_per_block', 50)
+            model_config['ff_lr'] = ff_cfg.get('ff_lr', 0.01)
+            model_config['ff_threshold'] = ff_cfg.get('threshold', 2.0)
+            model_config['ff_goodness_dim'] = ff_cfg.get('ff_goodness_dim', 128)
 
         # Print config
         print(f"\\nConfiguration:")
-        print(f"  Variant: {model_config.get('variant', 'Not specified')}")
-        print(f"  Output dim: {model_config.get('output_dim', 'Not specified')}")
+        print(f"  Variant: {model_config.get('variant', 'resnet50')}")
+        print(f"  Output dim: {model_config.get('output_dim')}")
         print(f"  Dropout: {model_config.get('dropout', 'Not specified')}")
         print(f"  Training mode: {training_mode}")
-        
-        if training_mode == "Backpropagation":
-            print(f"  Learning rate: {model_config.get('learning_rate', 'Not specified')}")
-            print(f"  Batch size: {model_config.get('batch_size', 'Not specified')}")
-            print(f"  Epochs: {model_config.get('epochs', 'Not specified')}")
 
-        # Create or load model using nesyfactory
+        # Create or load model
         net = None
         model_source = "freshly_created"
         
@@ -361,86 +344,111 @@ implementation:
             # Load existing model
             print(f"\\nLoading model from: {args.model_input}")
             try:
-                # Try to load the saved checkpoint
+                # Load the checkpoint
                 checkpoint = torch.load(args.model_input, map_location='cpu')
                 
-                # Check if it's a full checkpoint or just state dict
+                # Check if it's a full checkpoint
                 if isinstance(checkpoint, dict) and 'config' in checkpoint:
-                    # Full checkpoint format from nesyfactory
                     print("Loading full checkpoint with config...")
                     checkpoint_config = checkpoint.get('config', {})
                     
-                    # Update model_config with checkpoint config (keeping user config as priority)
+                    # Update model_config with checkpoint config
                     for key, value in checkpoint_config.items():
-                        if key not in model_config or model_config[key] == 'Not specified':
+                        if key not in model_config:
                             model_config[key] = value
                     
-                    # Determine model architecture
-                    if 'architecture' in checkpoint_config:
-                        model_arch = checkpoint_config['architecture']
-                    elif 'variant' in checkpoint_config:
-                        model_arch = 'resnet'  # Default to ResNet
+                    # Determine which ResNet class to use
+                    if use_cafo or use_forward_forward:
+                        print(f"Creating Enhanced ResNet for {training_mode} training...")
+                        try:
+                            from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                            net = EnhancedResNet(model_config)
+                        except ImportError as e:
+                            print(f"Warning: Could not import Enhanced ResNet: {e}")
+                            net = CNNFactory.create_model('resnet', model_config)
                     else:
-                        model_arch = 'resnet'
-                    
-                    # Create model using nesyfactory
-                    print(f"Creating {model_arch} model using CNNFactory...")
-                    net = CNNFactory.create_model(model_arch, model_config)
+                        print("Creating standard ResNet for backpropagation...")
+                        net = CNNFactory.create_model('resnet', model_config)
                     
                     # Load state dict
                     state_dict = checkpoint.get('model_state_dict', checkpoint)
                     try:
-                        net.load_state_dict(state_dict)
-                        print("✓ Successfully loaded model weights")
+                        net.load_state_dict(state_dict, strict=False)
+                        print("✓ Loaded model weights (strict=False)")
                         model_source = "loaded_checkpoint"
                     except Exception as e:
-                        print(f"⚠ Warning: Could not load weights exactly: {e}")
-                        print("Loading with strict=False...")
-                        net.load_state_dict(state_dict, strict=False)
-                        print("✓ Loaded model weights with strict=False")
-                        model_source = "loaded_checkpoint_strict_false"
+                        print(f"Warning: Could not load weights: {e}")
+                        print("Creating fresh model instead...")
+                        if use_cafo or use_forward_forward:
+                            try:
+                                from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                                net = EnhancedResNet(model_config)
+                            except ImportError:
+                                net = CNNFactory.create_model('resnet', model_config)
+                        else:
+                            net = CNNFactory.create_model('resnet', model_config)
+                        model_source = "fresh_after_failed_load"
                         
                 else:
-                    # Just state dict - need to create model first
+                    # Just state dict
                     print("Loading model state dict...")
                     
-                    # Need to determine architecture
-                    if 'variant' not in model_config or model_config['variant'] == 'Not specified':
-                        model_config['variant'] = 'resnet18'
-                    
-                    print(f"Creating {model_config.get('variant')} model using CNNFactory...")
-                    net = CNNFactory.create_model('resnet', model_config)
+                    if use_cafo or use_forward_forward:
+                        try:
+                            from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                            net = EnhancedResNet(model_config)
+                        except ImportError:
+                            net = CNNFactory.create_model('resnet', model_config)
+                    else:
+                        net = CNNFactory.create_model('resnet', model_config)
                     
                     try:
-                        net.load_state_dict(checkpoint)
-                        print("✓ Successfully loaded model weights")
+                        net.load_state_dict(checkpoint, strict=False)
+                        print("✓ Successfully loaded model weights (strict=False)")
                         model_source = "loaded_state_dict"
                     except Exception as e:
-                        print(f"⚠ Warning: Could not load weights: {e}")
-                        print("Creating fresh model instead...")
-                        net = CNNFactory.create_model('resnet', model_config)
+                        print(f"Warning: Could not load weights: {e}")
+                        if use_cafo or use_forward_forward:
+                            try:
+                                from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                                net = EnhancedResNet(model_config)
+                            except ImportError:
+                                net = CNNFactory.create_model('resnet', model_config)
+                        else:
+                            net = CNNFactory.create_model('resnet', model_config)
                         model_source = "fresh_after_failed_load"
                     
             except Exception as e:
                 print(f"Error loading model: {e}")
                 print("Creating fresh model instead...")
-                # Fall back to creating fresh model
-                if 'variant' not in model_config or model_config['variant'] == 'Not specified':
-                    model_config['variant'] = 'resnet18'
-                net = CNNFactory.create_model('resnet', model_config)
+                if use_cafo or use_forward_forward:
+                    try:
+                        from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                        net = EnhancedResNet(model_config)
+                    except ImportError:
+                        net = CNNFactory.create_model('resnet', model_config)
+                else:
+                    net = CNNFactory.create_model('resnet', model_config)
                 model_source = "fresh_after_failed_load"
         else:
-            # Create fresh model using nesyfactory
+            # Create fresh model
             print("\\nNo model input provided, creating fresh model...")
-            if 'variant' not in model_config or model_config['variant'] == 'Not specified':
-                model_config['variant'] = 'resnet18'
-                
-            print(f"Creating {model_config.get('variant')} model using CNNFactory...")
-            net = CNNFactory.create_model('resnet', model_config)
+            if use_cafo or use_forward_forward:
+                try:
+                    from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                    print(f"Creating Enhanced ResNet for {training_mode} training...")
+                    net = EnhancedResNet(model_config)
+                except ImportError as e:
+                    print(f"Warning: Could not import Enhanced ResNet: {e}")
+                    print("Falling back to standard ResNet")
+                    net = CNNFactory.create_model('resnet', model_config)
+            else:
+                print("Creating standard ResNet for backpropagation...")
+                net = CNNFactory.create_model('resnet', model_config)
             model_source = "fresh_no_input"
 
         net = net.to(device)
-        print(f"Model created with {net.get_num_parameters()} parameters")
+        print(f"Model created with {net.get_num_parameters() if hasattr(net, 'get_num_parameters') else sum(p.numel() for p in net.parameters())} parameters")
         print(f"Model source: {model_source}")
 
         # Train based on mode
@@ -448,28 +456,64 @@ implementation:
         
         if use_cafo:
             # Use nesyfactory's CAFO training method
-            results = net.train_cafo(
-                X_train.to(device),
-                y_train.to(device),
-                X_val.to(device) if X_val is not None else None,
-                y_val.to(device) if y_val is not None else None,
-                verbose=True
-            )
-            model_trained_flag = {"cafo_trained": True}
-            
+            if hasattr(net, 'train_cafo'):
+                results = net.train_cafo(
+                    X_train.to(device),
+                    y_train.to(device),
+                    X_val.to(device) if X_val is not None else None,
+                    y_val.to(device) if y_val is not None else None,
+                    verbose=True
+                )
+                model_trained_flag = {"cafo_trained": True}
+            else:
+                print("Warning: Model doesn't have train_cafo method, using backpropagation")
+                learning_rate = model_config.get('learning_rate', 0.001)
+                epochs = model_config.get('epochs', 50)
+                batch_size = model_config.get('batch_size', 32)
+                results = train_backpropagation(
+                    net,
+                    X_train.to(device),
+                    y_train.to(device),
+                    X_val.to(device) if X_val is not None else None,
+                    y_val.to(device) if y_val is not None else None,
+                    learning_rate=learning_rate,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    verbose=True
+                )
+                model_trained_flag = {"backprop_trained": True}
+                
         elif use_forward_forward:
             # Use nesyfactory's Forward-Forward training method
-            results = net.train_forward_forward(
-                X_train.to(device),
-                y_train.to(device),
-                X_val.to(device) if X_val is not None else None,
-                y_val.to(device) if y_val is not None else None,
-                verbose=True
-            )
-            model_trained_flag = {"ff_trained": True}
+            if hasattr(net, 'train_forward_forward'):
+                results = net.train_forward_forward(
+                    X_train.to(device),
+                    y_train.to(device),
+                    X_val.to(device) if X_val is not None else None,
+                    y_val.to(device) if y_val is not None else None,
+                    verbose=True
+                )
+                model_trained_flag = {"ff_trained": True}
+            else:
+                print("Warning: Model doesn't have train_forward_forward method, using backpropagation")
+                learning_rate = model_config.get('learning_rate', 0.001)
+                epochs = model_config.get('epochs', 50)
+                batch_size = model_config.get('batch_size', 32)
+                results = train_backpropagation(
+                    net,
+                    X_train.to(device),
+                    y_train.to(device),
+                    X_val.to(device) if X_val is not None else None,
+                    y_val.to(device) if y_val is not None else None,
+                    learning_rate=learning_rate,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    verbose=True
+                )
+                model_trained_flag = {"backprop_trained": True}
             
         else:
-            # Standard backpropagation using nesyfactory's methods
+            # Standard backpropagation
             learning_rate = model_config.get('learning_rate', 0.001)
             epochs = model_config.get('epochs', 50)
             batch_size = model_config.get('batch_size', 32)
@@ -493,8 +537,15 @@ implementation:
         os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
         os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
 
-        # Save model using nesyfactory's save_model method
-        net.save_model(args.trained_model)
+        # Save model checkpoint
+        checkpoint = {
+            'model_state_dict': net.state_dict(),
+            'config': model_config,
+            'training_mode': training_mode,
+            'model_source': model_source,
+            'num_classes': num_classes
+        }
+        torch.save(checkpoint, args.trained_model)
 
         # Save full training history
         history = {
@@ -507,15 +558,58 @@ implementation:
         with open(args.training_history, "w") as f:
             json.dump(history, f, indent=2)
 
-        # Process training history into flattened format
+        # Process training history into flattened format - OPTION 3 FIX
         print("\\nProcessing training history...")
         processed_rows = process_training_history(history, args.max_history_rows)
-        
-        # Create processed history output - MATCHING ProcessHistory brick format
-        output = {
-            "data": processed_rows
-        }
-        
+
+        print(f"\\nDEBUG: Processed {len(processed_rows)} history rows")
+        for i, row in enumerate(processed_rows):
+            print(f"  Row {i}: {row}")
+
+        # Create output compatible with Update Schema Row AND ProcessHistory
+        if processed_rows and len(processed_rows) > 0:
+            # Use last row (most recent training results)
+            last_row = processed_rows[-1]
+            
+            # Create combined output
+            output = {
+                # Flat fields for Update Schema Row (using last row)
+                "epoch": int(last_row.get("epoch", len(processed_rows))),
+                "loss": float(last_row.get("loss", 0.0))
+            }
+            
+            # Add validation_loss if available
+            if "validation_loss" in last_row:
+                output["validation_loss"] = float(last_row.get("validation_loss", 0.0))
+            elif "val_loss" in last_row:
+                output["validation_loss"] = float(last_row.get("val_loss", 0.0))
+            
+            # Add accuracy fields if available
+            if "accuracy" in last_row:
+                output["accuracy"] = float(last_row.get("accuracy", 0.0))
+            
+            if "validation_accuracy" in last_row:
+                output["validation_accuracy"] = float(last_row.get("validation_accuracy", 0.0))
+            
+            # Include the full array for ProcessHistory compatibility
+            output["data"] = processed_rows
+            
+        else:
+            # No training history available
+            output = {
+                "epoch": 0,
+                "loss": 0.0,
+                "validation_loss": 0.0,
+                "accuracy": 0.0,
+                "validation_accuracy": 0.0,
+                "data": []
+            }
+
+        print(f"\\nFinal output format:")
+        print(f"  Flat fields: { {k: v for k, v in output.items() if k != 'data'} }")
+        print(f"  Array data: {len(output.get('data', []))} rows")
+
+        # Save the output
         with open(args.processed_history_json, "w") as f:
             json.dump(output, f, indent=2)
 
@@ -524,8 +618,6 @@ implementation:
         print(f"✓ Full history saved to: {args.training_history}")
         print(f"✓ Processed history saved to: {args.processed_history_json}")
         print(f"✓ Processed {len(processed_rows)} history rows")
-        print("\\nProcessed training history:")
-        print(json.dumps(output, indent=2))
         
     args:
       - --data_path
