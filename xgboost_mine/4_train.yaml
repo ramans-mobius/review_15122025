@@ -190,9 +190,10 @@ implementation:
                 'rmse': float(np.sqrt(mean_squared_error(y_val, y_pred_val))),
                 'mse': float(mean_squared_error(y_val, y_pred_val))
             }
-            # Calculate loss values for schema
+            # Calculate loss values for schema - use MSE for regression
             train_loss = train_metrics['mse']
             val_loss = val_metrics['mse']
+            # For regression, use R² as "accuracy" metric for schema compatibility
             train_accuracy = train_metrics['r2_score']
             val_accuracy = val_metrics['r2_score']
         else:
@@ -243,6 +244,9 @@ implementation:
             train_accuracy = train_metrics['accuracy']
             val_accuracy = val_metrics['accuracy']
 
+        print(f"Training metrics: {train_metrics}")
+        print(f"Validation metrics: {val_metrics}")
+
         # Create epoch data (simplified for now)
         n_estimators = final_params.get('n_estimators', final_params.get('iterations', 100))
         epoch_data = [{
@@ -290,18 +294,13 @@ implementation:
         }
 
         # Create schema-specific metrics
+        # FIX: Ensure all metrics are included for both regression and classification
         schema_metrics = {
             'epoch': n_estimators,
             'loss': train_loss,
             'accuracy': train_accuracy,
             'validation_loss': val_loss,
             'validation_accuracy': val_accuracy,
-            # Include individual metrics
-            'test_accuracy': val_metrics['accuracy'],
-            'test_precision': val_metrics.get('precision', 0),
-            'test_recall': val_metrics.get('recall', 0),
-            'test_f1_score': val_metrics.get('f1_score', 0),
-            'test_roc_auc': val_metrics.get('roc_auc', 0),
             'algorithm': algorithm,
             'task': task,
             'target_name': target_name,
@@ -310,6 +309,23 @@ implementation:
             'train_samples': len(X_train),
             'validation_samples': len(X_val)
         }
+        
+        # Add task-specific metrics
+        if task == 'classification':
+            schema_metrics.update({
+                'test_accuracy': val_metrics.get('accuracy', 0),
+                'test_precision': val_metrics.get('precision', 0),
+                'test_recall': val_metrics.get('recall', 0),
+                'test_f1_score': val_metrics.get('f1_score', 0),
+                'test_roc_auc': val_metrics.get('roc_auc', 0)
+            })
+        else:  # regression
+            schema_metrics.update({
+                'test_r2_score': val_metrics.get('r2_score', 0),
+                'test_mae': val_metrics.get('mae', 0),
+                'test_rmse': val_metrics.get('rmse', 0),
+                'test_mse': val_metrics.get('mse', 0)
+            })
 
         # Save outputs
         os.makedirs(os.path.dirname(args.trained_model) or ".", exist_ok=True)
