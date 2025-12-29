@@ -16,7 +16,7 @@ outputs:
 
 implementation:
   container:
-    image: python:3.9-slim
+    image: gurpreetgandhi/nesy-factory:vtest4
     command:
       - sh
       - -c
