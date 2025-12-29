@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v4
+name: XGBoost Data Downloader v5
 description: Downloads all data from CDN URLs and converts to XGBoost pipeline format
 inputs:
   # CDN URLs from trigger
@@ -259,6 +259,47 @@ implementation:
             
             return json.loads(content.decode('utf-8'))
 
+        # FIXED: Function to save output with Argo directory handling
+        def save_output(path, data, is_pickle=True, filename=None):
+            """
+            Save data to output path, handling both Argo directory paths and file paths.
+            
+            In Argo Workflows:
+            - When {outputPath: name} is used, Argo creates a DIRECTORY at that path
+            - We need to write a file INSIDE that directory
+            """
+            # Determine if this is likely an Argo directory path
+            # Check if path has no file extension (common for Argo outputs)
+            has_extension = any(path.endswith(ext) for ext in ['.pkl', '.pickle', '.json', '.txt', '.csv', '.parquet'])
+            
+            if not has_extension:
+                # Likely an Argo directory path
+                os.makedirs(path, exist_ok=True)
+                # Create appropriate filename
+                if filename:
+                    file_path = os.path.join(path, filename)
+                else:
+                    # Generate filename based on data type
+                    if is_pickle:
+                        file_path = os.path.join(path, 'data.pkl')
+                    else:
+                        file_path = os.path.join(path, 'data.json')
+            else:
+                # It's a file path
+                os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+                file_path = path
+            
+            # Save the data
+            if is_pickle:
+                with open(file_path, 'wb') as f:
+                    pickle.dump(data, f)
+            else:
+                with open(file_path, 'w') as f:
+                    json.dump(data, f, indent=2)
+            
+            print(f"Saved: {file_path}")
+            return file_path
+
         print("[STEP 1] Downloading all data from CDN URLs...")
         
         # Download all files
@@ -423,6 +464,9 @@ implementation:
             'config': config
         }
         
+        # Create a compatible preprocessing pipeline
+        compatible_pipeline = PreprocessingPipeline(steps=[], target_encoder=None)
+        
         # Create feature info (matches Preprocessor brick)
         feature_info = {
             'original_features': len(feature_names),
@@ -470,47 +514,27 @@ implementation:
 
         print("\\n[STEP 4] Saving all outputs...")
         
-        # Function to save output with directory creation
-        def save_output(path, data, is_pickle=True):
-            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-            if is_pickle:
-                with open(path, 'wb') as f:
-                    pickle.dump(data, f)
-            else:
-                with open(path, 'w') as f:
-                    json.dump(data, f, indent=2)
-            print(f"Saved: {path}")
-        
-        # IMPORTANT: Save ALL outputs - one by one
         try:
             # Dataset outputs (matches DataLoader brick)
-            save_output(args.train_X, train_X_dict)
-            save_output(args.train_y, train_y_dict)
-            save_output(args.test_X, test_X_dict)
-            save_output(args.test_y, test_y_dict)
-            save_output(args.data_info, data_info, False)
+            save_output(args.train_X, train_X_dict, filename='train_X.pkl')
+            save_output(args.train_y, train_y_dict, filename='train_y.pkl')
+            save_output(args.test_X, test_X_dict, filename='test_X.pkl')
+            save_output(args.test_y, test_y_dict, filename='test_y.pkl')
+            save_output(args.data_info, data_info, is_pickle=False, filename='data_info.json')
             
             # Preprocessor outputs (matches Preprocessor brick)
-            save_output(args.processed_train_X, processed_train_X_dict)
-            save_output(args.processed_train_y, processed_train_y_dict)
-            
-            # Save preprocessing pipeline - FIXED
-            os.makedirs(os.path.dirname(args.preprocessing_pipeline) if os.path.dirname(args.preprocessing_pipeline) else ".", exist_ok=True)
-            # Create a compatible preprocessing pipeline
-            compatible_pipeline = PreprocessingPipeline(steps=[], target_encoder=None)
-            with open(args.preprocessing_pipeline, 'wb') as f:
-                cloudpickle.dump(compatible_pipeline, f)
-            print(f"Saved: {args.preprocessing_pipeline}")
-            
-            save_output(args.feature_info, feature_info, False)
-            save_output(args.weight_out, weight_config, False)
+            save_output(args.processed_train_X, processed_train_X_dict, filename='processed_train_X.pkl')
+            save_output(args.processed_train_y, processed_train_y_dict, filename='processed_train_y.pkl')
+            save_output(args.preprocessing_pipeline, compatible_pipeline, filename='preprocessing_pipeline.pkl')
+            save_output(args.feature_info, feature_info, is_pickle=False, filename='feature_info.json')
+            save_output(args.weight_out, weight_config, is_pickle=False, filename='weight_config.json')
             
             # Additional outputs
-            save_output(args.preprocessor_pickle, preprocessor)
-            save_output(args.preprocessor_metadata, preprocessor_metadata, False)
-            save_output(args.feature_selector, feature_selector)
-            save_output(args.pca_model, pca_model)
-            save_output(args.pca_metadata, pca_metadata, False)
+            save_output(args.preprocessor_pickle, preprocessor, filename='preprocessor.pkl')
+            save_output(args.preprocessor_metadata, preprocessor_metadata, is_pickle=False, filename='preprocessor_metadata.json')
+            save_output(args.feature_selector, feature_selector, filename='feature_selector.pkl')
+            save_output(args.pca_model, pca_model, filename='pca_model.pkl')
+            save_output(args.pca_metadata, pca_metadata, is_pickle=False, filename='pca_metadata.json')
             
         except Exception as e:
             print(f"ERROR saving outputs: {e}")
