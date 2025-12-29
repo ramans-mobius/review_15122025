@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v5
+name: XGBoost Data Downloader v6
 description: Downloads all data from CDN URLs and converts to XGBoost pipeline format
 inputs:
   # CDN URLs from trigger
@@ -261,13 +261,7 @@ implementation:
 
         # FIXED: Function to save output with Argo directory handling
         def save_output(path, data, is_pickle=True, filename=None):
-            """
-            Save data to output path, handling both Argo directory paths and file paths.
             
-            In Argo Workflows:
-            - When {outputPath: name} is used, Argo creates a DIRECTORY at that path
-            - We need to write a file INSIDE that directory
-            """
             # Determine if this is likely an Argo directory path
             # Check if path has no file extension (common for Argo outputs)
             has_extension = any(path.endswith(ext) for ext in ['.pkl', '.pickle', '.json', '.txt', '.csv', '.parquet'])
