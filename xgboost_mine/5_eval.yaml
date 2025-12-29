@@ -1,4 +1,4 @@
-name: Evaluator
+name: Evaluator v2
 description: Evaluates trained model on test data with proper schema output
 inputs:
   - name: trained_model
@@ -254,23 +254,49 @@ implementation:
         else:
             confusion_matrix_flat = []
 
-        # Create schema metrics with proper data types
+        # FIXED: Create schema metrics with proper data types for both regression and classification
         schema_metrics = {
-            'accuracy': str(metrics_dict.get('accuracy', 0.0)),
             'loss': str(loss_value),
             'confusion_matrix': confusion_matrix_flat,
-            'precision': float(metrics_dict.get('precision', 0.0)),
-            'recall': float(metrics_dict.get('recall', 0.0)),
-            'f1_score': float(metrics_dict.get('f1_score', 0.0)),
-            'roc_auc': float(metrics_dict.get('roc_auc', 0.0)),
-            'r2_score': float(metrics_dict.get('r2_score', 0.0)) if task_type == 'regression' else 0.0,
-            'mae': float(metrics_dict.get('mae', 0.0)) if task_type == 'regression' else 0.0,
-            'rmse': float(metrics_dict.get('rmse', 0.0)) if task_type == 'regression' else 0.0,
             'algorithm': algorithm,
             'task': task_type,
             'target_name': target_name,
             'test_samples': len(y_test)
         }
+        
+        # Add task-specific metrics
+        if task_type == 'classification':
+            # For classification, add accuracy and classification metrics
+            schema_metrics.update({
+                'accuracy': str(metrics_dict.get('accuracy', 0.0)),
+                'precision': float(metrics_dict.get('precision', 0.0)),
+                'recall': float(metrics_dict.get('recall', 0.0)),
+                'f1_score': float(metrics_dict.get('f1_score', 0.0)),
+                'roc_auc': float(metrics_dict.get('roc_auc', 0.0)),
+                # For regression metrics, set to 0 for classification
+                'r2_score': 0.0,
+                'mae': 0.0,
+                'rmse': 0.0,
+                'mse': 0.0,
+                'mape': 0.0
+            })
+        else:  # regression
+            # For regression, add regression metrics
+            # Use R² as "accuracy" for schema compatibility
+            r2_value = metrics_dict.get('r2_score', 0.0)
+            schema_metrics.update({
+                'accuracy': str(r2_value),  # Using R² as accuracy for regression
+                'r2_score': float(r2_value),
+                'mae': float(metrics_dict.get('mae', 0.0)),
+                'rmse': float(metrics_dict.get('rmse', 0.0)),
+                'mse': float(metrics_dict.get('mse', 0.0)),
+                'mape': float(metrics_dict.get('mape', 0.0)),
+                # For classification metrics, set to 0 for regression
+                'precision': 0.0,
+                'recall': 0.0,
+                'f1_score': 0.0,
+                'roc_auc': 0.0
+            })
 
         print("SCHEMA METRICS PREPARED:")
         for key, value in schema_metrics.items():
