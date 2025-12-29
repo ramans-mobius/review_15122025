@@ -1,4 +1,4 @@
-name: Trigger CNN Pipeline v7
+name: Trigger CNN Pipeline v8
 description: Triggers an Elyra Kubeflow pipeline for CNN training with DQN optimization.
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the uploaded pickle file"}
@@ -205,6 +205,13 @@ implementation:
             "version": 1
         }
 
+        print(f"\\n=== PAYLOAD FOR MANUAL TRIGGER ===")
+        print("=" * 80)
+        print("\\nFULL PAYLOAD JSON:")
+        print("=" * 80)
+        print(json.dumps(payload, indent=2))
+        print("=" * 80)
+        
         print(f"\\nTriggering CNN pipeline at: {trigger_url}")
         print(f"CNN Pipeline ID (to trigger): {args.pipeline_id}")
         print(f"DQN Pipeline ID (parameter): {args.dqn_pipeline_id}")
@@ -216,6 +223,7 @@ implementation:
 
         # Print the full curl command
         print("\\n=== FULL CURL COMMAND ===")
+        print("=" * 80)
         print()
         print("curl -X POST \\\\")
         print(f"  '{trigger_url}' \\\\")
@@ -223,6 +231,25 @@ implementation:
         print(f"  -H 'Authorization: Bearer {access_token}' \\\\")
         print("  -H 'Content-Type: application/json' \\\\")
         print(f"  -d '{json.dumps(payload)}'")
+        print("=" * 80)
+        print()
+
+        # Also save payload to file for manual use
+        with open('/tmp/pipeline_payload.json', 'w') as f:
+            json.dump(payload, f, indent=2)
+        print(f"\\nPayload saved to /tmp/pipeline_payload.json for manual use")
+        
+        # To manually trigger from command line, you can use:
+        print("\\n=== MANUAL TRIGGER INSTRUCTIONS ===")
+        print("=" * 80)
+        print("1. Copy the curl command above")
+        print("2. Or use the saved payload file:")
+        print(f"   curl -X POST '{trigger_url}' \\\\")
+        print("     -H 'accept: application/json' \\\\")
+        print(f"     -H 'Authorization: Bearer YOUR_TOKEN_HERE' \\\\")
+        print("     -H 'Content-Type: application/json' \\\\")
+        print("     -d @/tmp/pipeline_payload.json")
+        print("=" * 80)
         print()
 
         import time
