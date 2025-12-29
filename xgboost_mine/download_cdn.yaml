@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v8
+name: XGBoost Data Downloader v4
 description: Downloads all data from CDN URLs and converts to XGBoost pipeline format
 inputs:
   # CDN URLs from trigger
@@ -70,25 +70,34 @@ implementation:
         # CLASS DEFINITIONS FROM PIPELINE 1 (to load pickles)
         # ===============================================
 
-        # Minimal Preprocessor class to load Pipeline 1 pickles
-        class Preprocessor:
-            def __init__(self):
-                pass
-            
-            @staticmethod
-            def load(path):
-                with gzip.open(path, "rb") as f:
-                    return cloudpickle.load(f)
-
-        # Minimal FeatureSelector class to load Pipeline 1 pickles  
-        class FeatureSelector:
-            def __init__(self):
-                pass
-            
-            @staticmethod
-            def load(path):
-                with gzip.open(path, "rb") as f:
-                    return cloudpickle.load(f)
+        # Helper function to load pickle (handles both gzipped and regular)
+        def load_pickle_content(content, description=""):
+            print(f"  Loading {description}...")
+            try:
+                # First try regular pickle
+                return pickle.loads(content)
+            except Exception as e1:
+                print(f"  Regular pickle failed, trying cloudpickle...")
+                try:
+                    return cloudpickle.loads(content)
+                except Exception as e2:
+                    print(f"  Cloudpickle failed, trying gzip...")
+                    try:
+                        # Try gzipped pickle
+                        with gzip.GzipFile(fileobj=BytesIO(content)) as f:
+                            return pickle.load(f)
+                    except Exception as e3:
+                        print(f"  Gzip pickle failed, trying gzip cloudpickle...")
+                        try:
+                            with gzip.GzipFile(fileobj=BytesIO(content)) as f:
+                                return cloudpickle.load(f)
+                        except Exception as e4:
+                            print(f"  All pickle loading attempts failed!")
+                            print(f"    Regular pickle: {e1}")
+                            print(f"    Cloudpickle: {e2}")
+                            print(f"    Gzip pickle: {e3}")
+                            print(f"    Gzip cloudpickle: {e4}")
+                            raise
 
         # ===============================================
         # PIPELINE 2 PREPROCESSING PIPELINE CLASS (as expected by downstream)
@@ -215,6 +224,12 @@ implementation:
                 content = decompress_gzip(content)
             return pd.read_csv(BytesIO(content))
 
+        def load_json_content(content, description=""):
+            print(f"  Loading {description}...")
+            if is_gzipped(content):
+                content = decompress_gzip(content)
+            return json.loads(content.decode('utf-8'))
+
         # Function to save output with proper Argo directory handling
         def save_output(path, data, is_pickle=True):
             # Argo creates directories, so we need to write a file inside
@@ -242,11 +257,9 @@ implementation:
         print("\\n2. Downloading pickle files...")
         preprocessor_content = download_from_cdn(args.preprocessor_cdn, "preprocessor")
         feature_selector_content = download_from_cdn(args.feature_selector_cdn, "feature selector")
-        pca_model_content = download_from_cdn(args.pca_cdn, "PCA model")
         
         print("\\n3. Downloading metadata files...")
         preprocessor_metadata_content = download_from_cdn(args.preprocessor_metadata_cdn, "preprocessor metadata")
-        pca_metadata_content = download_from_cdn(args.pca_metadata_cdn, "PCA metadata")
         
         print("[STEP 1 COMPLETE] All files downloaded")
 
@@ -278,35 +291,59 @@ implementation:
         
         task_type = pipeline_config.get('task', 'classification')
         
-        # Load Pipeline 1 preprocessor (but we'll create Pipeline 2 format)
+        # Load Pipeline 1 preprocessor and feature selector
         print("\\nLoading Pipeline 1 preprocessor...")
-        preprocessor_pipeline1 = Preprocessor.load(BytesIO(preprocessor_content))
+        try:
+            preprocessor_pipeline1 = load_pickle_content(preprocessor_content, "preprocessor")
+            print("  Successfully loaded preprocessor")
+        except Exception as e:
+            print(f"  Warning: Could not load preprocessor: {e}")
+            preprocessor_pipeline1 = None
         
-        # Load Pipeline 1 feature selector  
         print("Loading Pipeline 1 feature selector...")
-        feature_selector_pipeline1 = FeatureSelector.load(BytesIO(feature_selector_content))
+        try:
+            feature_selector_pipeline1 = load_pickle_content(feature_selector_content, "feature selector")
+            print("  Successfully loaded feature selector")
+        except Exception as e:
+            print(f"  Warning: Could not load feature selector: {e}")
+            feature_selector_pipeline1 = None
         
         # Apply Pipeline 1 transformations if available
-        if hasattr(preprocessor_pipeline1, 'transform'):
+        processed_feature_names = feature_names.copy()
+        if preprocessor_pipeline1 is not None and hasattr(preprocessor_pipeline1, 'transform'):
             print("Applying Pipeline 1 preprocessor transformations...")
-            train_x_processed = preprocessor_pipeline1.transform(train_x_df)
+            try:
+                train_x_processed = preprocessor_pipeline1.transform(train_x_df)
+                if isinstance(train_x_processed, pd.DataFrame):
+                    processed_feature_names = train_x_processed.columns.tolist()
+                    train_x_processed = train_x_processed.values
+                elif isinstance(train_x_processed, np.ndarray):
+                    # Keep existing feature names
+                    pass
+                print(f"  Applied preprocessor transformation")
+            except Exception as e:
+                print(f"  Warning: Preprocessor transform failed: {e}")
+                train_x_processed = train_x_df.values
         else:
             train_x_processed = train_x_df.values
         
-        if hasattr(feature_selector_pipeline1, 'transform') and hasattr(feature_selector_pipeline1, 'selected_features'):
+        if feature_selector_pipeline1 is not None and hasattr(feature_selector_pipeline1, 'transform') and hasattr(feature_selector_pipeline1, 'selected_features'):
             print("Applying Pipeline 1 feature selection...")
-            train_x_processed = feature_selector_pipeline1.transform(train_x_processed)
-            # Update feature names based on selection
-            if hasattr(feature_selector_pipeline1, 'selected_features'):
-                feature_names = feature_selector_pipeline1.selected_features
-                print(f"Selected {len(feature_names)} features")
+            try:
+                train_x_processed = feature_selector_pipeline1.transform(train_x_processed)
+                if hasattr(feature_selector_pipeline1, 'selected_features'):
+                    processed_feature_names = feature_selector_pipeline1.selected_features
+                    print(f"  Selected {len(processed_feature_names)} features")
+            except Exception as e:
+                print(f"  Warning: Feature selector transform failed: {e}")
         
         print(f"\\nData Summary:")
         print(f"Train X shape: {train_x_df.shape}")
         print(f"Train y shape: {train_y_df.shape}")
         print(f"Test X shape: {test_x_df.shape}")
         print(f"Test y shape: {test_y_df.shape}")
-        print(f"Features: {len(feature_names)}")
+        print(f"Original features: {len(feature_names)}")
+        print(f"Processed features: {len(processed_feature_names)}")
         print(f"Task type: {task_type}")
         print(f"Target column: {args.target_column}")
 
@@ -379,7 +416,7 @@ implementation:
         
         # Create a simple scaler step (as in Preprocessor brick)
         scaling = preprocessing_config.get('scaling', 'standard')
-        if scaling != 'none':
+        if scaling != 'none' and len(processed_feature_names) > 0:
             if scaling == 'standard':
                 scaler = StandardScaler()
             elif scaling == 'minmax':
@@ -392,6 +429,7 @@ implementation:
             # Fit on processed data
             scaler.fit(train_x_processed)
             preprocessing_steps.append(('scaler', scaler))
+            print(f"Added {scaling} scaler to pipeline")
         
         # Create a simple feature selector if needed
         feature_selection = preprocessing_config.get('feature_selection', 'auto')
@@ -411,13 +449,18 @@ implementation:
                 selector = SelectKBest(score_func=score_func, k=k)
                 selector.fit(train_x_processed, train_y_df.values.ravel())
                 preprocessing_steps.append(('feature_selector', selector))
+                print(f"Added feature selector (k={k}) to pipeline")
         
         # Create target encoder if classification
         target_encoder = None
         if task_type == 'classification':
-            le = LabelEncoder()
-            le.fit(train_y_df.values.ravel())
-            target_encoder = le
+            try:
+                le = LabelEncoder()
+                le.fit(train_y_df.values.ravel())
+                target_encoder = le
+                print("Added label encoder for classification target")
+            except Exception as e:
+                print(f"Warning: Could not create label encoder: {e}")
         
         # Create the Pipeline 2 preprocessing pipeline
         preprocessing_pipeline = PreprocessingPipeline(preprocessing_steps, target_encoder)
@@ -425,7 +468,7 @@ implementation:
         # Create processed outputs
         processed_train_X_dict = {
             'X': train_x_processed,
-            'feature_names': feature_names,
+            'feature_names': processed_feature_names,
             'config': config,
             'preprocessing_info': {
                 'scaling_applied': scaling,
@@ -448,8 +491,8 @@ implementation:
         # Create feature info (matches Preprocessor brick)
         feature_info = {
             'original_features': len(feature_names),
-            'final_features': len(feature_names),
-            'feature_names': feature_names,
+            'final_features': len(processed_feature_names),
+            'feature_names': processed_feature_names,
             'task_type': task_type,
             'target_name': args.target_column,
             'preprocessing_applied': [step[0] for step in preprocessing_steps],
@@ -472,12 +515,12 @@ implementation:
             },
             'feature_info': {
                 'original_feature_count': len(feature_names),
-                'final_feature_count': len(feature_names),
-                'selected_features': feature_names
+                'final_feature_count': len(processed_feature_names),
+                'selected_features': processed_feature_names
             },
             'dataset_stats': {
                 'train_samples': len(train_x_df),
-                'feature_dimension': len(feature_names),
+                'feature_dimension': len(processed_feature_names),
                 'target_distribution': data_info['target_statistics']
             },
             'preprocessing_steps': [step[0] for step in preprocessing_steps],
