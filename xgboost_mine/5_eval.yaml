@@ -54,8 +54,66 @@ implementation:
             
             def transform_features(self, X):
                 X_transformed = X.copy()
+                
+                # Handle different input types
+                if isinstance(X_transformed, np.ndarray):
+                    # Convert numpy array to DataFrame for processing
+                    feature_names = [f'feature_{i}' for i in range(X_transformed.shape[1])]
+                    X_transformed = pd.DataFrame(X_transformed, columns=feature_names)
+                elif isinstance(X_transformed, pd.DataFrame):
+                    # Already a DataFrame
+                    pass
+                else:
+                    # Try to convert to DataFrame
+                    X_transformed = pd.DataFrame(X_transformed)
+                
+                print(f"  Input shape before preprocessing: {X_transformed.shape}")
+                print(f"  Data types: {X_transformed.dtypes.unique()}")
+                
+                # Convert string columns to numeric BEFORE applying sklearn transformers
+                columns_to_drop = []
+                for col in X_transformed.columns:
+                    if X_transformed[col].dtype == 'object' or (len(X_transformed) > 0 and isinstance(X_transformed[col].iloc[0], str)):
+                        print(f"  Converting string column '{col}' to numeric...")
+                        try:
+                            # Try to convert to datetime first
+                            converted = pd.to_datetime(X_transformed[col], errors='coerce')
+                            if converted.notna().any():
+                                # Convert datetime to timestamp (seconds since epoch)
+                                X_transformed[col] = converted.astype('int64') // 10**9
+                                print(f"    Converted '{col}' from datetime to timestamp")
+                            else:
+                                # Try numeric conversion
+                                X_transformed[col] = pd.to_numeric(X_transformed[col], errors='coerce')
+                                if X_transformed[col].isna().all():
+                                    print(f"    Column '{col}' conversion failed, dropping...")
+                                    columns_to_drop.append(col)
+                                else:
+                                    print(f"    Converted '{col}' to numeric")
+                        except Exception as e:
+                            print(f"    Error converting '{col}': {e}")
+                            columns_to_drop.append(col)
+                
+                # Drop columns that couldn't be converted
+                if columns_to_drop:
+                    print(f"  Dropping columns that couldn't be converted: {columns_to_drop}")
+                    X_transformed = X_transformed.drop(columns=columns_to_drop)
+                
+                # Fill NaN values
+                X_transformed = X_transformed.fillna(0)
+                
+                print(f"  Shape after string conversion: {X_transformed.shape}")
+                
+                # Now apply sklearn preprocessing steps
                 for name, transformer in self.steps:
-                    X_transformed = transformer.transform(X_transformed)
+                    try:
+                        print(f"  Applying transformer: {name}")
+                        X_transformed = transformer.transform(X_transformed)
+                        print(f"    Shape after {name}: {X_transformed.shape}")
+                    except Exception as e:
+                        print(f"    Warning: Transformer '{name}' failed: {e}")
+                        # Try to continue with next transformer
+                
                 return X_transformed
             
             def transform_target(self, y):
@@ -126,17 +184,57 @@ implementation:
         print(f'Test data shape: {X_test_raw.shape}')
         print(f'Target: {target_name}')
         print(f'Task type: {task_type}')
-        print(f'Preprocessing pipeline type: {type(preprocessing_pipeline)}')
+        print(f'Number of features: {len(feature_names) if feature_names else X_test_raw.shape[1]}')
+        
+        # Check data types
+        if isinstance(X_test_raw, np.ndarray):
+            print(f'Test X is numpy array with dtype: {X_test_raw.dtype}')
+        elif isinstance(X_test_raw, pd.DataFrame):
+            print(f'Test X is DataFrame with columns: {list(X_test_raw.columns)[:10]}...')
+            print(f'Data types: {X_test_raw.dtypes.unique()}')
+        else:
+            print(f'Test X type: {type(X_test_raw)}')
 
         # Transform test data using preprocessing pipeline
+        print("\\nTransforming test data with preprocessing pipeline...")
         try:
             X_test = preprocessing_pipeline.transform_features(X_test_raw)
             print(f'Successfully transformed features - shape: {X_test.shape}')
+            
+            # Ensure X_test is numpy array for prediction
+            if isinstance(X_test, pd.DataFrame):
+                X_test = X_test.values
+            elif not isinstance(X_test, np.ndarray):
+                X_test = np.array(X_test)
+                
         except Exception as e:
             print(f"Error transforming features: {e}")
-            # Fallback: use raw data if transformation fails
-            X_test = X_test_raw
-            print(f"Using raw features as fallback - shape: {X_test.shape}")
+            print("Attempting manual conversion...")
+            
+            # Manual conversion fallback
+            if isinstance(X_test_raw, pd.DataFrame):
+                X_test_df = X_test_raw.copy()
+            elif isinstance(X_test_raw, np.ndarray):
+                X_test_df = pd.DataFrame(X_test_raw, columns=[f'feature_{i}' for i in range(X_test_raw.shape[1])])
+            else:
+                X_test_df = pd.DataFrame(X_test_raw)
+            
+            # Convert all columns to numeric
+            for col in X_test_df.columns:
+                if X_test_df[col].dtype == 'object' or (len(X_test_df) > 0 and isinstance(X_test_df[col].iloc[0], str)):
+                    try:
+                        # Try datetime conversion
+                        converted = pd.to_datetime(X_test_df[col], errors='coerce')
+                        if converted.notna().any():
+                            X_test_df[col] = converted.astype('int64') // 10**9
+                        else:
+                            X_test_df[col] = pd.to_numeric(X_test_df[col], errors='coerce')
+                    except:
+                        X_test_df[col] = 0
+            
+            X_test_df = X_test_df.fillna(0)
+            X_test = X_test_df.values
+            print(f"Manual conversion complete - shape: {X_test.shape}")
         
         # Transform target if needed (for classification with label encoding)
         y_test = y_test_raw.copy()
@@ -148,16 +246,30 @@ implementation:
             print(f"Error transforming target: {e}")
             print(f"Using raw target as fallback")
         
-        print(f'After preprocessing - X_test shape: {X_test.shape}')
-        print(f'Unique target values: {np.unique(y_test)}')
+        print(f'\\nAfter preprocessing:')
+        print(f'  X_test shape: {X_test.shape}')
+        print(f'  y_test shape: {y_test.shape}')
+        print(f'  Unique target values: {np.unique(y_test)}')
+        print(f'  X_test dtype: {X_test.dtype}')
 
         # Make predictions
-        y_pred = model.predict(X_test)
-        print(f'Predictions made - shape: {y_pred.shape}')
+        print("\\nMaking predictions...")
+        try:
+            y_pred = model.predict(X_test)
+            print(f'Predictions made - shape: {y_pred.shape}')
+            print(f'Prediction dtype: {y_pred.dtype}')
+        except Exception as e:
+            print(f"Error making predictions: {e}")
+            print("Attempting to fix data types...")
+            
+            # Ensure X_test is float32 for XGBoost
+            X_test = X_test.astype(np.float32)
+            y_pred = model.predict(X_test)
+            print(f'Predictions made after type conversion - shape: {y_pred.shape}')
         
         # Calculate metrics based on task type
         if task_type == 'regression':
-            print("Calculating regression metrics...")
+            print("\\nCalculating regression metrics...")
             metrics_dict = {
                 'r2_score': float(r2_score(y_test, y_pred)),
                 'mae': float(mean_absolute_error(y_test, y_pred)),
@@ -316,7 +428,7 @@ implementation:
         with open(args.schema_metrics, 'w') as f:
             json.dump(schema_metrics, f, indent=2)
         
-        print(f"Evaluation completed for {task_type}")
+        print(f"\\nEvaluation completed for {task_type}")
         print(f"Key metrics: {metrics_dict}")
         print(f"Metrics saved to: {args.metrics}")
         print(f"Schema metrics saved to: {args.schema_metrics}")
