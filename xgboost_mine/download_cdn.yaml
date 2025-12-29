@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v6
+name: XGBoost Data Downloader v4
 description: Downloads all data from CDN URLs and converts to XGBoost pipeline format
 inputs:
   # CDN URLs from trigger
@@ -36,13 +36,6 @@ outputs:
   - {name: preprocessing_pipeline, type: Model, description: "Preprocessing pipeline"}
   - {name: feature_info, type: String, description: "Feature information"}
   - {name: weight_out, type: String, description: "Weight configuration"}
-  
-  # Additional outputs for downstream components
-  - {name: preprocessor_pickle, type: Data, description: "Preprocessor pickle file"}
-  - {name: preprocessor_metadata, type: Data, description: "Preprocessor metadata JSON"}
-  - {name: feature_selector, type: Data, description: "Feature selector pickle"}
-  - {name: pca_model, type: Data, description: "PCA model pickle"}
-  - {name: pca_metadata, type: Data, description: "PCA metadata JSON"}
 
 implementation:
   container:
@@ -70,12 +63,37 @@ implementation:
         import gzip
         import re
         import cloudpickle
+        from sklearn.preprocessing import StandardScaler, MinMaxScaler, LabelEncoder, RobustScaler
+        from sklearn.feature_selection import SelectKBest, f_classif, f_regression
 
         # ===============================================
-        # CLASS DEFINITIONS - MUST BE AT MODULE LEVEL
+        # CLASS DEFINITIONS FROM PIPELINE 1 (to load pickles)
         # ===============================================
-        
-        # From Preprocessor brick (matches exactly what Feature Engineering brick saves)
+
+        # Minimal Preprocessor class to load Pipeline 1 pickles
+        class Preprocessor:
+            def __init__(self):
+                pass
+            
+            @staticmethod
+            def load(path):
+                with gzip.open(path, "rb") as f:
+                    return cloudpickle.load(f)
+
+        # Minimal FeatureSelector class to load Pipeline 1 pickles  
+        class FeatureSelector:
+            def __init__(self):
+                pass
+            
+            @staticmethod
+            def load(path):
+                with gzip.open(path, "rb") as f:
+                    return cloudpickle.load(f)
+
+        # ===============================================
+        # PIPELINE 2 PREPROCESSING PIPELINE CLASS (as expected by downstream)
+        # ===============================================
+
         class PreprocessingPipeline:
             def __init__(self, steps, target_encoder=None):
                 self.steps = steps
@@ -124,26 +142,19 @@ implementation:
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--project_id', type=str, required=True)
         
-        # Dataset outputs
+        # Dataset outputs (DataLoader format)
         parser.add_argument('--train_X', type=str, required=True)
         parser.add_argument('--train_y', type=str, required=True)
         parser.add_argument('--test_X', type=str, required=True)
         parser.add_argument('--test_y', type=str, required=True)
         parser.add_argument('--data_info', type=str, required=True)
         
-        # Preprocessor outputs
+        # Preprocessor outputs (Preprocessor brick format)
         parser.add_argument('--processed_train_X', type=str, required=True)
         parser.add_argument('--processed_train_y', type=str, required=True)
         parser.add_argument('--preprocessing_pipeline', type=str, required=True)
         parser.add_argument('--feature_info', type=str, required=True)
         parser.add_argument('--weight_out', type=str, required=True)
-        
-        # Additional outputs
-        parser.add_argument('--preprocessor_pickle', type=str, required=True)
-        parser.add_argument('--preprocessor_metadata', type=str, required=True)
-        parser.add_argument('--feature_selector', type=str, required=True)
-        parser.add_argument('--pca_model', type=str, required=True)
-        parser.add_argument('--pca_metadata', type=str, required=True)
 
         args = parser.parse_args()
 
@@ -151,45 +162,34 @@ implementation:
         print("XGBOOST DATA DOWNLOADER - COMPLETE FIX")
         print("="*80)
 
-        # Function to decode URLs with proper handling
+        # Helper functions
         def decode_cdn_url(url):
             if not url:
                 return url
-            
-            # Remove any spaces first
             url = url.strip()
-            
-            # First decode URL-encoded characters
             try:
                 url = urllib.parse.unquote(url)
             except:
                 pass
-            
-            print(f"Decoded URL preview: {url[:100]}...")
             return url
 
-        # Function to check if content is gzipped
         def is_gzipped(content):
             return len(content) >= 2 and content[0] == 0x1f and content[1] == 0x8b
 
-        # Function to decompress gzipped content
         def decompress_gzip(content):
             try:
                 with gzip.GzipFile(fileobj=BytesIO(content)) as gz:
                     return gz.read()
             except Exception as e:
                 print(f"Warning: Failed to decompress gzip: {e}")
-                # Try alternative decompression
                 try:
                     import zlib
                     return zlib.decompress(content, 16 + zlib.MAX_WBITS)
                 except:
                     raise ValueError(f"Failed to decompress gzipped content: {e}")
 
-        # Function to download from CDN with auto-decompression
         def download_from_cdn(url, description=""):
             try:
-                # Decode URL first
                 decoded_url = decode_cdn_url(url)
                 print(f"Downloading {description} from: {decoded_url[:100]}...")
                 
@@ -198,7 +198,6 @@ implementation:
                 
                 content = response.content
                 
-                # Check if content is gzipped and decompress if needed
                 if is_gzipped(content):
                     print(f"  Detected gzipped content ({len(content)} bytes), decompressing...")
                     content = decompress_gzip(content)
@@ -210,117 +209,51 @@ implementation:
                 print(f"Error downloading {description}: {e}")
                 raise
 
-        # Function to safely load pickle that might be gzipped
-        def safe_load_pickle(content, description=""):
-            print(f"  Loading {description}...")
-            
-            # Check if content is still gzipped
-            if is_gzipped(content):
-                print(f"  Content is gzipped, decompressing first...")
-                content = decompress_gzip(content)
-            
-            # Now try to unpickle
-            try:
-                data = pickle.loads(content)
-                print(f"  Successfully loaded {description}")
-                return data
-            except pickle.UnpicklingError as e:
-                print(f"  Pickle error: {e}")
-                
-                # Try cloudpickle if regular pickle fails
-                try:
-                    data = cloudpickle.loads(content)
-                    print(f"  Successfully loaded with cloudpickle")
-                    return data
-                except Exception as e2:
-                    print(f"  Cloudpickle also failed: {e2}")
-                    raise
-            except Exception as e:
-                print(f"  Unexpected error: {type(e).__name__}: {e}")
-                raise
-
-        # Function to load CSV content
         def load_csv_content(content, description=""):
             print(f"  Loading {description} as CSV...")
-            
             if is_gzipped(content):
-                print(f"  CSV is gzipped, decompressing...")
                 content = decompress_gzip(content)
-            
             return pd.read_csv(BytesIO(content))
 
-        # Function to load JSON that might be gzipped
-        def load_json_content(content, description=""):
-            print(f"  Loading {description}...")
+        # Function to save output with proper Argo directory handling
+        def save_output(path, data, is_pickle=True):
+            # Argo creates directories, so we need to write a file inside
+            os.makedirs(path, exist_ok=True)
             
-            if is_gzipped(content):
-                print(f"  JSON is gzipped, decompressing...")
-                content = decompress_gzip(content)
-            
-            return json.loads(content.decode('utf-8'))
-
-        # FIXED: Function to save output with Argo directory handling
-        def save_output(path, data, is_pickle=True, filename=None):
-            
-            # Determine if this is likely an Argo directory path
-            # Check if path has no file extension (common for Argo outputs)
-            has_extension = any(path.endswith(ext) for ext in ['.pkl', '.pickle', '.json', '.txt', '.csv', '.parquet'])
-            
-            if not has_extension:
-                # Likely an Argo directory path
-                os.makedirs(path, exist_ok=True)
-                # Create appropriate filename
-                if filename:
-                    file_path = os.path.join(path, filename)
-                else:
-                    # Generate filename based on data type
-                    if is_pickle:
-                        file_path = os.path.join(path, 'data.pkl')
-                    else:
-                        file_path = os.path.join(path, 'data.json')
-            else:
-                # It's a file path
-                os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-                file_path = path
-            
-            # Save the data
             if is_pickle:
+                file_path = os.path.join(path, 'data.pkl')
                 with open(file_path, 'wb') as f:
                     pickle.dump(data, f)
             else:
+                file_path = os.path.join(path, 'data.json')
                 with open(file_path, 'w') as f:
                     json.dump(data, f, indent=2)
             
             print(f"Saved: {file_path}")
-            return file_path
 
         print("[STEP 1] Downloading all data from CDN URLs...")
         
-        # Download all files
-        print("\\n1. Downloading CSV datasets...")
+        # Download CSV files
+        print("\n1. Downloading CSV datasets...")
         train_x_content = download_from_cdn(args.train_x_cdn, "train X")
         train_y_content = download_from_cdn(args.train_y_cdn, "train y")
         test_data_content = download_from_cdn(args.test_data_cdn, "test data")
         
-        print("\\n2. Downloading pickle files...")
+        print("\n2. Downloading pickle files...")
         preprocessor_content = download_from_cdn(args.preprocessor_cdn, "preprocessor")
         feature_selector_content = download_from_cdn(args.feature_selector_cdn, "feature selector")
         pca_model_content = download_from_cdn(args.pca_cdn, "PCA model")
         
-        print("\\n3. Downloading metadata files...")
+        print("\n3. Downloading metadata files...")
         preprocessor_metadata_content = download_from_cdn(args.preprocessor_metadata_cdn, "preprocessor metadata")
         pca_metadata_content = download_from_cdn(args.pca_metadata_cdn, "PCA metadata")
         
-        print("\\n4. Downloading combined files...")
-        pickle_content = download_from_cdn(args.pickle_cdn_url, "combined pickle")
-        config_content = download_from_cdn(args.config_cdn_url, "config pickle")
-        
         print("[STEP 1 COMPLETE] All files downloaded")
 
-        print("\\n[STEP 2] Processing downloaded data...")
+        print("\n[STEP 2] Processing downloaded data...")
         
         # Parse CSV data
-        print("\\nParsing CSV datasets...")
+        print("\nParsing CSV datasets...")
         train_x_df = load_csv_content(train_x_content, "train X")
         train_y_df = load_csv_content(train_y_content, "train y")
         test_data_df = load_csv_content(test_data_content, "test data")
@@ -345,22 +278,30 @@ implementation:
         
         task_type = pipeline_config.get('task', 'classification')
         
-        # Parse pickled objects
-        print("\\nLoading pickle files...")
-        preprocessor = safe_load_pickle(preprocessor_content, "preprocessor")
-        feature_selector = safe_load_pickle(feature_selector_content, "feature selector")
-        pca_model = safe_load_pickle(pca_model_content, "PCA model")
+        # Load Pipeline 1 preprocessor (but we'll create Pipeline 2 format)
+        print("\nLoading Pipeline 1 preprocessor...")
+        preprocessor_pipeline1 = Preprocessor.load(BytesIO(preprocessor_content))
         
-        # Parse metadata
-        print("\\nLoading metadata files...")
-        preprocessor_metadata = load_json_content(preprocessor_metadata_content, "preprocessor metadata")
-        pca_metadata = load_json_content(pca_metadata_content, "PCA metadata")
+        # Load Pipeline 1 feature selector  
+        print("Loading Pipeline 1 feature selector...")
+        feature_selector_pipeline1 = FeatureSelector.load(BytesIO(feature_selector_content))
         
-        print("\\nLoading combined files...")
-        combined_pickle_data = safe_load_pickle(pickle_content, "combined pickle")
-        config_data = safe_load_pickle(config_content, "config pickle")
+        # Apply Pipeline 1 transformations if available
+        if hasattr(preprocessor_pipeline1, 'transform'):
+            print("Applying Pipeline 1 preprocessor transformations...")
+            train_x_processed = preprocessor_pipeline1.transform(train_x_df)
+        else:
+            train_x_processed = train_x_df.values
         
-        print(f"\\nData Summary:")
+        if hasattr(feature_selector_pipeline1, 'transform') and hasattr(feature_selector_pipeline1, 'selected_features'):
+            print("Applying Pipeline 1 feature selection...")
+            train_x_processed = feature_selector_pipeline1.transform(train_x_processed)
+            # Update feature names based on selection
+            if hasattr(feature_selector_pipeline1, 'selected_features'):
+                feature_names = feature_selector_pipeline1.selected_features
+                print(f"Selected {len(feature_names)} features")
+        
+        print(f"\nData Summary:")
         print(f"Train X shape: {train_x_df.shape}")
         print(f"Train y shape: {train_y_df.shape}")
         print(f"Test X shape: {test_x_df.shape}")
@@ -369,7 +310,34 @@ implementation:
         print(f"Task type: {task_type}")
         print(f"Target column: {args.target_column}")
 
-        print("\\n[STEP 3] Creating XGBoost format outputs...")
+        print("\n[STEP 3] Creating DataLoader brick outputs...")
+        
+        # Create DataLoader format outputs
+        train_X_dict = {
+            'X': train_x_df.values,
+            'feature_names': feature_names,
+            'config': config
+        }
+        
+        train_y_dict = {
+            'y': train_y_df.values.ravel(),
+            'target_name': args.target_column,
+            'task_type': task_type,
+            'config': config
+        }
+        
+        test_X_dict = {
+            'X': test_x_df.values,
+            'feature_names': feature_names,
+            'config': config
+        }
+        
+        test_y_dict = {
+            'y': test_y_df.values.ravel(),
+            'target_name': args.target_column,
+            'task_type': task_type,
+            'config': config
+        }
         
         # Create data info (matches DataLoader brick output)
         y_train_values = train_y_df[args.target_column].values if args.target_column in train_y_df.columns else train_y_df.iloc[:, 0].values
@@ -400,66 +368,82 @@ implementation:
             'test_X_shape': test_x_df.shape,
             'test_y_shape': test_y_df.shape,
             'data_source': 'CDN',
-            'compression_detected': True
+            'cdn_download': True
         }
 
-        # Create Dataset format outputs for XGBoost (matches DataLoader brick)
-        train_X_dict = {
-            'X': train_x_df.values,
-            'feature_names': feature_names,
-            'config': config
-        }
+        print("\n[STEP 4] Creating Preprocessor brick outputs...")
         
-        train_y_dict = {
-            'y': train_y_df.values.ravel(),
-            'target_name': args.target_column,
-            'task_type': task_type,
-            'config': config
-        }
+        # Create Preprocessor format outputs
+        # For Pipeline 2, we need to mimic the preprocessing steps
+        preprocessing_steps = []
         
-        test_X_dict = {
-            'X': test_x_df.values,
-            'feature_names': feature_names,
-            'config': config
-        }
+        # Create a simple scaler step (as in Preprocessor brick)
+        scaling = preprocessing_config.get('scaling', 'standard')
+        if scaling != 'none':
+            if scaling == 'standard':
+                scaler = StandardScaler()
+            elif scaling == 'minmax':
+                scaler = MinMaxScaler()
+            elif scaling == 'robust':
+                scaler = RobustScaler()
+            else:
+                scaler = StandardScaler()
+            
+            # Fit on processed data
+            scaler.fit(train_x_processed)
+            preprocessing_steps.append(('scaler', scaler))
         
-        test_y_dict = {
-            'y': test_y_df.values.ravel(),
-            'target_name': args.target_column,
-            'task_type': task_type,
-            'config': config
-        }
+        # Create a simple feature selector if needed
+        feature_selection = preprocessing_config.get('feature_selection', 'auto')
+        k_features = preprocessing_config.get('k_features', 'auto')
         
-        # Create processed outputs (apply preprocessing if available)
-        if hasattr(preprocessor, 'transform_features'):
-            processed_X = preprocessor.transform_features(train_x_df.values)
-        else:
-            processed_X = train_x_df.values
+        if feature_selection != 'none' and k_features != 'all' and train_x_processed.shape[1] > 10:
+            if task_type == 'classification':
+                score_func = f_classif
+            else:
+                score_func = f_regression
+            
+            k = k_features
+            if k == 'auto':
+                k = min(50, train_x_processed.shape[1], max(1, int(train_x_processed.shape[0] / 10)))
+            
+            if train_x_processed.shape[1] > k:
+                selector = SelectKBest(score_func=score_func, k=k)
+                selector.fit(train_x_processed, train_y_df.values.ravel())
+                preprocessing_steps.append(('feature_selector', selector))
         
-        if hasattr(preprocessor, 'transform_target'):
-            processed_y = preprocessor.transform_target(train_y_df.values.ravel())
-        else:
-            processed_y = train_y_df.values.ravel()
+        # Create target encoder if classification
+        target_encoder = None
+        if task_type == 'classification':
+            le = LabelEncoder()
+            le.fit(train_y_df.values.ravel())
+            target_encoder = le
         
+        # Create the Pipeline 2 preprocessing pipeline
+        preprocessing_pipeline = PreprocessingPipeline(preprocessing_steps, target_encoder)
+        
+        # Create processed outputs
         processed_train_X_dict = {
-            'X': processed_X,
+            'X': train_x_processed,
             'feature_names': feature_names,
             'config': config,
             'preprocessing_info': {
-                'scaling_applied': preprocessing_config.get('scaling', 'none'),
-                'feature_selection_applied': preprocessing_config.get('feature_selection', 'none')
+                'scaling_applied': scaling,
+                'feature_selection_applied': feature_selection,
+                'original_feature_count': len(feature_names)
             }
         }
         
         processed_train_y_dict = {
-            'y': processed_y,
+            'y': train_y_df.values.ravel() if target_encoder is None else target_encoder.transform(train_y_df.values.ravel()),
             'target_name': args.target_column,
             'task_type': task_type,
-            'config': config
+            'config': config,
+            'target_encoder_info': {
+                'encoder_used': target_encoder is not None,
+                'original_classes': len(np.unique(train_y_df.values.ravel())) if task_type == 'classification' else None
+            }
         }
-        
-        # Create a compatible preprocessing pipeline
-        compatible_pipeline = PreprocessingPipeline(steps=[], target_encoder=None)
         
         # Create feature info (matches Preprocessor brick)
         feature_info = {
@@ -468,20 +452,21 @@ implementation:
             'feature_names': feature_names,
             'task_type': task_type,
             'target_name': args.target_column,
-            'preprocessing_applied': [],
-            'train_shape': train_x_df.shape,
-            'scaling_method': 'none',
-            'feature_selection_method': 'none',
-            'k_features_selected': len(feature_names),
-            'cdn_source': True
+            'preprocessing_applied': [step[0] for step in preprocessing_steps],
+            'train_shape': train_x_processed.shape,
+            'scaling_method': scaling,
+            'feature_selection_method': feature_selection,
+            'k_features_selected': train_x_processed.shape[1]
         }
         
         # Create weight configuration (matches Preprocessor brick)
         weight_config = {
             'preprocessing_complete': True,
             'preprocessing_config': {
-                'scaling': 'none',
-                'feature_selection': 'none',
+                'scaling': scaling,
+                'feature_selection': feature_selection,
+                'k_features': k_features if k_features != 'auto' else 'auto',
+                'actual_k_selected': train_x_processed.shape[1],
                 'task_type': task_type,
                 'target_name': args.target_column
             },
@@ -495,40 +480,32 @@ implementation:
                 'feature_dimension': len(feature_names),
                 'target_distribution': data_info['target_statistics']
             },
-            'preprocessing_steps': [],
+            'preprocessing_steps': [step[0] for step in preprocessing_steps],
             'original_config': config,
             'pipeline_capabilities': {
-                'can_transform_features': hasattr(preprocessor, 'transform_features'),
-                'can_transform_target': hasattr(preprocessor, 'transform_target'),
-                'can_inverse_transform_target': hasattr(preprocessor, 'inverse_transform_target')
+                'can_transform_features': True,
+                'can_transform_target': target_encoder is not None,
+                'can_inverse_transform_target': target_encoder is not None
             },
-            'cdn_download': True,
-            'gzip_handled': True
+            'cdn_download': True
         }
 
-        print("\\n[STEP 4] Saving all outputs...")
+        print("\n[STEP 5] Saving all outputs...")
         
         try:
-            # Dataset outputs (matches DataLoader brick)
-            save_output(args.train_X, train_X_dict, filename='train_X.pkl')
-            save_output(args.train_y, train_y_dict, filename='train_y.pkl')
-            save_output(args.test_X, test_X_dict, filename='test_X.pkl')
-            save_output(args.test_y, test_y_dict, filename='test_y.pkl')
-            save_output(args.data_info, data_info, is_pickle=False, filename='data_info.json')
+            # Save DataLoader outputs
+            save_output(args.train_X, train_X_dict)
+            save_output(args.train_y, train_y_dict)
+            save_output(args.test_X, test_X_dict)
+            save_output(args.test_y, test_y_dict)
+            save_output(args.data_info, data_info, is_pickle=False)
             
-            # Preprocessor outputs (matches Preprocessor brick)
-            save_output(args.processed_train_X, processed_train_X_dict, filename='processed_train_X.pkl')
-            save_output(args.processed_train_y, processed_train_y_dict, filename='processed_train_y.pkl')
-            save_output(args.preprocessing_pipeline, compatible_pipeline, filename='preprocessing_pipeline.pkl')
-            save_output(args.feature_info, feature_info, is_pickle=False, filename='feature_info.json')
-            save_output(args.weight_out, weight_config, is_pickle=False, filename='weight_config.json')
-            
-            # Additional outputs
-            save_output(args.preprocessor_pickle, preprocessor, filename='preprocessor.pkl')
-            save_output(args.preprocessor_metadata, preprocessor_metadata, is_pickle=False, filename='preprocessor_metadata.json')
-            save_output(args.feature_selector, feature_selector, filename='feature_selector.pkl')
-            save_output(args.pca_model, pca_model, filename='pca_model.pkl')
-            save_output(args.pca_metadata, pca_metadata, is_pickle=False, filename='pca_metadata.json')
+            # Save Preprocessor outputs
+            save_output(args.processed_train_X, processed_train_X_dict)
+            save_output(args.processed_train_y, processed_train_y_dict)
+            save_output(args.preprocessing_pipeline, preprocessing_pipeline)
+            save_output(args.feature_info, feature_info, is_pickle=False)
+            save_output(args.weight_out, weight_config, is_pickle=False)
             
         except Exception as e:
             print(f"ERROR saving outputs: {e}")
@@ -536,7 +513,7 @@ implementation:
             traceback.print_exc()
             raise
         
-        print("\\n[STEP 5] Summary...")
+        print("\n[STEP 6] Summary...")
         print("="*80)
         print("XGBOOST DATA DOWNLOADER COMPLETE")
         print("="*80)
@@ -545,16 +522,12 @@ implementation:
         print(f"✓ Test data: {test_x_df.shape[0]} samples")
         print(f"✓ Target: {args.target_column}")
         print(f"✓ Task type: {task_type}")
-        print(f"✓ Preprocessor: {'Available' if preprocessor else 'Not available'}")
-        print(f"✓ Feature selector: {'Available' if feature_selector else 'Not available'}")
-        print(f"✓ PCA model: {'Available' if pca_model else 'Not available'}")
-        print(f"✓ Gzip handling: {'Enabled' if True else 'Disabled'}")
+        print(f"✓ Created DataLoader format outputs: ✓")
+        print(f"✓ Created Preprocessor format outputs: ✓")
         print("="*80)
-        print(f"Outputs saved:")
-        print(f"  - Dataset files: 4 files (matches DataLoader brick)")
-        print(f"  - Data info: 1 file")
-        print(f"  - Preprocessor outputs: 5 files (matches Preprocessor brick)")
-        print(f"  - Additional outputs: 5 files")
+        print(f"Outputs saved in Pipeline 2 format:")
+        print(f"  - DataLoader outputs: 5 files")
+        print(f"  - Preprocessor outputs: 5 files")
         print("="*80)
         
     args:
@@ -594,7 +567,7 @@ implementation:
       - --project_id
       - {inputValue: project_id}
       
-      # Dataset outputs
+      # Dataset outputs (DataLoader format)
       - --train_X
       - {outputPath: train_X}
       - --train_y
@@ -606,7 +579,7 @@ implementation:
       - --data_info
       - {outputPath: data_info}
       
-      # Preprocessor outputs
+      # Preprocessor outputs (Preprocessor brick format)
       - --processed_train_X
       - {outputPath: processed_train_X}
       - --processed_train_y
@@ -617,15 +590,3 @@ implementation:
       - {outputPath: feature_info}
       - --weight_out
       - {outputPath: weight_out}
-      
-      # Additional outputs
-      - --preprocessor_pickle
-      - {outputPath: preprocessor_pickle}
-      - --preprocessor_metadata
-      - {outputPath: preprocessor_metadata}
-      - --feature_selector
-      - {outputPath: feature_selector}
-      - --pca_model
-      - {outputPath: pca_model}
-      - --pca_metadata
-      - {outputPath: pca_metadata}
