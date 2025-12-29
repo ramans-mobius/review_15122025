@@ -1,4 +1,4 @@
-name: DownloadDatasetFromCDN
+name: Download Dataset From CDN
 description: Downloads dataset pickle file from CDN and extracts DataWrapper object with URL encoding support
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the dataset pickle file on CDN (may contain encoded characters)"}
@@ -9,7 +9,7 @@ outputs:
   - {name: config_json, type: String, description: "Downloaded config as JSON string"}
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v19
+    image: nikhilv215/nesy-factory:v23
     command:
       - sh
       - -ec
