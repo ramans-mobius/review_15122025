@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v4
+name: XGBoost Data Downloader v7
 description: Downloads all data from CDN URLs and converts to XGBoost pipeline format
 inputs:
   # CDN URLs from trigger
