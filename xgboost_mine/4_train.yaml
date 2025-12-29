@@ -1,4 +1,4 @@
-name: Trainer
+name: Trainer v2
 description: Trains boosting model using unified configuration with enhanced schema outputs
 inputs:
   - name: processed_train_X
