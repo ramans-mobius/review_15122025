@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v2
+name: XGBoost Data Downloader v3
 description: Downloads all data from CDN URLs and converts to XGBoost pipeline format
 inputs:
   # CDN URLs from trigger
@@ -96,28 +96,6 @@ implementation:
                 if self.target_encoder is not None and hasattr(self.target_encoder, 'inverse_transform'):
                     return self.target_encoder.inverse_transform(y_encoded)
                 return y_encoded
-
-        # From Feature Engineering brick
-        class Preprocessor:
-            def __init__(self):
-                self.num_cols=[]
-                self.cat_cols=[]
-                self.col_config={}
-                self.global_metadata={}
-                self.date_columns = []
-                self.date_patterns = {}
-            
-            def transform(self, df, training_mode=False):
-                return df
-            
-            def save(self, path):
-                with gzip.open(path, "wb") as f:
-                    cloudpickle.dump(self, f)
-                    
-            @staticmethod
-            def load(path):
-                with gzip.open(path, "rb") as f:
-                    return cloudpickle.load(f)
 
         # ===============================================
         # MAIN CODE
@@ -261,9 +239,9 @@ implementation:
                 print(f"  Unexpected error: {type(e).__name__}: {e}")
                 raise
 
-        # Function to load CSV that might be gzipped
+        # Function to load CSV content
         def load_csv_content(content, description=""):
-            print(f"  Loading {description}...")
+            print(f"  Loading {description} as CSV...")
             
             if is_gzipped(content):
                 print(f"  CSV is gzipped, decompressing...")
@@ -281,119 +259,49 @@ implementation:
             
             return json.loads(content.decode('utf-8'))
 
-        # Function to load Parquet from bytes
-        def load_parquet_content(content, description=""):
-            print(f"  Loading {description} as Parquet...")
-            
-            if is_gzipped(content):
-                print(f"  Parquet is gzipped, decompressing...")
-                content = decompress_gzip(content)
-            
-            # Write to temp file and read as parquet
-            with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            
-            try:
-                df = pd.read_parquet(tmp_path)
-                os.unlink(tmp_path)
-                return df
-            except Exception as e:
-                os.unlink(tmp_path)
-                raise ValueError(f"Failed to read parquet: {e}")
-
-        # Function to load data (auto-detect format)
-        def load_data_content(content, description=""):
-            print(f"  Auto-detecting format for {description}...")
-            
-            # Try parquet first
-            try:
-                return load_parquet_content(content, description)
-            except Exception as e1:
-                print(f"  Not parquet: {e1}")
-            
-            # Try CSV
-            try:
-                return load_csv_content(content, description)
-            except Exception as e2:
-                print(f"  Not CSV: {e2}")
-            
-            # Try JSON
-            try:
-                if content.startswith(b'{') or content.startswith(b'['):
-                    data = json.loads(content.decode('utf-8'))
-                    if isinstance(data, dict) and 'X' in data and 'feature_names' in data:
-                        # This is already in XGBoost format
-                        return data
-                    return pd.DataFrame(data)
-            except Exception as e3:
-                print(f"  Not JSON: {e3}")
-            
-            raise ValueError(f"Could not auto-detect format for {description}")
-
         print("[STEP 1] Downloading all data from CDN URLs...")
         
         # Download all files
-        print("\\n1. Downloading CSV/Parquet datasets...")
+        print("\n1. Downloading CSV datasets...")
         train_x_content = download_from_cdn(args.train_x_cdn, "train X")
         train_y_content = download_from_cdn(args.train_y_cdn, "train y")
         test_data_content = download_from_cdn(args.test_data_cdn, "test data")
         
-        print("\\n2. Downloading pickle files...")
+        print("\n2. Downloading pickle files...")
         preprocessor_content = download_from_cdn(args.preprocessor_cdn, "preprocessor")
         feature_selector_content = download_from_cdn(args.feature_selector_cdn, "feature selector")
         pca_model_content = download_from_cdn(args.pca_cdn, "PCA model")
         
-        print("\\n3. Downloading metadata files...")
+        print("\n3. Downloading metadata files...")
         preprocessor_metadata_content = download_from_cdn(args.preprocessor_metadata_cdn, "preprocessor metadata")
         pca_metadata_content = download_from_cdn(args.pca_metadata_cdn, "PCA metadata")
         
-        print("\\n4. Downloading combined files...")
+        print("\n4. Downloading combined files...")
         pickle_content = download_from_cdn(args.pickle_cdn_url, "combined pickle")
         config_content = download_from_cdn(args.config_cdn_url, "config pickle")
         
         print("[STEP 1 COMPLETE] All files downloaded")
 
-        print("\\n[STEP 2] Processing downloaded data...")
+        print("\n[STEP 2] Processing downloaded data...")
         
-        # Parse data
-        print("\\nParsing datasets...")
-        train_x_df = load_data_content(train_x_content, "train X")
-        train_y_df = load_data_content(train_y_content, "train y")
-        test_data_df = load_data_content(test_data_content, "test data")
+        # Parse CSV data
+        print("\nParsing CSV datasets...")
+        train_x_df = load_csv_content(train_x_content, "train X")
+        train_y_df = load_csv_content(train_y_content, "train y")
+        test_data_df = load_csv_content(test_data_content, "test data")
         
-        # Handle different input formats
-        if isinstance(train_x_df, dict):
-            # Already in XGBoost format
-            train_x_values = train_x_df['X']
-            train_x_feature_names = train_x_df['feature_names']
+        # For test data, separate features from target
+        if args.target_column in test_data_df.columns:
+            test_x_df = test_data_df.drop(columns=[args.target_column])
+            test_y_df = test_data_df[[args.target_column]]
         else:
-            # It's a DataFrame
-            train_x_values = train_x_df.values
-            train_x_feature_names = train_x_df.columns.tolist()
-        
-        if isinstance(train_y_df, dict):
-            train_y_values = train_y_df['y']
-        else:
-            train_y_values = train_y_df.values.ravel()
-        
-        if isinstance(test_data_df, dict):
-            test_x_values = test_data_df['X']
-            test_y_values = test_data_df['y']
-        else:
-            # For test data, separate features from target
-            if args.target_column in test_data_df.columns:
-                test_x_df = test_data_df.drop(columns=[args.target_column])
-                test_y_df = test_data_df[[args.target_column]]
-            else:
-                test_x_df = test_data_df.copy()
-                test_y_df = pd.DataFrame(np.zeros(len(test_x_df)), columns=[args.target_column])
-            
-            test_x_values = test_x_df.values
-            test_y_values = test_y_df.values.ravel()
+            # If target column not found, use all columns as features
+            test_x_df = test_data_df.copy()
+            # Create dummy target
+            test_y_df = pd.DataFrame(np.zeros(len(test_x_df)), columns=[args.target_column])
         
         # Get feature names
-        feature_names = train_x_feature_names
+        feature_names = train_x_df.columns.tolist()
         
         # Parse config
         config = json.loads(args.config_str)
@@ -403,40 +311,40 @@ implementation:
         task_type = pipeline_config.get('task', 'classification')
         
         # Parse pickled objects
-        print("\\nLoading pickle files...")
+        print("\nLoading pickle files...")
         preprocessor = safe_load_pickle(preprocessor_content, "preprocessor")
         feature_selector = safe_load_pickle(feature_selector_content, "feature selector")
         pca_model = safe_load_pickle(pca_model_content, "PCA model")
         
         # Parse metadata
-        print("\\nLoading metadata files...")
+        print("\nLoading metadata files...")
         preprocessor_metadata = load_json_content(preprocessor_metadata_content, "preprocessor metadata")
         pca_metadata = load_json_content(pca_metadata_content, "PCA metadata")
         
-        print("\\nLoading combined files...")
+        print("\nLoading combined files...")
         combined_pickle_data = safe_load_pickle(pickle_content, "combined pickle")
         config_data = safe_load_pickle(config_content, "config pickle")
         
-        print(f"\\nData Summary:")
-        print(f"Train X shape: {train_x_values.shape if hasattr(train_x_values, 'shape') else len(train_x_values)}")
-        print(f"Train y shape: {train_y_values.shape if hasattr(train_y_values, 'shape') else len(train_y_values)}")
-        print(f"Test X shape: {test_x_values.shape if hasattr(test_x_values, 'shape') else len(test_x_values)}")
-        print(f"Test y shape: {test_y_values.shape if hasattr(test_y_values, 'shape') else len(test_y_values)}")
+        print(f"\nData Summary:")
+        print(f"Train X shape: {train_x_df.shape}")
+        print(f"Train y shape: {train_y_df.shape}")
+        print(f"Test X shape: {test_x_df.shape}")
+        print(f"Test y shape: {test_y_df.shape}")
         print(f"Features: {len(feature_names)}")
         print(f"Task type: {task_type}")
         print(f"Target column: {args.target_column}")
 
-        print("\\n[STEP 3] Creating XGBoost format outputs...")
+        print("\n[STEP 3] Creating XGBoost format outputs...")
         
         # Create data info (matches DataLoader brick output)
-        y_train_values = train_y_values
+        y_train_values = train_y_df[args.target_column].values if args.target_column in train_y_df.columns else train_y_df.iloc[:, 0].values
         
         data_info = {
             'model_id': args.model_id,
             'execution_id': args.execution_id,
             'project_id': args.project_id,
-            'original_samples': len(train_x_values) + len(test_x_values),
-            'final_samples': len(train_x_values) + len(test_x_values),
+            'original_samples': len(train_x_df) + len(test_x_df),
+            'final_samples': len(train_x_df) + len(test_x_df),
             'features_count': len(feature_names),
             'feature_names': feature_names,
             'task_type': task_type,
@@ -450,38 +358,38 @@ implementation:
                 'classes': int(np.unique(y_train_values).size),
                 'class_distribution': pd.Series(y_train_values).value_counts().to_dict()
             },
-            'train_samples': len(train_x_values),
-            'test_samples': len(test_x_values),
-            'train_X_shape': train_x_values.shape if hasattr(train_x_values, 'shape') else (len(train_x_values), len(feature_names)),
-            'train_y_shape': train_y_values.shape if hasattr(train_y_values, 'shape') else (len(train_y_values),),
-            'test_X_shape': test_x_values.shape if hasattr(test_x_values, 'shape') else (len(test_x_values), len(feature_names)),
-            'test_y_shape': test_y_values.shape if hasattr(test_y_values, 'shape') else (len(test_y_values),),
+            'train_samples': len(train_x_df),
+            'test_samples': len(test_x_df),
+            'train_X_shape': train_x_df.shape,
+            'train_y_shape': train_y_df.shape,
+            'test_X_shape': test_x_df.shape,
+            'test_y_shape': test_y_df.shape,
             'data_source': 'CDN',
             'compression_detected': True
         }
 
         # Create Dataset format outputs for XGBoost (matches DataLoader brick)
         train_X_dict = {
-            'X': train_x_values,
+            'X': train_x_df.values,
             'feature_names': feature_names,
             'config': config
         }
         
         train_y_dict = {
-            'y': train_y_values,
+            'y': train_y_df.values.ravel(),
             'target_name': args.target_column,
             'task_type': task_type,
             'config': config
         }
         
         test_X_dict = {
-            'X': test_x_values,
+            'X': test_x_df.values,
             'feature_names': feature_names,
             'config': config
         }
         
         test_y_dict = {
-            'y': test_y_values,
+            'y': test_y_df.values.ravel(),
             'target_name': args.target_column,
             'task_type': task_type,
             'config': config
@@ -489,14 +397,14 @@ implementation:
         
         # Create processed outputs (apply preprocessing if available)
         if hasattr(preprocessor, 'transform_features'):
-            processed_X = preprocessor.transform_features(train_x_values)
+            processed_X = preprocessor.transform_features(train_x_df.values)
         else:
-            processed_X = train_x_values
+            processed_X = train_x_df.values
         
         if hasattr(preprocessor, 'transform_target'):
-            processed_y = preprocessor.transform_target(train_y_values)
+            processed_y = preprocessor.transform_target(train_y_df.values.ravel())
         else:
-            processed_y = train_y_values
+            processed_y = train_y_df.values.ravel()
         
         processed_train_X_dict = {
             'X': processed_X,
@@ -523,7 +431,7 @@ implementation:
             'task_type': task_type,
             'target_name': args.target_column,
             'preprocessing_applied': [],
-            'train_shape': train_x_values.shape if hasattr(train_x_values, 'shape') else (len(train_x_values), len(feature_names)),
+            'train_shape': train_x_df.shape,
             'scaling_method': 'none',
             'feature_selection_method': 'none',
             'k_features_selected': len(feature_names),
@@ -545,7 +453,7 @@ implementation:
                 'selected_features': feature_names
             },
             'dataset_stats': {
-                'train_samples': len(train_x_values),
+                'train_samples': len(train_x_df),
                 'feature_dimension': len(feature_names),
                 'target_distribution': data_info['target_statistics']
             },
@@ -560,9 +468,11 @@ implementation:
             'gzip_handled': True
         }
 
-        # Function to save output
+        print("\n[STEP 4] Saving all outputs...")
+        
+        # Function to save output with directory creation
         def save_output(path, data, is_pickle=True):
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
             if is_pickle:
                 with open(path, 'wb') as f:
                     pickle.dump(data, f)
@@ -570,47 +480,51 @@ implementation:
                 with open(path, 'w') as f:
                     json.dump(data, f, indent=2)
             print(f"Saved: {path}")
-
-        print("\\n[STEP 4] Saving all outputs...")
         
-        # Save Dataset outputs (matches DataLoader brick)
-        save_output(args.train_X, train_X_dict)
-        save_output(args.train_y, train_y_dict)
-        save_output(args.test_X, test_X_dict)
-        save_output(args.test_y, test_y_dict)
-        save_output(args.data_info, data_info, False)
-        
-        # Save Preprocessor outputs (matches Preprocessor brick)
-        save_output(args.processed_train_X, processed_train_X_dict)
-        save_output(args.processed_train_y, processed_train_y_dict)
-        
-        # Save the preprocessor object (this is the key fix)
-        with open(args.preprocessing_pipeline, 'wb') as f:
-            if hasattr(preprocessor, '__class__') and preprocessor.__class__.__name__ == 'Preprocessor':
-                # It's already the right class
-                cloudpickle.dump(preprocessor, f)
-            else:
-                # Create a compatible preprocessing pipeline
-                compatible_pipeline = PreprocessingPipeline(steps=[], target_encoder=None)
+        # IMPORTANT: Save ALL outputs - one by one
+        try:
+            # Dataset outputs (matches DataLoader brick)
+            save_output(args.train_X, train_X_dict)
+            save_output(args.train_y, train_y_dict)
+            save_output(args.test_X, test_X_dict)
+            save_output(args.test_y, test_y_dict)
+            save_output(args.data_info, data_info, False)
+            
+            # Preprocessor outputs (matches Preprocessor brick)
+            save_output(args.processed_train_X, processed_train_X_dict)
+            save_output(args.processed_train_y, processed_train_y_dict)
+            
+            # Save preprocessing pipeline - FIXED
+            os.makedirs(os.path.dirname(args.preprocessing_pipeline) if os.path.dirname(args.preprocessing_pipeline) else ".", exist_ok=True)
+            # Create a compatible preprocessing pipeline
+            compatible_pipeline = PreprocessingPipeline(steps=[], target_encoder=None)
+            with open(args.preprocessing_pipeline, 'wb') as f:
                 cloudpickle.dump(compatible_pipeline, f)
+            print(f"Saved: {args.preprocessing_pipeline}")
+            
+            save_output(args.feature_info, feature_info, False)
+            save_output(args.weight_out, weight_config, False)
+            
+            # Additional outputs
+            save_output(args.preprocessor_pickle, preprocessor)
+            save_output(args.preprocessor_metadata, preprocessor_metadata, False)
+            save_output(args.feature_selector, feature_selector)
+            save_output(args.pca_model, pca_model)
+            save_output(args.pca_metadata, pca_metadata, False)
+            
+        except Exception as e:
+            print(f"ERROR saving outputs: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
         
-        save_output(args.feature_info, feature_info, False)
-        save_output(args.weight_out, weight_config, False)
-        
-        # Save additional outputs
-        save_output(args.preprocessor_pickle, preprocessor)
-        save_output(args.preprocessor_metadata, preprocessor_metadata, False)
-        save_output(args.feature_selector, feature_selector)
-        save_output(args.pca_model, pca_model)
-        save_output(args.pca_metadata, pca_metadata, False)
-        
-        print("\\n[STEP 5] Summary...")
+        print("\n[STEP 5] Summary...")
         print("="*80)
         print("XGBOOST DATA DOWNLOADER COMPLETE")
         print("="*80)
         print(f"✓ Downloaded {len(feature_names)} features")
-        print(f"✓ Train data: {len(train_x_values)} samples")
-        print(f"✓ Test data: {len(test_x_values)} samples")
+        print(f"✓ Train data: {train_x_df.shape[0]} samples")
+        print(f"✓ Test data: {test_x_df.shape[0]} samples")
         print(f"✓ Target: {args.target_column}")
         print(f"✓ Task type: {task_type}")
         print(f"✓ Preprocessor: {'Available' if preprocessor else 'Not available'}")
@@ -620,7 +534,7 @@ implementation:
         print("="*80)
         print(f"Outputs saved:")
         print(f"  - Dataset files: 4 files (matches DataLoader brick)")
-        print(f"  - Data info: {args.data_info}")
+        print(f"  - Data info: 1 file")
         print(f"  - Preprocessor outputs: 5 files (matches Preprocessor brick)")
         print(f"  - Additional outputs: 5 files")
         print("="*80)
