@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v4
+name: XGBoost Data Downloader v5
 description: Downloads all data from CDN URLs and converts to XGBoost pipeline format
 inputs:
   # CDN URLs from trigger
@@ -67,7 +67,7 @@ implementation:
         from sklearn.feature_selection import SelectKBest, f_classif, f_regression
 
         # ===============================================
-        # CLASS DEFINITIONS FROM PIPELINE 1 (to load pickles)
+        # CLASS DEFINITIONS
         # ===============================================
 
         # Helper function to load pickle (handles both gzipped and regular)
@@ -98,10 +98,6 @@ implementation:
                             print(f"    Gzip pickle: {e3}")
                             print(f"    Gzip cloudpickle: {e4}")
                             raise
-
-        # ===============================================
-        # PIPELINE 2 PREPROCESSING PIPELINE CLASS (as expected by downstream)
-        # ===============================================
 
         class PreprocessingPipeline:
             def __init__(self, steps, target_encoder=None):
@@ -168,7 +164,7 @@ implementation:
         args = parser.parse_args()
 
         print("="*80)
-        print("XGBOOST DATA DOWNLOADER - COMPLETE FIX")
+        print("XGBOOST DATA DOWNLOADER - FIXED OUTPUT FORMAT")
         print("="*80)
 
         # Helper functions
@@ -224,49 +220,42 @@ implementation:
                 content = decompress_gzip(content)
             return pd.read_csv(BytesIO(content))
 
-        def load_json_content(content, description=""):
-            print(f"  Loading {description}...")
-            if is_gzipped(content):
-                content = decompress_gzip(content)
-            return json.loads(content.decode('utf-8'))
-
-        # Function to save output with proper Argo directory handling
+        # Function to save output - FIXED: Save directly to file path
         def save_output(path, data, is_pickle=True):
-            # Argo creates directories, so we need to write a file inside
-            os.makedirs(path, exist_ok=True)
+            # IMPORTANT: path is a FILE path, not directory
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
             
             if is_pickle:
-                file_path = os.path.join(path, 'data.pkl')
-                with open(file_path, 'wb') as f:
+                with open(path, 'wb') as f:
                     pickle.dump(data, f)
             else:
-                file_path = os.path.join(path, 'data.json')
-                with open(file_path, 'w') as f:
+                with open(path, 'w') as f:
                     json.dump(data, f, indent=2)
             
-            print(f"Saved: {file_path}")
+            print(f"Saved: {path}")
 
         print("[STEP 1] Downloading all data from CDN URLs...")
         
         # Download CSV files
-        print("\\n1. Downloading CSV datasets...")
+        print("\n1. Downloading CSV datasets...")
         train_x_content = download_from_cdn(args.train_x_cdn, "train X")
         train_y_content = download_from_cdn(args.train_y_cdn, "train y")
         test_data_content = download_from_cdn(args.test_data_cdn, "test data")
         
-        print("\\n2. Downloading pickle files...")
+        print("\n2. Downloading pickle files...")
         preprocessor_content = download_from_cdn(args.preprocessor_cdn, "preprocessor")
         feature_selector_content = download_from_cdn(args.feature_selector_cdn, "feature selector")
         
-        print("\\n3. Downloading metadata files...")
+        print("\n3. Downloading metadata files...")
         preprocessor_metadata_content = download_from_cdn(args.preprocessor_metadata_cdn, "preprocessor metadata")
         
         print("[STEP 1 COMPLETE] All files downloaded")
 
-        print("\\n[STEP 2] Processing downloaded data...")
+        print("\n[STEP 2] Processing downloaded data...")
         
         # Parse CSV data
-        print("\\nParsing CSV datasets...")
+        print("\nParsing CSV datasets...")
         train_x_df = load_csv_content(train_x_content, "train X")
         train_y_df = load_csv_content(train_y_content, "train y")
         test_data_df = load_csv_content(test_data_content, "test data")
@@ -292,7 +281,7 @@ implementation:
         task_type = pipeline_config.get('task', 'classification')
         
         # Load Pipeline 1 preprocessor and feature selector
-        print("\\nLoading Pipeline 1 preprocessor...")
+        print("\nLoading Pipeline 1 preprocessor...")
         try:
             preprocessor_pipeline1 = load_pickle_content(preprocessor_content, "preprocessor")
             print("  Successfully loaded preprocessor")
@@ -337,7 +326,7 @@ implementation:
             except Exception as e:
                 print(f"  Warning: Feature selector transform failed: {e}")
         
-        print(f"\\nData Summary:")
+        print(f"\nData Summary:")
         print(f"Train X shape: {train_x_df.shape}")
         print(f"Train y shape: {train_y_df.shape}")
         print(f"Test X shape: {test_x_df.shape}")
@@ -347,7 +336,7 @@ implementation:
         print(f"Task type: {task_type}")
         print(f"Target column: {args.target_column}")
 
-        print("\\n[STEP 3] Creating DataLoader brick outputs...")
+        print("\n[STEP 3] Creating DataLoader brick outputs...")
         
         # Create DataLoader format outputs
         train_X_dict = {
@@ -408,7 +397,7 @@ implementation:
             'cdn_download': True
         }
 
-        print("\\n[STEP 4] Creating Preprocessor brick outputs...")
+        print("\n[STEP 4] Creating Preprocessor brick outputs...")
         
         # Create Preprocessor format outputs
         # For Pipeline 2, we need to mimic the preprocessing steps
@@ -533,7 +522,7 @@ implementation:
             'cdn_download': True
         }
 
-        print("\\n[STEP 5] Saving all outputs...")
+        print("\n[STEP 5] Saving all outputs...")
         
         try:
             # Save DataLoader outputs
@@ -556,7 +545,7 @@ implementation:
             traceback.print_exc()
             raise
         
-        print("\\n[STEP 6] Summary...")
+        print("\n[STEP 6] Summary...")
         print("="*80)
         print("XGBOOST DATA DOWNLOADER COMPLETE")
         print("="*80)
