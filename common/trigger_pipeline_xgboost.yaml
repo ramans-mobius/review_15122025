@@ -301,50 +301,19 @@ implementation:
             "version": 1
         }
 
+        # ===============================================
+        # NEW: SIMPLE PAYLOAD PRINT STATEMENT
+        # ===============================================
+        print("\\n" + "="*80)
+        print("PAYLOAD FOR MANUAL TRIGGER:")
+        print("="*80)
+        print(json.dumps(payload, indent=2))
+        print("="*80)
+        # ===============================================
+
         print(f"Trigger URL: {trigger_url}")
         print(f"Pipeline ID: {args.pipeline_id}")
         print(f"Experiment ID: {args.experiment_id}")
-        
-        # ======================================================================
-        # NEW: Print the full payload for manual triggering
-        # ======================================================================
-        print("\\n" + "="*80)
-        print("PAYLOAD FOR MANUAL TRIGGER")
-        print("="*80)
-        print("\\nFULL PAYLOAD JSON:")
-        print("-"*80)
-        print(json.dumps(payload, indent=2))
-        print("-"*80)
-        
-        # Also save payload to file for manual use
-        with open('/tmp/xgboost_payload.json', 'w') as f:
-            json.dump(payload, f, indent=2)
-        print(f"\\nPayload saved to /tmp/xgboost_payload.json for manual use")
-        
-        # Print all CDN URLs for reference
-        print("\\nALL CDN URLs:")
-        print("-"*80)
-        for key, url in cdn_urls.items():
-            print(f"{key:25}: {url[:80]}...")
-        
-        # Print the full curl command
-        print("\\nFULL CURL COMMAND:")
-        print("-"*80)
-        print(f"curl -X POST '{trigger_url}' \\\\")
-        print(f"  -H 'accept: application/json' \\\\")
-        print(f"  -H 'Authorization: Bearer {bearer_token}' \\\\")
-        print("  -H 'Content-Type: application/json' \\\\")
-        print(f"  -d '{json.dumps(payload)}'")
-        
-        # Alternative command using saved file
-        print("\\nALTERNATIVE (using saved file):")
-        print(f"curl -X POST '{trigger_url}' \\\\")
-        print(f"  -H 'accept: application/json' \\\\")
-        print(f"  -H 'Authorization: Bearer YOUR_TOKEN_HERE' \\\\")
-        print("  -H 'Content-Type: application/json' \\\\")
-        print("  -d @/tmp/xgboost_payload.json")
-        print("="*80)
-        print()
         
         # Make the request
         headers = {
@@ -388,9 +357,9 @@ implementation:
                 # Parse and print response
                 try:
                     response_json = json.loads(response_text)
-                    print(f"\\nResponse: {json.dumps(response_json, indent=2)}")
+                    print(f"Response: {json.dumps(response_json, indent=2)}")
                 except:
-                    print(f"\\nRaw response: {response_text}")
+                    print(f"Raw response: {response_text}")
                 
                 break
                 
@@ -428,22 +397,6 @@ implementation:
             print(f"  {key}: {url[:80]}...")
         print(f"Trigger response saved to: {args.trigger_response}")
         print(f"CDN URLs saved to: {args.cdn_urls_json}")
-        
-        # Final manual trigger instructions
-        print("\\n" + "="*80)
-        print("MANUAL TRIGGER INSTRUCTIONS")
-        print("="*80)
-        print("To manually trigger this pipeline again:")
-        print("1. Copy the bearer token: (from above)")
-        print("2. Use one of these commands:")
-        print()
-        print("Option A - Copy and paste the curl command above")
-        print("Option B - Use saved payload file:")
-        print(f"   curl -X POST '{trigger_url}' \\\\")
-        print("     -H 'accept: application/json' \\\\")
-        print("     -H 'Authorization: Bearer YOUR_TOKEN_HERE' \\\\")
-        print("     -H 'Content-Type: application/json' \\\\")
-        print("     -d @/tmp/xgboost_payload.json")
         print("="*80)
             
     args:
