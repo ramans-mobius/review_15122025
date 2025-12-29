@@ -1,4 +1,4 @@
-name: Evaluation
+name: Evaluation v2
 description: Evaluates a CNN model and outputs performance metrics.
 
 inputs:
@@ -255,8 +255,8 @@ implementation:
 
         # KFP metrics format
         with open(args.metrics, "w") as f:
-            f.write(f"accuracy: {accuracy}\n")
-            f.write(f"loss: {avg_loss}\n")
+            f.write(f"accuracy: {accuracy}\\n")
+            f.write(f"loss: {avg_loss}\\n")
 
         print("=== EVALUATION COMPLETE ===")
         print(f"Training mode: {training_mode}")
