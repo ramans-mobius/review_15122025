@@ -1,4 +1,4 @@
-name: Evaluator v2
+name: Evaluator v3
 description: Evaluates trained model on test data with proper schema output
 inputs:
   - name: trained_model
@@ -45,6 +45,7 @@ implementation:
         import argparse
 
         print("STARTING EVALUATOR")
+        print("=" * 80)
 
         # Define the PreprocessingPipeline class BEFORE loading pickle files
         class PreprocessingPipeline:
@@ -67,52 +68,119 @@ implementation:
                     # Try to convert to DataFrame
                     X_transformed = pd.DataFrame(X_transformed)
                 
-                print(f"  Input shape before preprocessing: {X_transformed.shape}")
-                print(f"  Data types: {X_transformed.dtypes.unique()}")
+                print(f"DEBUG: Input shape before preprocessing: {X_transformed.shape}")
+                print(f"DEBUG: Column names: {list(X_transformed.columns)}")
+                print(f"DEBUG: Data types: {X_transformed.dtypes.unique()}")
+                
+                # DEBUG: Show sample values for each column
+                print("\\nDEBUG: Sample values for each column (first 3 rows):")
+                for col in X_transformed.columns:
+                    sample_vals = X_transformed[col].iloc[:3].tolist()
+                    print(f"  {col}: {sample_vals} (type: {type(sample_vals[0]) if len(sample_vals) > 0 else 'empty'})")
                 
                 # Convert string columns to numeric BEFORE applying sklearn transformers
-                columns_to_drop = []
                 for col in X_transformed.columns:
                     if X_transformed[col].dtype == 'object' or (len(X_transformed) > 0 and isinstance(X_transformed[col].iloc[0], str)):
-                        print(f"  Converting string column '{col}' to numeric...")
+                        print(f"\\nDEBUG: Converting string column '{col}' to numeric...")
+                        print(f"  Sample values: {X_transformed[col].iloc[:5].tolist()}")
+                        
+                        # Try to convert to datetime first
                         try:
-                            # Try to convert to datetime first
                             converted = pd.to_datetime(X_transformed[col], errors='coerce')
                             if converted.notna().any():
                                 # Convert datetime to timestamp (seconds since epoch)
                                 X_transformed[col] = converted.astype('int64') // 10**9
-                                print(f"    Converted '{col}' from datetime to timestamp")
+                                print(f"  ✓ Converted '{col}' from datetime to timestamp")
+                                print(f"  Sample converted values: {X_transformed[col].iloc[:5].tolist()}")
                             else:
                                 # Try numeric conversion
+                                original_vals = X_transformed[col].copy()
                                 X_transformed[col] = pd.to_numeric(X_transformed[col], errors='coerce')
-                                if X_transformed[col].isna().all():
-                                    print(f"    Column '{col}' conversion failed, dropping...")
-                                    columns_to_drop.append(col)
-                                else:
-                                    print(f"    Converted '{col}' to numeric")
+                                
+                                # Check how many values were converted
+                                num_converted = X_transformed[col].notna().sum()
+                                num_total = len(X_transformed[col])
+                                print(f"  ✓ Converted {num_converted}/{num_total} values in '{col}' to numeric")
+                                
+                                # Fill NaN values that couldn't be converted with 0
+                                if X_transformed[col].isna().any():
+                                    print(f"  ! {X_transformed[col].isna().sum()} values couldn't be converted, filling with 0")
+                                    print(f"  Problematic values: {original_vals[X_transformed[col].isna()].head().tolist()}")
+                                    X_transformed[col] = X_transformed[col].fillna(0)
+                                
+                                print(f"  Sample converted values: {X_transformed[col].iloc[:5].tolist()}")
                         except Exception as e:
-                            print(f"    Error converting '{col}': {e}")
-                            columns_to_drop.append(col)
-                
-                # Drop columns that couldn't be converted
-                if columns_to_drop:
-                    print(f"  Dropping columns that couldn't be converted: {columns_to_drop}")
-                    X_transformed = X_transformed.drop(columns=columns_to_drop)
+                            print(f"  ✗ Error converting '{col}': {e}")
+                            print(f"  Filling entire column with 0 to preserve feature dimension")
+                            X_transformed[col] = 0
                 
                 # Fill NaN values
                 X_transformed = X_transformed.fillna(0)
                 
-                print(f"  Shape after string conversion: {X_transformed.shape}")
+                print(f"\\nDEBUG: Shape after string conversion: {X_transformed.shape}")
+                print(f"DEBUG: Columns after conversion: {list(X_transformed.columns)}")
+                
+                # CRITICAL FIX: Ensure we have the expected number of features before applying transformers
+                if self.steps and len(self.steps) > 0:
+                    transformer = self.steps[0][1]  # Get the first transformer
+                    if hasattr(transformer, 'feature_names_in_'):
+                        expected_features = transformer.feature_names_in_
+                        print(f"\\nDEBUG: First transformer expects {len(expected_features)} features")
+                        print(f"DEBUG: Expected feature names: {list(expected_features)}")
+                        
+                        # Check if we have all expected features
+                        missing_features = set(expected_features) - set(X_transformed.columns)
+                        extra_features = set(X_transformed.columns) - set(expected_features)
+                        
+                        if missing_features:
+                            print(f"DEBUG: Missing features: {list(missing_features)}")
+                            print(f"DEBUG: Creating missing features with 0 values")
+                            
+                            # Add missing features with 0 values
+                            for feature in missing_features:
+                                X_transformed[feature] = 0
+                        
+                        if extra_features:
+                            print(f"DEBUG: Extra features not expected by transformer: {list(extra_features)}")
+                            # These might be okay if transformer was fitted with subset
+                        
+                        # Reorder columns to match expected feature order
+                        X_transformed = X_transformed[list(expected_features)]
+                        print(f"DEBUG: Reordered columns to match transformer expectations")
                 
                 # Now apply sklearn preprocessing steps
                 for name, transformer in self.steps:
                     try:
-                        print(f"  Applying transformer: {name}")
+                        print(f"\\nDEBUG: Applying transformer: {name}")
+                        print(f"  Transformer type: {type(transformer).__name__}")
+                        print(f"  Input shape: {X_transformed.shape}")
+                        
+                        # Check if transformer has feature_names_in_ attribute
+                        if hasattr(transformer, 'feature_names_in_'):
+                            print(f"  Transformer expects {len(transformer.feature_names_in_)} features")
+                            print(f"  We have {X_transformed.shape[1]} features")
+                        
                         X_transformed = transformer.transform(X_transformed)
-                        print(f"    Shape after {name}: {X_transformed.shape}")
+                        
+                        # Handle different transformer outputs
+                        if isinstance(X_transformed, np.ndarray):
+                            print(f"  Output is numpy array with shape: {X_transformed.shape}")
+                            # Convert back to DataFrame for consistency
+                            if hasattr(transformer, 'get_feature_names_out'):
+                                feature_names = transformer.get_feature_names_out()
+                                X_transformed = pd.DataFrame(X_transformed, columns=feature_names)
+                            else:
+                                # Create generic feature names
+                                feature_names = [f'transformed_feature_{i}' for i in range(X_transformed.shape[1])]
+                                X_transformed = pd.DataFrame(X_transformed, columns=feature_names)
+                        else:
+                            print(f"  Output shape: {X_transformed.shape}")
+                            print(f"  Output columns: {list(X_transformed.columns)[:10]}...")
+                            
                     except Exception as e:
-                        print(f"    Warning: Transformer '{name}' failed: {e}")
-                        # Try to continue with next transformer
+                        print(f"  ✗ ERROR: Transformer '{name}' failed: {e}")
+                        print(f"  Transformer details: {transformer}")
+                        raise e
                 
                 return X_transformed
             
@@ -158,16 +226,19 @@ implementation:
         args = parser.parse_args()
 
         # Load model, test data, and preprocessing pipeline
+        print("\\n" + "="*80)
         print("Loading trained model...")
         with open(args.trained_model, 'rb') as f:
             model = pickle.load(f)
-        print("Loading test_X...")
+        print(f"Model type: {type(model).__name__}")
+        
+        print("\\nLoading test_X...")
         with open(args.test_X, 'rb') as f:
             test_X_dict = pickle.load(f)
-        print("Loading test_y...")
+        print("\\nLoading test_y...")
         with open(args.test_y, 'rb') as f:
             test_y_dict = pickle.load(f)
-        print("Loading preprocessing pipeline...")
+        print("\\nLoading preprocessing pipeline...")
         with open(args.preprocessing_pipeline, 'rb') as f:
             preprocessing_pipeline = pickle.load(f)
         
@@ -180,26 +251,30 @@ implementation:
         target_name = test_y_dict.get('target_name', 'target')
         task_type = test_y_dict.get('task_type', 'classification')
         
-        print(f'Evaluating model on {len(X_test_raw)} test samples')
-        print(f'Test data shape: {X_test_raw.shape}')
-        print(f'Target: {target_name}')
-        print(f'Task type: {task_type}')
-        print(f'Number of features: {len(feature_names) if feature_names else X_test_raw.shape[1]}')
+        print("\\n" + "="*80)
+        print("TEST DATA SUMMARY:")
+        print(f"  Samples: {len(X_test_raw)}")
+        print(f"  Test data shape: {X_test_raw.shape}")
+        print(f"  Target: {target_name}")
+        print(f"  Task type: {task_type}")
+        print(f"  Number of features: {len(feature_names) if feature_names else X_test_raw.shape[1]}")
         
         # Check data types
         if isinstance(X_test_raw, np.ndarray):
-            print(f'Test X is numpy array with dtype: {X_test_raw.dtype}')
+            print(f"  Test X is numpy array with dtype: {X_test_raw.dtype}")
         elif isinstance(X_test_raw, pd.DataFrame):
-            print(f'Test X is DataFrame with columns: {list(X_test_raw.columns)[:10]}...')
-            print(f'Data types: {X_test_raw.dtypes.unique()}')
+            print(f"  Test X is DataFrame with columns: {list(X_test_raw.columns)}")
+            print(f"  Data types: {X_test_raw.dtypes.unique()}")
         else:
-            print(f'Test X type: {type(X_test_raw)}')
+            print(f"  Test X type: {type(X_test_raw)}")
 
         # Transform test data using preprocessing pipeline
-        print("\\nTransforming test data with preprocessing pipeline...")
+        print("\\n" + "="*80)
+        print("TRANSFORMING TEST DATA:")
         try:
             X_test = preprocessing_pipeline.transform_features(X_test_raw)
-            print(f'Successfully transformed features - shape: {X_test.shape}')
+            print(f"\\n✓ Successfully transformed features - shape: {X_test.shape}")
+            print(f"  Final columns: {list(X_test.columns) if hasattr(X_test, 'columns') else 'N/A'}")
             
             # Ensure X_test is numpy array for prediction
             if isinstance(X_test, pd.DataFrame):
@@ -207,11 +282,14 @@ implementation:
             elif not isinstance(X_test, np.ndarray):
                 X_test = np.array(X_test)
                 
+            print(f"  Converted to numpy array with shape: {X_test.shape}")
+            print(f"  Array dtype: {X_test.dtype}")
+                
         except Exception as e:
-            print(f"Error transforming features: {e}")
-            print("Attempting manual conversion...")
+            print(f"\\n✗ Error transforming features: {e}")
+            print("Attempting fallback transformation...")
             
-            # Manual conversion fallback
+            # Fallback: Simple conversion preserving dimensions
             if isinstance(X_test_raw, pd.DataFrame):
                 X_test_df = X_test_raw.copy()
             elif isinstance(X_test_raw, np.ndarray):
@@ -219,57 +297,107 @@ implementation:
             else:
                 X_test_df = pd.DataFrame(X_test_raw)
             
+            # Get expected feature count from model or config
+            expected_features = X_test_raw.shape[1]  # Original count
+            
             # Convert all columns to numeric
             for col in X_test_df.columns:
                 if X_test_df[col].dtype == 'object' or (len(X_test_df) > 0 and isinstance(X_test_df[col].iloc[0], str)):
                     try:
-                        # Try datetime conversion
-                        converted = pd.to_datetime(X_test_df[col], errors='coerce')
-                        if converted.notna().any():
-                            X_test_df[col] = converted.astype('int64') // 10**9
-                        else:
-                            X_test_df[col] = pd.to_numeric(X_test_df[col], errors='coerce')
+                        X_test_df[col] = pd.to_numeric(X_test_df[col], errors='coerce')
                     except:
                         X_test_df[col] = 0
             
             X_test_df = X_test_df.fillna(0)
+            
+            # Ensure we have the right number of features
+            if len(X_test_df.columns) < expected_features:
+                print(f"  Adding missing features (expected {expected_features}, have {len(X_test_df.columns)})")
+                for i in range(len(X_test_df.columns), expected_features):
+                    X_test_df[f'feature_{i}'] = 0
+            
             X_test = X_test_df.values
-            print(f"Manual conversion complete - shape: {X_test.shape}")
+            print(f"  Fallback conversion complete - shape: {X_test.shape}")
         
         # Transform target if needed (for classification with label encoding)
         y_test = y_test_raw.copy()
         try:
             if hasattr(preprocessing_pipeline, 'target_encoder') and preprocessing_pipeline.target_encoder is not None:
                 y_test = preprocessing_pipeline.transform_target(y_test_raw)
-                print(f'Target transformed using label encoder')
+                print(f'  Target transformed using label encoder')
         except Exception as e:
-            print(f"Error transforming target: {e}")
-            print(f"Using raw target as fallback")
+            print(f"  Error transforming target: {e}")
+            print(f"  Using raw target as fallback")
         
-        print(f'\\nAfter preprocessing:')
-        print(f'  X_test shape: {X_test.shape}')
-        print(f'  y_test shape: {y_test.shape}')
-        print(f'  Unique target values: {np.unique(y_test)}')
-        print(f'  X_test dtype: {X_test.dtype}')
+        print(f"\\nAFTER PREPROCESSING:")
+        print(f"  X_test shape: {X_test.shape}")
+        print(f"  y_test shape: {y_test.shape}")
+        print(f"  Unique target values: {np.unique(y_test)}")
+        print(f"  Target range: [{np.min(y_test):.4f}, {np.max(y_test):.4f}]")
+        
+        # Verify feature dimension matches model expectation
+        if hasattr(model, 'n_features_in_'):
+            print(f"\\nMODEL FEATURE EXPECTATIONS:")
+            print(f"  Model expects {model.n_features_in_} features")
+            print(f"  We have {X_test.shape[1]} features")
+            
+            if X_test.shape[1] != model.n_features_in_:
+                print(f"   WARNING: Feature dimension mismatch!")
+                print(f"  Attempting to fix by adjusting feature dimensions...")
+                
+                if X_test.shape[1] < model.n_features_in_:
+                    # Add missing features
+                    missing = model.n_features_in_ - X_test.shape[1]
+                    print(f"  Adding {missing} missing features with 0 values")
+                    X_test = np.hstack([X_test, np.zeros((X_test.shape[0], missing))])
+                else:
+                    # Truncate extra features (keep first n_features_in_)
+                    print(f"  Truncating to first {model.n_features_in_} features")
+                    X_test = X_test[:, :model.n_features_in_]
+                
+                print(f"  Fixed shape: {X_test.shape}")
 
         # Make predictions
-        print("\\nMaking predictions...")
+        print("\\n" + "="*80)
+        print("MAKING PREDICTIONS:")
         try:
             y_pred = model.predict(X_test)
-            print(f'Predictions made - shape: {y_pred.shape}')
-            print(f'Prediction dtype: {y_pred.dtype}')
+            print(f'✓ Predictions made - shape: {y_pred.shape}')
+            print(f'  Prediction dtype: {y_pred.dtype}')
+            print(f'  Prediction range: [{np.min(y_pred):.4f}, {np.max(y_pred):.4f}]')
+            
+            # If model has predict_proba, also get probabilities
+            if hasattr(model, 'predict_proba'):
+                try:
+                    y_pred_proba = model.predict_proba(X_test)
+                    print(f'  Probabilities shape: {y_pred_proba.shape}')
+                except Exception as e:
+                    print(f'  Note: predict_proba failed: {e}')
+                    
         except Exception as e:
-            print(f"Error making predictions: {e}")
+            print(f"✗ Error making predictions: {e}")
             print("Attempting to fix data types...")
             
-            # Ensure X_test is float32 for XGBoost
-            X_test = X_test.astype(np.float32)
-            y_pred = model.predict(X_test)
-            print(f'Predictions made after type conversion - shape: {y_pred.shape}')
+            # Try different dtype conversions
+            for dtype in [np.float32, np.float64]:
+                try:
+                    X_test_converted = X_test.astype(dtype)
+                    print(f"  Trying dtype: {dtype}")
+                    y_pred = model.predict(X_test_converted)
+                    print(f"  ✓ Success with dtype: {dtype}")
+                    print(f"  Predictions shape: {y_pred.shape}")
+                    break
+                except Exception as inner_e:
+                    print(f"  ✗ Failed with dtype {dtype}: {inner_e}")
+                    continue
+            else:
+                # All conversions failed
+                raise ValueError(f"All prediction attempts failed. Last error: {e}")
         
         # Calculate metrics based on task type
+        print("\\n" + "="*80)
         if task_type == 'regression':
-            print("\\nCalculating regression metrics...")
+            print("CALCULATING REGRESSION METRICS...")
             metrics_dict = {
                 'r2_score': float(r2_score(y_test, y_pred)),
                 'mae': float(mean_absolute_error(y_test, y_pred)),
@@ -286,11 +414,16 @@ implementation:
             # For regression, use MSE as loss
             loss_value = metrics_dict['mse']
             
+            print(f"  R² Score: {metrics_dict['r2_score']:.4f}")
+            print(f"  MAE: {metrics_dict['mae']:.4f}")
+            print(f"  RMSE: {metrics_dict['rmse']:.4f}")
+            print(f"  MAPE: {metrics_dict['mape']:.4f}%")
+            
         else:  # classification
-            print("Calculating classification metrics...")
+            print("CALCULATING CLASSIFICATION METRICS...")
             # Get number of classes
             n_classes = len(np.unique(y_test))
-            print(f'Number of classes: {n_classes}')
+            print(f'  Number of classes: {n_classes}')
             
             metrics_dict = {
                 'accuracy': float(accuracy_score(y_test, y_pred)),
@@ -305,28 +438,38 @@ implementation:
             
             # Calculate loss (log loss for classification)
             if hasattr(model, 'predict_proba'):
-                print("Model has predict_proba, calculating probabilities...")
-                y_pred_proba = model.predict_proba(X_test)
-                loss_value = float(log_loss(y_test, y_pred_proba))
-                
-                # Calculate ROC AUC
+                print("  Model has predict_proba, calculating probabilities...")
                 try:
-                    if n_classes == 2:
-                        # Binary classification
-                        metrics_dict['roc_auc'] = float(roc_auc_score(y_test, y_pred_proba[:, 1]))
-                        print(f"Binary ROC AUC calculated: {metrics_dict['roc_auc']}")
-                    else:
-                        # Multi-class classification
-                        metrics_dict['roc_auc'] = float(roc_auc_score(y_test, y_pred_proba, multi_class='ovr', average='weighted'))
-                        print(f"Multi-class ROC AUC calculated: {metrics_dict['roc_auc']}")
+                    y_pred_proba = model.predict_proba(X_test)
+                    loss_value = float(log_loss(y_test, y_pred_proba))
+                    
+                    # Calculate ROC AUC
+                    try:
+                        if n_classes == 2:
+                            # Binary classification
+                            metrics_dict['roc_auc'] = float(roc_auc_score(y_test, y_pred_proba[:, 1]))
+                            print(f"  Binary ROC AUC: {metrics_dict['roc_auc']:.4f}")
+                        else:
+                            # Multi-class classification
+                            metrics_dict['roc_auc'] = float(roc_auc_score(y_test, y_pred_proba, multi_class='ovr', average='weighted'))
+                            print(f"  Multi-class ROC AUC: {metrics_dict['roc_auc']:.4f}")
+                    except Exception as e:
+                        print(f"  ROC AUC calculation failed: {e}")
+                        metrics_dict['roc_auc'] = 0.0
                 except Exception as e:
-                    print(f"ROC AUC calculation failed: {e}")
+                    print(f"  predict_proba failed: {e}")
+                    loss_value = 1 - metrics_dict['accuracy']
                     metrics_dict['roc_auc'] = 0.0
             else:
-                print("Model doesn't have predict_proba, using accuracy-based loss")
+                print("  Model doesn't have predict_proba, using accuracy-based loss")
                 # If no predict_proba, use 1 - accuracy as loss
                 loss_value = 1 - metrics_dict['accuracy']
                 metrics_dict['roc_auc'] = 0.0
+            
+            print(f"  Accuracy: {metrics_dict['accuracy']:.4f}")
+            print(f"  Precision: {metrics_dict['precision']:.4f}")
+            print(f"  Recall: {metrics_dict['recall']:.4f}")
+            print(f"  F1 Score: {metrics_dict['f1_score']:.4f}")
 
         # Get model algorithm info
         algorithm = config.get('model', {}).get('algorithm', 'Unknown')
@@ -366,7 +509,7 @@ implementation:
         else:
             confusion_matrix_flat = []
 
-        # FIXED: Create schema metrics with proper data types for both regression and classification
+        # Create schema metrics with proper data types
         schema_metrics = {
             'loss': str(loss_value),
             'confusion_matrix': confusion_matrix_flat,
@@ -378,14 +521,12 @@ implementation:
         
         # Add task-specific metrics
         if task_type == 'classification':
-            # For classification, add accuracy and classification metrics
             schema_metrics.update({
                 'accuracy': str(metrics_dict.get('accuracy', 0.0)),
                 'precision': float(metrics_dict.get('precision', 0.0)),
                 'recall': float(metrics_dict.get('recall', 0.0)),
                 'f1_score': float(metrics_dict.get('f1_score', 0.0)),
                 'roc_auc': float(metrics_dict.get('roc_auc', 0.0)),
-                # For regression metrics, set to 0 for classification
                 'r2_score': 0.0,
                 'mae': 0.0,
                 'rmse': 0.0,
@@ -393,24 +534,22 @@ implementation:
                 'mape': 0.0
             })
         else:  # regression
-            # For regression, add regression metrics
-            # Use R² as "accuracy" for schema compatibility
             r2_value = metrics_dict.get('r2_score', 0.0)
             schema_metrics.update({
-                'accuracy': str(r2_value),  # Using R² as accuracy for regression
+                'accuracy': str(r2_value),
                 'r2_score': float(r2_value),
                 'mae': float(metrics_dict.get('mae', 0.0)),
                 'rmse': float(metrics_dict.get('rmse', 0.0)),
                 'mse': float(metrics_dict.get('mse', 0.0)),
                 'mape': float(metrics_dict.get('mape', 0.0)),
-                # For classification metrics, set to 0 for regression
                 'precision': 0.0,
                 'recall': 0.0,
                 'f1_score': 0.0,
                 'roc_auc': 0.0
             })
 
-        print("SCHEMA METRICS PREPARED:")
+        print("\\n" + "="*80)
+        print("SCHEMA METRICS SUMMARY:")
         for key, value in schema_metrics.items():
             if key != 'confusion_matrix':
                 print(f"  {key}: {value} (type: {type(value).__name__})")
@@ -428,10 +567,10 @@ implementation:
         with open(args.schema_metrics, 'w') as f:
             json.dump(schema_metrics, f, indent=2)
         
-        print(f"\\nEvaluation completed for {task_type}")
-        print(f"Key metrics: {metrics_dict}")
-        print(f"Metrics saved to: {args.metrics}")
-        print(f"Schema metrics saved to: {args.schema_metrics}")
+        print(f"\\n✓ Evaluation completed for {task_type}")
+        print(f"✓ Metrics saved to: {args.metrics}")
+        print(f"✓ Schema metrics saved to: {args.schema_metrics}")
+        print("=" * 80)
     args:
       - --trained_model
       - {inputPath: trained_model}
