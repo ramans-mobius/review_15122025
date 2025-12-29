@@ -14,7 +14,7 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/mobius:1.0
+    image: gurpreetgandhi/nesy-factory:vtest4
     command:
       - sh
       - -c
