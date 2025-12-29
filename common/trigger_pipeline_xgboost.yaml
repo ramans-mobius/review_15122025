@@ -1,4 +1,4 @@
-name: Trigger XGBoost Pipeline with CDN v5
+name: Trigger XGBoost Pipeline with CDN v4
 description: Reads CDN URLs from files and triggers XGBoost pipeline
 inputs:
   # ALL inputs are FILE PATHS containing CDN URLs from Upload brick
@@ -44,7 +44,7 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/mobius:1.0
+    image: gurpreetgandhi/nesy-factory:vtest4
     command:
       - sh
       - -ec
@@ -302,7 +302,7 @@ implementation:
         }
 
         # ===============================================
-        # NEW: SIMPLE PAYLOAD PRINT STATEMENT
+        # ADDED: Simple payload print statement
         # ===============================================
         print("\\n" + "="*80)
         print("PAYLOAD FOR MANUAL TRIGGER:")
