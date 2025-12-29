@@ -143,7 +143,7 @@ implementation:
 
         # Function to decompress gzipped content
         def decompress_gzip(content):
-            """Decompress gzipped content."""
+         
             try:
                 with gzip.GzipFile(fileobj=BytesIO(content)) as gz:
                     return gz.read()
@@ -182,7 +182,7 @@ implementation:
 
         # Function to safely load pickle that might be gzipped
         def safe_load_pickle(content, description=""):
-            """Load pickle content, handling gzipped content."""
+           
             print(f"  Loading {description}...")
             
             # Check if content is still gzipped (in case download function didn't handle it)
@@ -219,7 +219,7 @@ implementation:
 
         # Function to load CSV that might be gzipped
         def load_csv_content(content, description=""):
-            """Load CSV content, handling gzipped content."""
+      
             print(f"  Loading {description}...")
             
             if is_gzipped(content):
@@ -230,7 +230,7 @@ implementation:
 
         # Function to load JSON that might be gzipped
         def load_json_content(content, description=""):
-            """Load JSON content, handling gzipped content."""
+           
             print(f"  Loading {description}...")
             
             if is_gzipped(content):
