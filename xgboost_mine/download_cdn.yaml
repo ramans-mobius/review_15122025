@@ -1,4 +1,4 @@
-name: XGBoost Data Downloader v3
+name: XGBoost Data Downloader v4
 description: Downloads all data from CDN URLs and converts to XGBoost pipeline format
 inputs:
   # CDN URLs from trigger
@@ -262,30 +262,30 @@ implementation:
         print("[STEP 1] Downloading all data from CDN URLs...")
         
         # Download all files
-        print("\n1. Downloading CSV datasets...")
+        print("\\n1. Downloading CSV datasets...")
         train_x_content = download_from_cdn(args.train_x_cdn, "train X")
         train_y_content = download_from_cdn(args.train_y_cdn, "train y")
         test_data_content = download_from_cdn(args.test_data_cdn, "test data")
         
-        print("\n2. Downloading pickle files...")
+        print("\\n2. Downloading pickle files...")
         preprocessor_content = download_from_cdn(args.preprocessor_cdn, "preprocessor")
         feature_selector_content = download_from_cdn(args.feature_selector_cdn, "feature selector")
         pca_model_content = download_from_cdn(args.pca_cdn, "PCA model")
         
-        print("\n3. Downloading metadata files...")
+        print("\\n3. Downloading metadata files...")
         preprocessor_metadata_content = download_from_cdn(args.preprocessor_metadata_cdn, "preprocessor metadata")
         pca_metadata_content = download_from_cdn(args.pca_metadata_cdn, "PCA metadata")
         
-        print("\n4. Downloading combined files...")
+        print("\\n4. Downloading combined files...")
         pickle_content = download_from_cdn(args.pickle_cdn_url, "combined pickle")
         config_content = download_from_cdn(args.config_cdn_url, "config pickle")
         
         print("[STEP 1 COMPLETE] All files downloaded")
 
-        print("\n[STEP 2] Processing downloaded data...")
+        print("\\n[STEP 2] Processing downloaded data...")
         
         # Parse CSV data
-        print("\nParsing CSV datasets...")
+        print("\\nParsing CSV datasets...")
         train_x_df = load_csv_content(train_x_content, "train X")
         train_y_df = load_csv_content(train_y_content, "train y")
         test_data_df = load_csv_content(test_data_content, "test data")
@@ -311,21 +311,21 @@ implementation:
         task_type = pipeline_config.get('task', 'classification')
         
         # Parse pickled objects
-        print("\nLoading pickle files...")
+        print("\\nLoading pickle files...")
         preprocessor = safe_load_pickle(preprocessor_content, "preprocessor")
         feature_selector = safe_load_pickle(feature_selector_content, "feature selector")
         pca_model = safe_load_pickle(pca_model_content, "PCA model")
         
         # Parse metadata
-        print("\nLoading metadata files...")
+        print("\\nLoading metadata files...")
         preprocessor_metadata = load_json_content(preprocessor_metadata_content, "preprocessor metadata")
         pca_metadata = load_json_content(pca_metadata_content, "PCA metadata")
         
-        print("\nLoading combined files...")
+        print("\\nLoading combined files...")
         combined_pickle_data = safe_load_pickle(pickle_content, "combined pickle")
         config_data = safe_load_pickle(config_content, "config pickle")
         
-        print(f"\nData Summary:")
+        print(f"\\nData Summary:")
         print(f"Train X shape: {train_x_df.shape}")
         print(f"Train y shape: {train_y_df.shape}")
         print(f"Test X shape: {test_x_df.shape}")
@@ -334,7 +334,7 @@ implementation:
         print(f"Task type: {task_type}")
         print(f"Target column: {args.target_column}")
 
-        print("\n[STEP 3] Creating XGBoost format outputs...")
+        print("\\n[STEP 3] Creating XGBoost format outputs...")
         
         # Create data info (matches DataLoader brick output)
         y_train_values = train_y_df[args.target_column].values if args.target_column in train_y_df.columns else train_y_df.iloc[:, 0].values
@@ -468,7 +468,7 @@ implementation:
             'gzip_handled': True
         }
 
-        print("\n[STEP 4] Saving all outputs...")
+        print("\\n[STEP 4] Saving all outputs...")
         
         # Function to save output with directory creation
         def save_output(path, data, is_pickle=True):
@@ -518,7 +518,7 @@ implementation:
             traceback.print_exc()
             raise
         
-        print("\n[STEP 5] Summary...")
+        print("\\n[STEP 5] Summary...")
         print("="*80)
         print("XGBOOST DATA DOWNLOADER COMPLETE")
         print("="*80)
