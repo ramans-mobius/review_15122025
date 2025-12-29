@@ -1,5 +1,5 @@
-name: Build or Load Model v5
-description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN
+name: Build or Load Model v7
+description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN with support for CAFO and Forward-Forward
 inputs:
   - name: config_str
     type: String
@@ -24,7 +24,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v19
+    image: gurpreetgandhi/nesy-factory:v34
     command:
       - sh
       - -c
@@ -65,9 +65,7 @@ implementation:
                 
             print(f"Loading model from CDN: {args.cdn_url}")
             
-            # Download the model
             try:
-                # Create a temporary file for download
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
                     tmp_path = tmp_file.name
                 
@@ -75,15 +73,10 @@ implementation:
                 urllib.request.urlretrieve(args.cdn_url, tmp_path)
                 print("Download completed")
                 
-                # Load the checkpoint
                 checkpoint = torch.load(tmp_path, map_location='cpu')
-                
-                # Save to the output path
                 torch.save(checkpoint, args.model_out)
                 print(f"Model loaded from CDN and saved to: {args.model_out}")
                 
-                # For CDN mode, we don't have config or model info
-                # Create minimal outputs
                 if args.config_str:
                     config = json.loads(args.config_str)
                 else:
@@ -103,7 +96,6 @@ implementation:
                 with open(args.model_info_out, 'w') as f:
                     json.dump(model_info, f, indent=2)
                     
-                # Clean up temp file
                 os.unlink(tmp_path)
                 
             except Exception as e:
@@ -111,24 +103,24 @@ implementation:
                 sys.exit(1)
                 
         else:
-            # MODE 2: Build new model from configuration using nesyfactory
+            # MODE 2: Build new model from configuration
             if not args.config_str or not args.model_name:
                 print("ERROR: config_str and model_name are required when load_from_cdn=false")
                 sys.exit(1)
                 
-            # Parse configuration
             config = json.loads(args.config_str)
             model_config = config.get('model', {})
             model_config['architecture'] = args.model_name
             
-            # Set default values if not provided
+            # Set default values
             defaults = {
                 'output_dim': 10,
                 'input_channels': 3,
                 'input_size': [224, 224],
                 'pretrained': True,
                 'use_cafo': False,
-                'use_forward_forward': False
+                'use_forward_forward': False,
+                'variant': 'resnet50'
             }
             
             for param, default_value in defaults.items():
@@ -136,26 +128,73 @@ implementation:
                     print(f"{param} not found, using default: {default_value}")
                     model_config[param] = default_value
 
+            # CRITICAL: Check which ResNet architecture to create
+            use_cafo = model_config.get('use_cafo', False)
+            use_forward_forward = model_config.get('use_forward_forward', False)
+            
+            print(f"\\n=== Model Configuration ===")
+            print(f"Architecture: {model_config['architecture']}")
+            print(f"Training Mode: {'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard Backprop'}")
+            print(f"Variant: {model_config.get('variant', 'resnet50')}")
+            print(f"Output dim: {model_config['output_dim']}")
+            
             try:
-                # Use nesyfactory's CNNFactory to create model
-                model = CNNFactory.create_model(model_config['architecture'], model_config)
-                print(f"Model created with {model.get_num_parameters():,} parameters")
+                # Decide which ResNet class to use
+                if use_cafo or use_forward_forward:
+                    print(f"\\nCreating Enhanced ResNet (supports CAFO/Forward-Forward)...")
+                    
+                    # Try to import the enhanced ResNet from ffresnet
+                    try:
+                        from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                        
+                        # Ensure required FF/CAFO params are in config
+                        if use_cafo:
+                            model_config['cafo_blocks'] = model_config.get('cafo_blocks', 4)
+                            model_config['epochs_per_block'] = model_config.get('epochs_per_block', 50)
+                            model_config['block_lr'] = model_config.get('block_lr', 0.001)
+                        elif use_forward_forward:
+                            ff_config = model_config.get("forward_forward", {})
+                            model_config['ff_blocks'] = ff_config.get('ff_blocks', 4)
+                            model_config['ff_epochs_per_block'] = ff_config.get('ff_epochs_per_block', 50)
+                            model_config['ff_lr'] = ff_config.get('ff_lr', 0.01)
+                            model_config['ff_threshold'] = ff_config.get('threshold', 2.0)
+                            model_config['ff_goodness_dim'] = ff_config.get('ff_goodness_dim', 128)
+                        
+                        # Create the enhanced model
+                        model = EnhancedResNet(model_config)
+                        print(f"✓ Created Enhanced ResNet from ffresnet module")
+                        print(f"  - Model type: {model.__class__.__name__}")
+                        print(f"  - Has train_cafo: {hasattr(model, 'train_cafo')}")
+                        print(f"  - Has train_forward_forward: {hasattr(model, 'train_forward_forward')}")
+                        
+                    except ImportError as e:
+                        print(f"✗ Could not import Enhanced ResNet: {e}")
+                        print("Falling back to standard ResNet (CAFO/FF training won't work)")
+                        model = CNNFactory.create_model('resnet', model_config)
+                else:
+                    # Standard training mode
+                    print(f"\\nCreating standard ResNet for backpropagation...")
+                    model = CNNFactory.create_model('resnet', model_config)
                 
-                # Get model info using nesyfactory's method
-                model_info = model.get_model_info()
+                print(f"\\nModel created with {model.get_num_parameters() if hasattr(model, 'get_num_parameters') else sum(p.numel() for p in model.parameters()):,} parameters")
+                
+                # Get model info
+                model_info = model.get_model_info() if hasattr(model, 'get_model_info') else {}
                 model_info['model_name'] = args.model_name
                 model_info['model_source'] = 'fresh_build'
+                model_info['training_mode'] = 'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Backpropagation'
+                model_info['model_class'] = model.__class__.__name__
                 
             except Exception as e:
-                print(f"Failed to create model using CNNFactory: {e}")
+                print(f"Failed to create model: {e}")
                 sys.exit(1)
 
-            # Save model in the format expected by the Train component
-            # Create a checkpoint dictionary with config and state dict
+            # Save model with proper checkpoint format
             checkpoint = {
                 'config': model_config,
                 'model_state_dict': model.state_dict(),
-                'model_info': model_info
+                'model_info': model_info,
+                'training_mode': 'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Backpropagation'
             }
             
             torch.save(checkpoint, args.model_out)
@@ -169,9 +208,9 @@ implementation:
             with open(args.model_info_out, 'w') as f:
                 json.dump(model_info, f, indent=2)
 
-            print(f"Model built from scratch and saved to: {args.model_out}")
-            print(f"Updated config saved to: {args.config_updated}")
-            print(f"Model info saved to: {args.model_info_out}")
+            print(f"\\n✓ Model built and saved to: {args.model_out}")
+            print(f"✓ Updated config saved to: {args.config_updated}")
+            print(f"✓ Model info saved to: {args.model_info_out}")
         
     args:
       - --model_name
