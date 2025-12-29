@@ -238,24 +238,24 @@ implementation:
         print("[STEP 1] Downloading all data from CDN URLs...")
         
         # Download CSV files
-        print("\n1. Downloading CSV datasets...")
+        print("\\n1. Downloading CSV datasets...")
         train_x_content = download_from_cdn(args.train_x_cdn, "train X")
         train_y_content = download_from_cdn(args.train_y_cdn, "train y")
         test_data_content = download_from_cdn(args.test_data_cdn, "test data")
         
-        print("\n2. Downloading pickle files...")
+        print("\\n2. Downloading pickle files...")
         preprocessor_content = download_from_cdn(args.preprocessor_cdn, "preprocessor")
         feature_selector_content = download_from_cdn(args.feature_selector_cdn, "feature selector")
         
-        print("\n3. Downloading metadata files...")
+        print("\\n3. Downloading metadata files...")
         preprocessor_metadata_content = download_from_cdn(args.preprocessor_metadata_cdn, "preprocessor metadata")
         
         print("[STEP 1 COMPLETE] All files downloaded")
 
-        print("\n[STEP 2] Processing downloaded data...")
+        print("\\n[STEP 2] Processing downloaded data...")
         
         # Parse CSV data
-        print("\nParsing CSV datasets...")
+        print("\\nParsing CSV datasets...")
         train_x_df = load_csv_content(train_x_content, "train X")
         train_y_df = load_csv_content(train_y_content, "train y")
         test_data_df = load_csv_content(test_data_content, "test data")
@@ -281,7 +281,7 @@ implementation:
         task_type = pipeline_config.get('task', 'classification')
         
         # Load Pipeline 1 preprocessor and feature selector
-        print("\nLoading Pipeline 1 preprocessor...")
+        print("\\nLoading Pipeline 1 preprocessor...")
         try:
             preprocessor_pipeline1 = load_pickle_content(preprocessor_content, "preprocessor")
             print("  Successfully loaded preprocessor")
@@ -326,7 +326,7 @@ implementation:
             except Exception as e:
                 print(f"  Warning: Feature selector transform failed: {e}")
         
-        print(f"\nData Summary:")
+        print(f"\\nData Summary:")
         print(f"Train X shape: {train_x_df.shape}")
         print(f"Train y shape: {train_y_df.shape}")
         print(f"Test X shape: {test_x_df.shape}")
@@ -336,7 +336,7 @@ implementation:
         print(f"Task type: {task_type}")
         print(f"Target column: {args.target_column}")
 
-        print("\n[STEP 3] Creating DataLoader brick outputs...")
+        print("\\n[STEP 3] Creating DataLoader brick outputs...")
         
         # Create DataLoader format outputs
         train_X_dict = {
@@ -397,7 +397,7 @@ implementation:
             'cdn_download': True
         }
 
-        print("\n[STEP 4] Creating Preprocessor brick outputs...")
+        print("\\n[STEP 4] Creating Preprocessor brick outputs...")
         
         # Create Preprocessor format outputs
         # For Pipeline 2, we need to mimic the preprocessing steps
@@ -522,7 +522,7 @@ implementation:
             'cdn_download': True
         }
 
-        print("\n[STEP 5] Saving all outputs...")
+        print("\\n[STEP 5] Saving all outputs...")
         
         try:
             # Save DataLoader outputs
@@ -545,7 +545,7 @@ implementation:
             traceback.print_exc()
             raise
         
-        print("\n[STEP 6] Summary...")
+        print("\\n[STEP 6] Summary...")
         print("="*80)
         print("XGBOOST DATA DOWNLOADER COMPLETE")
         print("="*80)
