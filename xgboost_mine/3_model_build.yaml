@@ -29,13 +29,13 @@ implementation:
         import sys
 
         # Install packages
-        print("Installing boosting packages...")
-        packages = ['xgboost', 'catboost', 'lightgbm', 'scikit-learn']
-        for package in packages:
-            try:
-                subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', package])
-            except:
-                print(f"Warning: Could not install {package}")
+        #print("Installing boosting packages...")
+        #packages = ['xgboost', 'catboost', 'lightgbm', 'scikit-learn']
+        #for package in packages:
+        #    try:
+        #        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', package])
+        #    except:
+        #        print(f"Warning: Could not install {package}")
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--config_str', type=str, required=True)
