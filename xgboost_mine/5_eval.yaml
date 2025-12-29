@@ -70,24 +70,24 @@ implementation:
                 return y_encoded
 
         # Import optional packages for their model classes
-        try:
-            from xgboost import XGBRegressor, XGBClassifier
-            print("XGBoost available")
-        except ImportError:
-            XGBRegressor, XGBClassifier = None, None
-            print("XGBoost not available")
-        try:
-            from catboost import CatBoostRegressor, CatBoostClassifier
-            print("CatBoost available")
-        except ImportError:
-            CatBoostRegressor, CatBoostClassifier = None, None
-            print("CatBoost not available")
-        try:
-            from lightgbm import LGBMRegressor, LGBMClassifier
-            print("LightGBM available")
-        except ImportError:
-            LGBMRegressor, LGBMClassifier = None, None
-            print("LightGBM not available")
+        #try:
+        #    from xgboost import XGBRegressor, XGBClassifier
+        #    print("XGBoost available")
+        #except ImportError:
+        #    XGBRegressor, XGBClassifier = None, None
+        #    print("XGBoost not available")
+        #try:
+        #    from catboost import CatBoostRegressor, CatBoostClassifier
+        #    print("CatBoost available")
+        #except ImportError:
+        #    CatBoostRegressor, CatBoostClassifier = None, None
+        #    print("CatBoost not available")
+        #try:
+        #    from lightgbm import LGBMRegressor, LGBMClassifier
+        #    print("LightGBM available")
+        #except ImportError:
+        #    LGBMRegressor, LGBMClassifier = None, None
+        #    print("LightGBM not available")
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--trained_model', type=str, required=True)
