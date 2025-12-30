@@ -1,4 +1,4 @@
-name: Train v6
+name: Train v5
 description: Trains CNN using nesyfactory with NO fallbacks
 inputs:
   - name: data_path
@@ -49,7 +49,7 @@ implementation:
             sys.exit(1)
         
         # ===========================================
-        # PROPERLY FIXED RESNET CLASS
+        # FIXED RESNET CLASS WITH CRITERION
         # ===========================================
         class FixedResNet(ResNet):
             def __init__(self, config):
@@ -57,6 +57,10 @@ implementation:
                 self.dropout = config.get('dropout', 0.0)
                 # Now call parent init
                 super().__init__(config)
+                # Ensure criterion exists
+                if not hasattr(self, 'criterion') or self.criterion is None:
+                    print("Setting up criterion for FixedResNet...")
+                    self.criterion = torch.nn.CrossEntropyLoss()
         
         # Dataset classes for unpickling
         class LabeledDataset:
@@ -200,6 +204,14 @@ implementation:
 
         # Move to device
         model = model.to(device)
+        
+        # DEBUG: Check if criterion exists
+        print(f"DEBUG: Model criterion exists: {hasattr(model, 'criterion')}")
+        if hasattr(model, 'criterion'):
+            print(f"DEBUG: Model criterion type: {type(model.criterion)}")
+        else:
+            print("WARNING: No criterion found, setting CrossEntropyLoss")
+            model.criterion = torch.nn.CrossEntropyLoss()
 
         # TRAINING - NO FALLBACKS
         print(f"\\n{'='*60}")
@@ -211,6 +223,11 @@ implementation:
                 # CAFO training
                 if not hasattr(model, 'train_cafo'):
                     raise RuntimeError("Model does not support CAFO training")
+                
+                # Ensure criterion exists
+                if not hasattr(model, 'criterion') or model.criterion is None:
+                    print("Setting criterion for CAFO training...")
+                    model.criterion = torch.nn.CrossEntropyLoss()
                 
                 results = model.train_cafo(
                     X_train.to(device),
