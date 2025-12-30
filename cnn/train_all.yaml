@@ -1,4 +1,4 @@
-name: Train v5
+name: Train v6
 description: Trains CNN using nesyfactory with NO fallbacks
 inputs:
   - name: data_path
@@ -47,6 +47,25 @@ implementation:
         except ImportError as e:
             print(f"❌ ERROR: nesyfactory not available: {e}")
             sys.exit(1)
+        
+        # ===========================================
+        # FIXED RESNET CLASS FOR PROPER LOADING
+        # ===========================================
+        class FixedResNet(ResNet):
+            def __init__(self, config):
+                # Store dropout value
+                dropout_value = config.get('dropout', 0.0)
+                
+                # Call parent __init__
+                try:
+                    super().__init__(config)
+                except AttributeError as e:
+                    if "'ResNet' object has no attribute 'dropout'" in str(e):
+                        # Set dropout attribute and retry
+                        self.dropout = dropout_value
+                        super().__init__(config)
+                    else:
+                        raise
         
         # Dataset classes for unpickling
         class LabeledDataset:
@@ -152,36 +171,24 @@ implementation:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Device: {device}")
 
-        # Load or create model
+        # Load model
         if args.model_input and os.path.exists(args.model_input):
             print(f"\\nLoading model from: {args.model_input}")
             try:
                 checkpoint = torch.load(args.model_input, map_location='cpu')
                 
-                # Extract config
+                # Extract config from checkpoint
                 if isinstance(checkpoint, dict) and 'config' in checkpoint:
                     model_config = checkpoint['config']
                 else:
+                    # Fallback to config from input
                     model_config = model_cfg
                 
                 # Ensure device is set
                 model_config['device'] = str(device)
+                model_config['dropout'] = model_config.get('dropout', 0.0)
                 
-                # Create FixedResNet to handle dropout
-                class FixedResNet(ResNet):
-                    def __init__(self, config):
-                        if 'dropout' not in config:
-                            config['dropout'] = config.get('dropout', 0.0)
-                        try:
-                            super().__init__(config)
-                        except AttributeError as e:
-                            if "'ResNet' object has no attribute 'dropout'" in str(e):
-                                self.dropout = config.get('dropout', 0.0)
-                                super().__init__(config)
-                            else:
-                                raise
-                
-                # Create model
+                # Create model using FixedResNet
                 model = FixedResNet(model_config)
                 
                 # Load state dict
@@ -190,6 +197,7 @@ implementation:
                 
                 print(f"✓ Model loaded successfully")
                 print(f"✓ Parameters: {sum(p.numel() for p in model.parameters()):,}")
+                print(f"✓ Training mode from model: {checkpoint.get('training_mode', 'Unknown')}")
                 
             except Exception as e:
                 print(f" ERROR loading model: {e}")
@@ -299,7 +307,6 @@ implementation:
                 
         except Exception as e:
             print(f"\\n ERROR: {training_mode} training failed: {e}")
-            print("This component uses only nesyfactory methods")
             traceback.print_exc()
             sys.exit(1)
 
