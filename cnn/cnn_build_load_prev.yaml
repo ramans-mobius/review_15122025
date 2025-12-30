@@ -1,5 +1,5 @@
-name: Build or Load Model v9
-description: Builds a CNN model using nesyfactory's CNNFactory
+name: Build or Load Model v11
+description: Builds a CNN model with patched ResNet to fix dropout issue
 inputs:
   - name: config_str
     type: String
@@ -20,12 +20,13 @@ outputs:
 
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v23
+    image: gurpreetgandhi/nesy-factory:v34
     command:
       - sh
       - -c
       - |
         python3 -m pip install --quiet --upgrade pip setuptools wheel
+        python3 -m pip install --quiet "torchvision==0.17.0"
         exec "$0" "$@"
       - python3
       - -u
@@ -107,7 +108,7 @@ implementation:
             model_config = config.get('model', {})
             model_config['architecture'] = args.model_name
             
-            # Set default values 
+            # Set default values
             defaults = {
                 'output_dim': 10,
                 'input_channels': 3,
@@ -115,16 +116,14 @@ implementation:
                 'pretrained': True,
                 'use_cafo': False,
                 'use_forward_forward': False,
-                'variant': 'resnet50'
+                'variant': 'resnet50',
+                'dropout': 0.0  # IMPORTANT: Include dropout here
             }
             
             for param, default_value in defaults.items():
                 if param not in model_config:
                     print(f"{param} not found, using default: {default_value}")
                     model_config[param] = default_value
-
-            if 'dropout' in model_config:
-                del model_config['dropout']
 
             # CRITICAL: Check which ResNet architecture to create
             use_cafo = model_config.get('use_cafo', False)
@@ -135,15 +134,94 @@ implementation:
             print(f"Training Mode: {'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard Backprop'}")
             print(f"Variant: {model_config.get('variant', 'resnet50')}")
             print(f"Output dim: {model_config['output_dim']}")
+            print(f"Dropout: {model_config.get('dropout', 0.0)}")
             
             try:
-                # Decide which ResNet class to use
+                # ===========================================
+                # CREATE PATCHED RESNET CLASS
+                # ===========================================
+                
                 if use_cafo or use_forward_forward:
                     print(f"\\nCreating Enhanced ResNet (supports CAFO/Forward-Forward)...")
                     
-                    # Try to import the enhanced ResNet from ffresnet
                     try:
-                        from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                        from nesy_factory.CNNs.ffresnet import ResNet as OriginalResNet
+                        
+                        # Create a patched version of ResNet
+                        class PatchedResNet(OriginalResNet):
+                            def __init__(self, config):
+                                # Ensure dropout is set as an attribute BEFORE calling parent init
+                                self.dropout = config.get('dropout', 0.0)
+                                
+                                # Call parent __init__
+                                try:
+                                    super().__init__(config)
+                                except AttributeError as e:
+                                    if "'ResNet' object has no attribute 'dropout'" in str(e):
+                                        # If parent still complains, ensure dropout exists
+                                        if not hasattr(self, 'dropout'):
+                                            self.dropout = config.get('dropout', 0.0)
+                                        # Try to continue initialization
+                                        print("DEBUG: Caught dropout error, continuing...")
+                                        # Set other required attributes
+                                        if hasattr(self, '_create_ff_blocks'):
+                                            self._create_ff_blocks()
+                                        if hasattr(self, '_create_cafo_blocks'):
+                                            self._create_cafo_blocks()
+                                    else:
+                                        raise
+                            
+                            def _create_ff_blocks(self):
+                                
+                                if self.variant in ['resnet18', 'resnet34']:
+                                    channel_configs = [(64, 64), (64, 128), (128, 256), (256, 512)]
+                                    strides = [1, 2, 2, 2]
+                                else:  # ResNet50+
+                                    channel_configs = [(64, 256), (256, 512), (512, 1024), (1024, 2048)]
+                                    strides = [1, 2, 2, 2]
+
+                                from nesy_factory.CNNs.ffresnet import ForwardForwardResNetBlock
+                                
+                                for i in range(min(self.ff_blocks, len(channel_configs))):
+                                    in_channels, out_channels = channel_configs[i]
+                                    stride = strides[i]
+                                    if i == 0:
+                                        in_channels = self.input_channels
+
+                                    block = ForwardForwardResNetBlock(
+                                        in_channels=in_channels,
+                                        out_channels=out_channels,
+                                        stride=stride,
+                                        dropout=self.dropout,
+                                        goodness_dim=self.ff_goodness_dim
+                                    )
+                                    self.ff_blocks_list.append(block)
+                            
+                            def _create_cafo_blocks(self):
+                                
+                                if self.variant in ['resnet18', 'resnet34']:
+                                    channel_configs = [(64, 64), (64, 128), (128, 256), (256, 512)]
+                                    strides = [1, 2, 2, 2]
+                                else:  # ResNet50+
+                                    channel_configs = [(64, 256), (256, 512), (512, 1024), (1024, 2048)]
+                                    strides = [1, 2, 2, 2]
+                                
+                                from nesy_factory.CNNs.ffresnet import CaFoResNetBlock
+                                
+                                for i in range(min(self.cafo_blocks, len(channel_configs))):
+                                    in_channels, out_channels = channel_configs[i]
+                                    stride = strides[i]
+                                    if i == 0:
+                                        in_channels = self.input_channels
+                                    
+                                    block = CaFoResNetBlock(
+                                        in_channels=in_channels,
+                                        out_channels=out_channels,
+                                        stride=stride,
+                                        output_dim=self.output_dim,
+                                        dropout=self.dropout
+                                    )
+                                    self.blocks.append(block)
                         
                         # Ensure required FF/CAFO params are in config
                         if use_cafo:
@@ -158,13 +236,16 @@ implementation:
                             model_config['ff_threshold'] = ff_config.get('threshold', 2.0)
                             model_config['ff_goodness_dim'] = ff_config.get('ff_goodness_dim', 128)
                         
-                        # Create the enhanced model
-                        model = EnhancedResNet(model_config)
-                        print(f"✓ Created Enhanced ResNet from ffresnet module")
+                        # Create the patched model
+                        model = PatchedResNet(model_config)
+                        print(f"✓ Created Patched ResNet for {training_mode}")
                         
                     except Exception as e:
                         print(f"✗ Error creating Enhanced ResNet: {e}")
                         print("Falling back to standard ResNet (CAFO/FF training won't work)")
+                        # Remove CAFO/FF flags for fallback
+                        model_config['use_cafo'] = False
+                        model_config['use_forward_forward'] = False
                         model = CNNFactory.create_model('resnet', model_config)
                 else:
                     # Standard training mode
