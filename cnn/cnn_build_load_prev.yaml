@@ -1,5 +1,5 @@
 name: Build or Load Model v12
-description: Builds a CNN model using ONLY nesyfactory with proper CAFO/FF architecture
+description: Builds CNN model using nesyfactory with dropout fix
 inputs:
   - name: config_str
     type: String
@@ -34,6 +34,7 @@ implementation:
         import torch, argparse, json, os, sys, tempfile
         import urllib.request
         from nesy_factory.CNNs.factory import CNNFactory
+        from nesy_factory.CNNs.ffresnet import ResNet
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--config_str', type=str, default='')
@@ -126,97 +127,104 @@ implementation:
             # Determine training mode
             use_cafo = model_config.get('use_cafo', False)
             use_forward_forward = model_config.get('use_forward_forward', False)
-            training_mode = "CAFO" if use_cafo else "Forward-Forward" if use_forward_forward else "Standard Backprop"
             
             print(f"\\n=== Model Configuration ===")
             print(f"Architecture: {model_config['architecture']}")
-            print(f"Training Mode: {training_mode}")
+            print(f"Training Mode: {'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard Backprop'}")
             print(f"Variant: {model_config.get('variant', 'resnet50')}")
             print(f"Output dim: {model_config['output_dim']}")
             print(f"Dropout: {model_config.get('dropout', 0.0)}")
             
             try:
                 # ===========================================
-                # CREATE PURE NESYFACTORY MODEL - NO FALLBACKS
+                # FIXED RESNET CLASS TO HANDLE DROPOUT
                 # ===========================================
-                from nesy_factory.CNNs.ffresnet import ResNet
-                
-                # Create a FIXED ResNet class that handles dropout properly
                 class FixedResNet(ResNet):
                     def __init__(self, config):
-                        # Store dropout in config before parent init
-                        self._dropout_value = config.get('dropout', 0.0)
-                        config['dropout'] = self._dropout_value  # Ensure it's in config
+                        # Add dropout to config before parent init
+                        if 'dropout' not in config:
+                            config['dropout'] = config.get('dropout', 0.0)
                         
-                        # Call parent init with error handling
+                        # Ensure BaseCNN gets dropout
+                        config['dropout'] = config.get('dropout', 0.0)
+                        
                         try:
                             super().__init__(config)
                         except AttributeError as e:
                             if "'ResNet' object has no attribute 'dropout'" in str(e):
-                                # Create dropout attribute and retry
-                                self.dropout = self._dropout_value
-                                # Reinitialize with fixed attribute
+                                # Patch the dropout issue
+                                self.dropout = config.get('dropout', 0.0)
+                                # Retry initialization
                                 super().__init__(config)
                             else:
                                 raise
                 
-                # Create the model using nesyfactory
-                print(f"\\nCreating {training_mode} model using nesyfactory...")
-                
-                # IMPORTANT: Ensure all required config parameters are present
+                # Create model config for nesyfactory
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                model_config['device'] = str(device)
-                model_config['name'] = 'resnet'
                 
-                # Add mode-specific parameters
+                # Base config for ResNet
+                base_config = {
+                    'name': 'resnet',
+                    'variant': model_config.get('variant', 'resnet50'),
+                    'output_dim': model_config['output_dim'],
+                    'input_channels': model_config.get('input_channels', 3),
+                    'pretrained': model_config.get('pretrained', True),
+                    'device': str(device),
+                    'dropout': model_config.get('dropout', 0.0),
+                    'use_cafo': use_cafo,
+                    'use_forward_forward': use_forward_forward
+                }
+                
+                # Add CAFO-specific params
                 if use_cafo:
-                    model_config['cafo_blocks'] = model_config.get('cafo_blocks', 4)
-                    model_config['epochs_per_block'] = model_config.get('epochs_per_block', 50)
-                    model_config['block_lr'] = model_config.get('block_lr', 0.001)
-                    print(f"CAFO parameters: {model_config['cafo_blocks']} blocks, {model_config['epochs_per_block']} epochs/block")
-                    
+                    base_config['cafo_blocks'] = model_config.get('cafo_blocks', 4)
+                    base_config['epochs_per_block'] = model_config.get('epochs_per_block', 50)
+                    base_config['block_lr'] = model_config.get('block_lr', 0.001)
+                    print(f"CAFO parameters: {base_config['cafo_blocks']} blocks")
+                
+                # Add Forward-Forward params
                 elif use_forward_forward:
                     ff_config = model_config.get("forward_forward", {})
-                    model_config['ff_blocks'] = ff_config.get('ff_blocks', 4)
-                    model_config['ff_epochs_per_block'] = ff_config.get('ff_epochs_per_block', 50)
-                    model_config['ff_lr'] = ff_config.get('ff_lr', 0.01)
-                    model_config['ff_threshold'] = ff_config.get('threshold', 2.0)
-                    model_config['ff_goodness_dim'] = ff_config.get('ff_goodness_dim', 128)
-                    print(f"FF parameters: {model_config['ff_blocks']} blocks, {model_config['ff_epochs_per_block']} epochs/block")
+                    base_config['ff_blocks'] = ff_config.get('ff_blocks', 4)
+                    base_config['ff_epochs_per_block'] = ff_config.get('ff_epochs_per_block', 50)
+                    base_config['ff_lr'] = ff_config.get('ff_lr', 0.01)
+                    base_config['ff_threshold'] = ff_config.get('threshold', 2.0)
+                    base_config['ff_goodness_dim'] = ff_config.get('ff_goodness_dim', 128)
+                    print(f"FF parameters: {base_config['ff_blocks']} blocks")
                 
-                # Create the model - NO FALLBACK
-                model = FixedResNet(model_config)
+                # Create the model using FixedResNet
+                print(f"\\nCreating model using FixedResNet...")
+                model = FixedResNet(base_config)
                 
-                print(f"✓ Created {training_mode} model successfully")
-                print(f"✓ Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+                print(f"✓ Model created successfully")
+                print(f"✓ Parameters: {sum(p.numel() for p in model.parameters()):,}")
                 
                 # Get model info
                 model_info = {
                     'model_name': args.model_name,
                     'model_source': 'fresh_build',
-                    'training_mode': training_mode,
-                    'model_class': model.__class__.__name__,
+                    'training_mode': 'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard',
                     'variant': model_config.get('variant', 'resnet50'),
                     'input_channels': model_config.get('input_channels', 3),
-                    'output_dim': model_config.get('output_dim', 10),
+                    'output_dim': model_config['output_dim'],
                     'num_parameters': sum(p.numel() for p in model.parameters()),
                     'use_cafo': use_cafo,
-                    'use_forward_forward': use_forward_forward
+                    'use_forward_forward': use_forward_forward,
+                    'model_class': model.__class__.__name__
                 }
                 
             except Exception as e:
                 print(f"\\n ERROR: Failed to create model: {e}")
-                print("This component REQUIRES nesyfactory v23 to work properly")
                 import traceback
                 traceback.print_exc()
                 sys.exit(1)
 
-            # Save model with proper checkpoint format
+            # Save model with checkpoint format
             checkpoint = {
                 'config': model_config,
                 'model_state_dict': model.state_dict(),
                 'model_info': model_info,
-                'training_mode': training_mode
+                'training_mode': 'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard'
             }
             
             torch.save(checkpoint, args.model_out)
@@ -231,8 +239,6 @@ implementation:
                 json.dump(model_info, f, indent=2)
 
             print(f"\\n✓ Model built and saved to: {args.model_out}")
-            print(f"✓ Training mode: {training_mode}")
-            print(f"✓ Updated config saved to: {args.config_updated}")
             print(f"✓ Model info saved to: {args.model_info_out}")
         
     args:
