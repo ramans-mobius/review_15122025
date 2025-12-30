@@ -1,19 +1,15 @@
-name: Build or Load Model v8
-description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN with support for CAFO and Forward-Forward
+name: Build or Load Model v9
+description: Builds a CNN model using nesyfactory's CNNFactory
 inputs:
   - name: config_str
     type: String
-    description: Model configuration as JSON string (required if building new)
   - name: model_name
     type: String
-    description: CNN model architecture name (required if building new)
   - name: load_from_cdn
     type: String
-    description: Whether to load model from CDN instead of building from scratch ("true" or "false")
     default: "false"
   - name: cdn_url
     type: String
-    description: CDN URL pointing to model checkpoint (required if load_from_cdn=true)
 outputs:
   - name: model_out
     type: Model
@@ -111,7 +107,7 @@ implementation:
             model_config = config.get('model', {})
             model_config['architecture'] = args.model_name
             
-            # Set default values
+            # Set default values 
             defaults = {
                 'output_dim': 10,
                 'input_channels': 3,
@@ -119,14 +115,16 @@ implementation:
                 'pretrained': True,
                 'use_cafo': False,
                 'use_forward_forward': False,
-                'variant': 'resnet50',
-                'dropout': 0.0  # ADD THIS DEFAULT
+                'variant': 'resnet50'
             }
             
             for param, default_value in defaults.items():
                 if param not in model_config:
                     print(f"{param} not found, using default: {default_value}")
                     model_config[param] = default_value
+
+            if 'dropout' in model_config:
+                del model_config['dropout']
 
             # CRITICAL: Check which ResNet architecture to create
             use_cafo = model_config.get('use_cafo', False)
@@ -137,7 +135,6 @@ implementation:
             print(f"Training Mode: {'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard Backprop'}")
             print(f"Variant: {model_config.get('variant', 'resnet50')}")
             print(f"Output dim: {model_config['output_dim']}")
-            print(f"Dropout: {model_config.get('dropout', 0.0)}")
             
             try:
                 # Decide which ResNet class to use
@@ -147,10 +144,6 @@ implementation:
                     # Try to import the enhanced ResNet from ffresnet
                     try:
                         from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
-                        
-                        # FIX: Ensure dropout exists
-                        if 'dropout' not in model_config:
-                            model_config['dropout'] = 0.0
                         
                         # Ensure required FF/CAFO params are in config
                         if use_cafo:
@@ -168,9 +161,6 @@ implementation:
                         # Create the enhanced model
                         model = EnhancedResNet(model_config)
                         print(f"✓ Created Enhanced ResNet from ffresnet module")
-                        print(f"  - Model type: {model.__class__.__name__}")
-                        print(f"  - Has train_cafo: {hasattr(model, 'train_cafo')}")
-                        print(f"  - Has train_forward_forward: {hasattr(model, 'train_forward_forward')}")
                         
                     except Exception as e:
                         print(f"✗ Error creating Enhanced ResNet: {e}")
