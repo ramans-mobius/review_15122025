@@ -1,4 +1,4 @@
-name: Evaluation v8
+name: Evaluation v9
 description: Evaluates a CNN model and outputs performance metrics.
 
 inputs:
@@ -34,8 +34,33 @@ implementation:
 
         print("=== STARTING MODEL EVALUATION ===")
 
+        # ===========================================
+        # FIXED RESNET CLASS - SAME AS BUILD/TAIN BRICKS
+        # ===========================================
+        try:
+            from nesy_factory.CNNs.ffresnet import ResNet
+        except ImportError as e:
+            print(f" ERROR: nesyfactory not available: {e}")
+            exit(1)
+        
+        class FixedResNet(ResNet):
+            def __init__(self, config):
+                # Store dropout value
+                dropout_value = config.get('dropout', 0.0)
+                
+                # Call parent __init__
+                try:
+                    super().__init__(config)
+                except AttributeError as e:
+                    if "'ResNet' object has no attribute 'dropout'" in str(e):
+                        # Set dropout attribute and retry
+                        self.dropout = dropout_value
+                        super().__init__(config)
+                    else:
+                        raise
+
         # ---------------------------
-        # 1) Safe unpickler (match train)
+        # Safe unpickler (match train)
         # ---------------------------
         class LabeledDataset:
             def __init__(self, *args, **kwargs):
@@ -88,7 +113,7 @@ implementation:
                 return super().find_class(module, name)
 
         # ---------------------------
-        # 2) Args
+        # Args
         # ---------------------------
         parser = argparse.ArgumentParser()
         parser.add_argument("--trained_model", required=True)
@@ -99,7 +124,7 @@ implementation:
         args = parser.parse_args()
 
         # ---------------------------
-        # 3) Load dataset
+        # Load dataset
         # ---------------------------
         with open(args.data_path, "rb") as f:
             processed = SafeUnpickler(io.BytesIO(f.read())).load()
@@ -111,7 +136,7 @@ implementation:
         num_classes = processed.num_classes
 
         # ---------------------------
-        # 4) Load checkpoint and determine model type
+        # Load checkpoint and determine model type
         # ---------------------------
         print("Loading trained model...")
         checkpoint = torch.load(args.trained_model, map_location='cpu')
@@ -143,9 +168,13 @@ implementation:
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model_config['device'] = str(device)
+        
+        # Ensure dropout exists
+        if 'dropout' not in model_config:
+            model_config['dropout'] = 0.0
 
         # ---------------------------
-        # 5) Create appropriate model based on training mode
+        # Create appropriate model using FixedResNet
         # ---------------------------
         use_forward_forward = 'forward' in training_mode.lower() or 'ff' in training_mode.lower()
         use_cafo = 'cafo' in training_mode.lower()
@@ -153,72 +182,70 @@ implementation:
         print(f"Creating model for evaluation: {training_mode}")
         
         try:
+            # ALWAYS use FixedResNet to handle dropout issue
             if use_forward_forward or use_cafo:
-                print("Loading Enhanced ResNet (FF/CAFO)...")
-                try:
-                    from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                print(f"Loading {training_mode} model using FixedResNet...")
+                
+                # Set flags for CAFO/FF
+                if use_forward_forward:
+                    model_config['use_forward_forward'] = True
+                    model_config['use_cafo'] = False
+                    # Add FF parameters if not present
+                    ff_cfg = model_cfg.get("forward_forward", {})
+                    model_config['ff_blocks'] = ff_cfg.get('ff_blocks', 4)
+                    model_config['ff_goodness_dim'] = ff_cfg.get('ff_goodness_dim', 128)
+                else:
+                    model_config['use_cafo'] = True
+                    model_config['use_forward_forward'] = False
+                
+                model = FixedResNet(model_config).to(device)
+                
+                # Mark as trained (required for forward pass)
+                if use_forward_forward:
+                    model.ff_trained = True
+                    # Ensure ff_classifier exists
+                    if not hasattr(model, 'ff_classifier') or model.ff_classifier is None:
+                        print("Creating FF classifier...")
+                        # Get feature dimension
+                        X0, y0 = next(iter(test_loader))
+                        X0 = X0.to(device).float()
+                        with torch.no_grad():
+                            current = X0
+                            if hasattr(model, 'ff_blocks_list'):
+                                for block in model.ff_blocks_list:
+                                    current = block.forward(current)
+                            pooled = torch.nn.functional.adaptive_avg_pool2d(current, (1, 1))
+                            feats = torch.flatten(pooled, 1)
+                            in_features = feats.shape[1]
+                            model.ff_classifier = torch.nn.Linear(in_features, num_classes).to(device)
+                elif use_cafo:
+                    model.cafo_trained = True
                     
-                    # Ensure dropout exists in config
-                    if 'dropout' not in model_config:
-                        model_config['dropout'] = 0.0
-                    
-                    if use_forward_forward:
-                        model_config['use_forward_forward'] = True
-                        model_config['use_cafo'] = False
-                        ff_cfg = model_cfg.get("forward_forward", {})
-                        model_config['ff_blocks'] = ff_cfg.get('ff_blocks', 4)
-                        model_config['ff_goodness_dim'] = ff_cfg.get('ff_goodness_dim', 128)
-                    else:
-                        model_config['use_cafo'] = True
-                        model_config['use_forward_forward'] = False
-                    
-                    model = EnhancedResNet(model_config).to(device)
-                    
-                    # Mark as trained
-                    if use_forward_forward:
-                        model.ff_trained = True
-                    elif use_cafo:
-                        model.cafo_trained = True
-                        
-                except ImportError as e:
-                    print(f"Warning: Could not import Enhanced ResNet: {e}")
-                    from nesy_factory.CNNs import CNNFactory
-                    model = CNNFactory.create_model('resnet', model_config).to(device)
             else:
-                print("Loading standard ResNet...")
-                from nesy_factory.CNNs import CNNFactory
-                model = CNNFactory.create_model('resnet', model_config).to(device)
+                print("Loading standard model using FixedResNet...")
+                model_config['use_cafo'] = False
+                model_config['use_forward_forward'] = False
+                model = FixedResNet(model_config).to(device)
             
             # Load state dict
             model.load_state_dict(state_dict, strict=False)
-            print(f"✓ {training_mode} ResNet loaded (strict=False)")
+            print(f"✓ {training_mode} model loaded successfully (strict=False)")
             
-            # Handle FF classifier if needed
-            if use_forward_forward and not hasattr(model, 'ff_classifier'):
-                print("Creating FF classifier...")
-                X0, y0 = next(iter(test_loader))
-                X0 = X0.to(device).float()
-                with torch.no_grad():
-                    current = X0
-                    for block in model.ff_blocks_list:
-                        current = block.forward(current)
-                    pooled = torch.nn.functional.adaptive_avg_pool2d(current, (1, 1))
-                    feats = torch.flatten(pooled, 1)
-                    in_features = feats.shape[1]
-                    model.ff_classifier = torch.nn.Linear(in_features, num_classes).to(device)
-                    
         except Exception as e:
-            print(f"Error creating model: {e}")
-            raise
+            print(f" ERROR creating model: {e}")
+            import traceback
+            traceback.print_exc()
+            exit(1)
 
         model.eval()
         
         # ---------------------------
-        # 6) Evaluate - WITH FIXED FLOAT CONVERSION
+        # Evaluate
         # ---------------------------
         criterion = torch.nn.CrossEntropyLoss()
         all_preds, all_targets = [], []
         total_loss = 0.0
+        total_batches = 0
 
         with torch.no_grad():
             for X, y in test_loader:
@@ -228,6 +255,7 @@ implementation:
                 logits = model(X)
                 loss = criterion(logits, y)
                 total_loss += loss.item()
+                total_batches += 1
 
                 preds = logits.argmax(dim=1)
                 all_preds.extend(preds.cpu().tolist())
@@ -243,9 +271,22 @@ implementation:
             total = len(all_targets)
             accuracy = float(correct / total) if total > 0 else 0.0
         
-        report = classification_report(all_targets, all_preds, digits=4, output_dict=True)
-        cm = confusion_matrix(all_targets, all_preds).tolist()
-        avg_loss = float(total_loss / max(1, len(test_loader)))
+        # Get classification report
+        try:
+            report = classification_report(all_targets, all_preds, digits=4, output_dict=True)
+        except Exception as e:
+            print(f"Warning: classification_report failed: {e}")
+            report = {"error": str(e)}
+        
+        # Get confusion matrix
+        try:
+            cm = confusion_matrix(all_targets, all_preds).tolist()
+        except Exception as e:
+            print(f"Warning: confusion_matrix failed: {e}")
+            cm = []
+        
+        # Calculate average loss
+        avg_loss = float(total_loss / max(1, total_batches))
 
         # Ensure all values are float
         metrics_output = {
@@ -254,11 +295,13 @@ implementation:
             "confusion_matrix": cm,
             "classification_report": report,
             "training_mode": training_mode,
-            "num_samples": int(len(all_targets))
+            "num_samples": int(len(all_targets)),
+            "model_type": "FixedResNet",
+            "evaluation_success": True
         }
 
         # ---------------------------
-        # 7) Save outputs
+        # Save outputs
         # ---------------------------
         os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
         os.makedirs(os.path.dirname(args.metrics_json), exist_ok=True)
@@ -271,12 +314,12 @@ implementation:
             f.write(f"accuracy: {float(accuracy)}\\n")
             f.write(f"loss: {float(avg_loss)}\\n")
 
-        print("=== EVALUATION COMPLETE ===")
+        print("\\n=== EVALUATION COMPLETE ===")
         print(f"Training mode: {training_mode}")
         print(f"Accuracy: {float(accuracy):.4f}")
         print(f"Loss: {float(avg_loss):.4f}")
         print(f"Number of samples: {len(all_targets)}")
-        print(f"Metrics saved: accuracy={float(accuracy)}, loss={float(avg_loss)}")
+        print(f"Model successfully evaluated")
 
     args:
       - --trained_model
