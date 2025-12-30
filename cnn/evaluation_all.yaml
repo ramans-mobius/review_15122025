@@ -1,4 +1,4 @@
-name: Evaluation v10
+name: Evaluation v9
 description: Evaluates a CNN model and outputs performance metrics.
 
 inputs:
@@ -35,12 +35,12 @@ implementation:
         print("=== STARTING MODEL EVALUATION ===")
 
         # ===========================================
-        # PROPERLY FIXED RESNET CLASS
+        # FIXED RESNET CLASS WITH CRITERION FIX
         # ===========================================
         try:
             from nesy_factory.CNNs.ffresnet import ResNet
         except ImportError as e:
-            print(f" ERROR: nesyfactory not available: {e}")
+            print(f"❌ ERROR: nesyfactory not available: {e}")
             exit(1)
         
         class FixedResNet(ResNet):
@@ -49,6 +49,9 @@ implementation:
                 self.dropout = config.get('dropout', 0.0)
                 # Now call parent init
                 super().__init__(config)
+                # Ensure criterion exists (for consistency with Train brick)
+                if not hasattr(self, 'criterion') or self.criterion is None:
+                    self.criterion = torch.nn.CrossEntropyLoss()
 
         # ---------------------------
         # Safe unpickler (match train)
@@ -253,7 +256,7 @@ implementation:
                         print(f"Created FF classifier with {in_features} input features")
             
         except Exception as e:
-            print(f" ERROR creating model: {e}")
+            print(f"❌ ERROR creating model: {e}")
             import traceback
             traceback.print_exc()
             exit(1)
