@@ -1,4 +1,4 @@
-name: Build or Load Model v7
+name: Build or Load Model v8
 description: Builds a CNN model using nesyfactory's CNNFactory or loads from CDN with support for CAFO and Forward-Forward
 inputs:
   - name: config_str
@@ -24,12 +24,13 @@ outputs:
 
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v23
+    image: gurpreetgandhi/nesy-factory:v34
     command:
       - sh
       - -c
       - |
         python3 -m pip install --quiet --upgrade pip setuptools wheel
+        python3 -m pip install --quiet "torchvision==0.17.0"
         exec "$0" "$@"
       - python3
       - -u
@@ -119,7 +120,8 @@ implementation:
                 'pretrained': True,
                 'use_cafo': False,
                 'use_forward_forward': False,
-                'variant': 'resnet50'
+                'variant': 'resnet50',
+                'dropout': 0.0  # ADD THIS DEFAULT
             }
             
             for param, default_value in defaults.items():
@@ -136,6 +138,7 @@ implementation:
             print(f"Training Mode: {'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard Backprop'}")
             print(f"Variant: {model_config.get('variant', 'resnet50')}")
             print(f"Output dim: {model_config['output_dim']}")
+            print(f"Dropout: {model_config.get('dropout', 0.0)}")
             
             try:
                 # Decide which ResNet class to use
@@ -145,6 +148,10 @@ implementation:
                     # Try to import the enhanced ResNet from ffresnet
                     try:
                         from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
+                        
+                        # FIX: Ensure dropout exists
+                        if 'dropout' not in model_config:
+                            model_config['dropout'] = 0.0
                         
                         # Ensure required FF/CAFO params are in config
                         if use_cafo:
@@ -166,8 +173,8 @@ implementation:
                         print(f"  - Has train_cafo: {hasattr(model, 'train_cafo')}")
                         print(f"  - Has train_forward_forward: {hasattr(model, 'train_forward_forward')}")
                         
-                    except ImportError as e:
-                        print(f"✗ Could not import Enhanced ResNet: {e}")
+                    except Exception as e:
+                        print(f"✗ Error creating Enhanced ResNet: {e}")
                         print("Falling back to standard ResNet (CAFO/FF training won't work)")
                         model = CNNFactory.create_model('resnet', model_config)
                 else:
