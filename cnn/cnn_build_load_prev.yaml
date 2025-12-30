@@ -1,4 +1,4 @@
-name: Build or Load Model v12
+name: Build or Load Model v13
 description: Builds CNN model using nesyfactory with dropout fix
 inputs:
   - name: config_str
@@ -137,24 +137,20 @@ implementation:
             
             try:
                 # ===========================================
-                # FIXED RESNET CLASS TO HANDLE DROPOUT
+                # FIXED RESNET CLASS - PROPER DROPOUT HANDLING
                 # ===========================================
                 class FixedResNet(ResNet):
                     def __init__(self, config):
-                        # Add dropout to config before parent init
-                        if 'dropout' not in config:
-                            config['dropout'] = config.get('dropout', 0.0)
+                        # Store dropout value before calling parent init
+                        dropout_value = config.get('dropout', 0.0)
                         
-                        # Ensure BaseCNN gets dropout
-                        config['dropout'] = config.get('dropout', 0.0)
-                        
+                        # Call parent __init__ first
                         try:
                             super().__init__(config)
                         except AttributeError as e:
                             if "'ResNet' object has no attribute 'dropout'" in str(e):
-                                # Patch the dropout issue
-                                self.dropout = config.get('dropout', 0.0)
-                                # Retry initialization
+                                # Set dropout attribute and retry
+                                self.dropout = dropout_value
                                 super().__init__(config)
                             else:
                                 raise
@@ -162,15 +158,14 @@ implementation:
                 # Create model config for nesyfactory
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 
-                # Base config for ResNet
+                # Base config for ResNet - MUST match nesyfactory ResNet parameters
                 base_config = {
-                    'name': 'resnet',
                     'variant': model_config.get('variant', 'resnet50'),
                     'output_dim': model_config['output_dim'],
                     'input_channels': model_config.get('input_channels', 3),
                     'pretrained': model_config.get('pretrained', True),
                     'device': str(device),
-                    'dropout': model_config.get('dropout', 0.0),
+                    'dropout': model_config.get('dropout', 0.0),  # MUST be in config
                     'use_cafo': use_cafo,
                     'use_forward_forward': use_forward_forward
                 }
@@ -221,7 +216,7 @@ implementation:
 
             # Save model with checkpoint format
             checkpoint = {
-                'config': model_config,
+                'config': base_config,  # Save the actual config used
                 'model_state_dict': model.state_dict(),
                 'model_info': model_info,
                 'training_mode': 'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard'
