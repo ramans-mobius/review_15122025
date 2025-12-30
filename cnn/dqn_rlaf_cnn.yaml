@@ -310,10 +310,10 @@ implementation:
                 avg_loss = total_loss / len(test_loader) if len(test_loader) > 0 else 0.0
                 
                 metrics = {
-                    'accuracy': accuracy,
-                    'loss': avg_loss,
-                    'correct': correct,
-                    'total': total
+                    'accuracy': float(accuracy),
+                    'loss': float(avg_loss),
+                    'correct': int(correct),
+                    'total': int(total)
                 }
                 print(f"DEBUG: Evaluation metrics: {metrics}")
                 return metrics
@@ -364,8 +364,8 @@ implementation:
                 average_loss = np.mean([task['loss'] for task in final_performance])
                 
                 metrics = {
-                    'average_accuracy': average_accuracy,
-                    'average_loss': average_loss,
+                    'average_accuracy': float(average_accuracy),
+                    'average_loss': float(average_loss),
                     'num_tasks': len(all_task_performance)
                 }
                 print(f"DEBUG: Continual metrics: {metrics}")
@@ -410,6 +410,11 @@ implementation:
                     print(f"DEBUG: Set variant to {param_value}")
             
             print(f"DEBUG: Creating model with architecture: {model_config['architecture']}")
+            
+            # Ensure dropout exists
+            if 'dropout' not in model_config:
+                model_config['dropout'] = 0.0
+                
             model = CNNFactory.create_model(model_config['architecture'], model_config)
             print(f"DEBUG: Model created: {type(model)}")
             
@@ -451,9 +456,9 @@ implementation:
                 key = param['key']
                 sign = 1 if param['sign'] == '+' else -1
                 if key in average_eval_metrics and key in previous_metrics:
-                    improvement = (average_eval_metrics[key] - previous_metrics[key]) * sign
+                    improvement = (float(average_eval_metrics[key]) - float(previous_metrics[key])) * sign
                     improvement_score += improvement * param.get('mul', 1.0)
-                    print(f"DEBUG: Key {key}: current={average_eval_metrics[key]}, previous={previous_metrics[key]}, improvement={improvement}")
+                    print(f"DEBUG: Key {key}: current={float(average_eval_metrics[key])}, previous={float(previous_metrics[key])}, improvement={improvement}")
 
             print(f"DEBUG: Final improvement score: {improvement_score:.4f}")
             
@@ -529,18 +534,48 @@ implementation:
                 access_token = f.read().strip()
             print("DEBUG: Access token loaded")
             
-            with open(args.init_metrics, 'r') as f:
-                current_metrics_data = json.load(f)
-            print(f"DEBUG: Initial metrics loaded: {current_metrics_data}")
-            
+            # FIXED: Parse metrics file correctly (it's plain text, not JSON)
+            print("DEBUG: Loading initial metrics...")
             current_metrics = {}
-            if isinstance(current_metrics_data, dict):
-                for key, value in current_metrics_data.items():
-                    if isinstance(value, (int, float)):
-                        current_metrics[key] = float(value)
-            else:
+
+            try:
+                # Read the metrics file (it's plain text, not JSON)
+                with open(args.init_metrics, 'r') as f:
+                    content = f.read().strip()
+                
+                print(f"DEBUG: Raw metrics content: {content}")
+                
+                # Parse the plain text format (e.g., "accuracy: 0.85\nloss: 0.23")
+                lines = content.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        key = key.strip()
+                        value = value.strip()
+                        
+                        # Try to convert to float
+                        try:
+                            if value:
+                                current_metrics[key] = float(value)
+                            else:
+                                current_metrics[key] = 0.0
+                        except (ValueError, TypeError):
+                            current_metrics[key] = 0.0
+                
+                print(f"DEBUG: Parsed metrics: {current_metrics}")
+                
+            except Exception as e:
+                print(f"DEBUG: Error parsing metrics file, using defaults: {e}")
                 current_metrics = {'accuracy': 50.0, 'loss': 1.0}
-            print(f"DEBUG: Processed metrics: {current_metrics}")
+
+            # Ensure we have required keys
+            if 'accuracy' not in current_metrics:
+                current_metrics['accuracy'] = 50.0
+            if 'loss' not in current_metrics:
+                current_metrics['loss'] = 1.0
+
+            print(f"DEBUG: Final metrics to use: {current_metrics}")
             
             # FIXED DQN PARAMETERS - Use the same ones that work for LLM/VAE
             fixed_dqn_params = [
@@ -549,8 +584,12 @@ implementation:
                 {"key": "epochs", "sign": "-", "mul": 0.1}
             ]
             
+            action_to_use = None  # Initialize
+            
             for i in range(2):
+                print(f"\n{'='*60}")
                 print(f"DEBUG: Starting RLAF iteration {i+1}")
+                print(f"{'='*60}")
                 
                 # Map CNN metrics to DQN expected parameters
                 cleaned_metrics = {}
@@ -558,13 +597,13 @@ implementation:
                 for param in fixed_dqn_params:
                     key = param['key']
                     if key in current_metrics:
-                        cleaned_metrics[key] = current_metrics[key]
+                        cleaned_metrics[key] = float(current_metrics[key])
                     else:
                         # Provide default values for expected parameters
                         if key == "accuracy":
-                            cleaned_metrics[key] = current_metrics.get('accuracy', 50.0)
+                            cleaned_metrics[key] = float(current_metrics.get('accuracy', 50.0))
                         elif key == "loss":
-                            cleaned_metrics[key] = current_metrics.get('loss', 1.0)
+                            cleaned_metrics[key] = float(current_metrics.get('loss', 1.0))
                         elif key == "epochs":
                             # Use training epochs as a proxy
                             config_data = json.loads(args.config)
@@ -677,7 +716,7 @@ implementation:
             print("DEBUG: Saving final results...")
             os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
             final_output = {
-                "final_metrics": current_metrics,
+                "final_metrics": {k: float(v) for k, v in current_metrics.items()},
                 "model_type": "CNN_image_classifier",
                 "iterations_completed": i + 1,
                 "timestamp": time.time()
