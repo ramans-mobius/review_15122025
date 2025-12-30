@@ -1,4 +1,4 @@
-name: Build or Load Model v13
+name: Build or Load Model v14
 description: Builds CNN model using nesyfactory with dropout fix
 inputs:
   - name: config_str
@@ -137,23 +137,15 @@ implementation:
             
             try:
                 # ===========================================
-                # FIXED RESNET CLASS - PROPER DROPOUT HANDLING
+                # PROPERLY FIXED RESNET CLASS
                 # ===========================================
                 class FixedResNet(ResNet):
                     def __init__(self, config):
-                        # Store dropout value before calling parent init
-                        dropout_value = config.get('dropout', 0.0)
+                        # CRITICAL: Set dropout attribute BEFORE calling parent init
+                        self.dropout = config.get('dropout', 0.0)
                         
-                        # Call parent __init__ first
-                        try:
-                            super().__init__(config)
-                        except AttributeError as e:
-                            if "'ResNet' object has no attribute 'dropout'" in str(e):
-                                # Set dropout attribute and retry
-                                self.dropout = dropout_value
-                                super().__init__(config)
-                            else:
-                                raise
+                        # Now call parent init - it will have access to self.dropout
+                        super().__init__(config)
                 
                 # Create model config for nesyfactory
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
