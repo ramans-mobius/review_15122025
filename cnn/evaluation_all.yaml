@@ -35,7 +35,7 @@ implementation:
         print("=== STARTING MODEL EVALUATION ===")
 
         # ===========================================
-        # FIXED RESNET CLASS - SAME AS BUILD/TAIN BRICKS
+        # PROPERLY FIXED RESNET CLASS
         # ===========================================
         try:
             from nesy_factory.CNNs.ffresnet import ResNet
@@ -45,19 +45,10 @@ implementation:
         
         class FixedResNet(ResNet):
             def __init__(self, config):
-                # Store dropout value
-                dropout_value = config.get('dropout', 0.0)
-                
-                # Call parent __init__
-                try:
-                    super().__init__(config)
-                except AttributeError as e:
-                    if "'ResNet' object has no attribute 'dropout'" in str(e):
-                        # Set dropout attribute and retry
-                        self.dropout = dropout_value
-                        super().__init__(config)
-                    else:
-                        raise
+                # CRITICAL: Set dropout attribute BEFORE calling parent init
+                self.dropout = config.get('dropout', 0.0)
+                # Now call parent init
+                super().__init__(config)
 
         # ---------------------------
         # Safe unpickler (match train)
@@ -182,7 +173,7 @@ implementation:
         print(f"Creating model for evaluation: {training_mode}")
         
         try:
-            # ALWAYS use FixedResNet to handle dropout issue
+            # ALWAYS use FixedResNet
             if use_forward_forward or use_cafo:
                 print(f"Loading {training_mode} model using FixedResNet...")
                 
@@ -203,21 +194,6 @@ implementation:
                 # Mark as trained (required for forward pass)
                 if use_forward_forward:
                     model.ff_trained = True
-                    # Ensure ff_classifier exists
-                    if not hasattr(model, 'ff_classifier') or model.ff_classifier is None:
-                        print("Creating FF classifier...")
-                        # Get feature dimension
-                        X0, y0 = next(iter(test_loader))
-                        X0 = X0.to(device).float()
-                        with torch.no_grad():
-                            current = X0
-                            if hasattr(model, 'ff_blocks_list'):
-                                for block in model.ff_blocks_list:
-                                    current = block.forward(current)
-                            pooled = torch.nn.functional.adaptive_avg_pool2d(current, (1, 1))
-                            feats = torch.flatten(pooled, 1)
-                            in_features = feats.shape[1]
-                            model.ff_classifier = torch.nn.Linear(in_features, num_classes).to(device)
                 elif use_cafo:
                     model.cafo_trained = True
                     
@@ -261,15 +237,14 @@ implementation:
                 all_preds.extend(preds.cpu().tolist())
                 all_targets.extend(y.cpu().tolist())
 
-        # Calculate accuracy with error handling
+        # Calculate accuracy
         try:
-            accuracy = float(accuracy_score(all_targets, all_preds))
-        except Exception as e:
-            print(f"Warning: accuracy_score failed: {e}")
-            # Calculate manually
             correct = sum(1 for p, t in zip(all_preds, all_targets) if p == t)
             total = len(all_targets)
             accuracy = float(correct / total) if total > 0 else 0.0
+        except Exception as e:
+            print(f"Warning: accuracy calculation failed: {e}")
+            accuracy = 0.0
         
         # Get classification report
         try:
@@ -288,7 +263,7 @@ implementation:
         # Calculate average loss
         avg_loss = float(total_loss / max(1, total_batches))
 
-        # Ensure all values are float
+        # Create metrics output
         metrics_output = {
             "accuracy": float(accuracy),
             "loss": float(avg_loss),
@@ -296,7 +271,6 @@ implementation:
             "classification_report": report,
             "training_mode": training_mode,
             "num_samples": int(len(all_targets)),
-            "model_type": "FixedResNet",
             "evaluation_success": True
         }
 
@@ -309,7 +283,7 @@ implementation:
         with open(args.metrics_json, "w") as f:
             json.dump(metrics_output, f, indent=2)
 
-        # KFP metrics format - ensure float values
+        # KFP metrics format
         with open(args.metrics, "w") as f:
             f.write(f"accuracy: {float(accuracy)}\\n")
             f.write(f"loss: {float(avg_loss)}\\n")
@@ -319,8 +293,7 @@ implementation:
         print(f"Accuracy: {float(accuracy):.4f}")
         print(f"Loss: {float(avg_loss):.4f}")
         print(f"Number of samples: {len(all_targets)}")
-        print(f"Model successfully evaluated")
-
+        
     args:
       - --trained_model
       - {inputPath: trained_model}
