@@ -240,10 +240,9 @@ implementation:
                         print(f"✓ Created Patched ResNet for {training_mode}")
                         
                     except Exception as e:
-                        print(f"✗ Error creating Enhanced ResNet: {e}")
-                        print("Falling back to standard ResNet (CAFO/FF training won't work)")
                         # Remove CAFO/FF flags for fallback
                         model_config['use_cafo'] = False
+                        
                         model_config['use_forward_forward'] = False
                         model = CNNFactory.create_model('resnet', model_config)
                 else:
