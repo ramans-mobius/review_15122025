@@ -45,27 +45,18 @@ implementation:
             from nesy_factory.CNNs import CNNFactory
             from nesy_factory.CNNs.ffresnet import ResNet
         except ImportError as e:
-            print(f"❌ ERROR: nesyfactory not available: {e}")
+            print(f" ERROR: nesyfactory not available: {e}")
             sys.exit(1)
         
         # ===========================================
-        # FIXED RESNET CLASS FOR PROPER LOADING
+        # PROPERLY FIXED RESNET CLASS
         # ===========================================
         class FixedResNet(ResNet):
             def __init__(self, config):
-                # Store dropout value
-                dropout_value = config.get('dropout', 0.0)
-                
-                # Call parent __init__
-                try:
-                    super().__init__(config)
-                except AttributeError as e:
-                    if "'ResNet' object has no attribute 'dropout'" in str(e):
-                        # Set dropout attribute and retry
-                        self.dropout = dropout_value
-                        super().__init__(config)
-                    else:
-                        raise
+                # CRITICAL: Set dropout attribute BEFORE calling parent init
+                self.dropout = config.get('dropout', 0.0)
+                # Now call parent init
+                super().__init__(config)
         
         # Dataset classes for unpickling
         class LabeledDataset:
