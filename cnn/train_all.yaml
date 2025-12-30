@@ -1,4 +1,4 @@
-name: Train v3
+name: Train v4
 description: Trains a CNN model using nesyfactory with CAFO and Forward-Forward support
 inputs:
   - name: data_path
@@ -26,12 +26,13 @@ outputs:
 
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v23
+    image: gurpreetgandhi/nesy-factory:v34
     command:
       - sh
       - -c
       - |
         python3 -m pip install --quiet --upgrade pip setuptools wheel
+        python3 -m pip install --quiet "torchvision==0.17.0"
         exec "$0" "$@"
       - python3
       - -u
@@ -235,6 +236,223 @@ implementation:
             else:
                 return flatten_backprop_history(history, max_rows)
 
+        # ===========================================
+        # PATCHED RESNET CLASS TO FIX DROPOUT ISSUE
+        # ===========================================
+        def create_patched_resnet_class():
+           
+            try:
+                from nesy_factory.CNNs.ffresnet import ResNet as OriginalResNet
+                from nesy_factory.CNNs.ffresnet import ForwardForwardResNetBlock, CaFoResNetBlock
+                
+                class PatchedResNet(OriginalResNet):
+                    def __init__(self, config):
+                        # Set dropout attribute BEFORE calling parent init
+                        self.dropout = config.get('dropout', 0.0)
+                        
+                        # Call parent __init__ with error handling
+                        try:
+                            super().__init__(config)
+                        except AttributeError as e:
+                            if "'ResNet' object has no attribute 'dropout'" in str(e):
+                                # Parent tried to access dropout before it was set
+                                # Continue with initialization manually
+                                self._complete_init_after_dropout_error(config)
+                            else:
+                                raise
+                    
+                    def _complete_init_after_dropout_error(self, config):
+                      
+                        # Set basic attributes
+                        self.variant = config.get('variant', 'resnet50')
+                        self.pretrained = config.get('pretrained', True)
+                        self.input_channels = config.get('input_channels', 3)
+                        self.output_dim = config['output_dim']
+                        self.device = torch.device(config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
+                        
+                        # Training mode flags
+                        self.use_cafo = config.get('use_cafo', False)
+                        self.use_forward_forward = config.get('use_forward_forward', False)
+                        
+                        # Initialize as nn.Module
+                        torch.nn.Module.__init__(self)
+                        
+                        # Set criterion
+                        self.criterion = torch.nn.CrossEntropyLoss()
+                        
+                        # Create blocks based on training mode
+                        if self.use_cafo:
+                            self.cafo_blocks = config.get('cafo_blocks', 4)
+                            self.epochs_per_block = config.get('epochs_per_block', 50)
+                            self.block_lr = config.get('block_lr', 0.001)
+                            self.blocks = torch.nn.ModuleList()
+                            self._create_cafo_blocks()
+                            self.cafo_trained = False
+                            
+                        elif self.use_forward_forward:
+                            self.ff_blocks = config.get('ff_blocks', 4)
+                            self.ff_epochs_per_block = config.get('ff_epochs_per_block', 50)
+                            self.ff_lr = config.get('ff_lr', 0.01)
+                            self.ff_threshold = config.get('ff_threshold', 2.0)
+                            self.ff_goodness_dim = config.get('ff_goodness_dim', 128)
+                            self.ff_blocks_list = torch.nn.ModuleList()
+                            self._create_ff_blocks()
+                            self.ff_trained = False
+                            self.ff_classifier = None
+                            
+                        else:
+                            # Standard ResNet
+                            self._build_layers()
+                        
+                        # Move to device
+                        self.to(self.device)
+                    
+                    def _create_ff_blocks(self):
+                  
+                        if self.variant in ['resnet18', 'resnet34']:
+                            channel_configs = [(64, 64), (64, 128), (128, 256), (256, 512)]
+                            strides = [1, 2, 2, 2]
+                        else:  # ResNet50+
+                            channel_configs = [(64, 256), (256, 512), (512, 1024), (1024, 2048)]
+                            strides = [1, 2, 2, 2]
+
+                        for i in range(min(self.ff_blocks, len(channel_configs))):
+                            in_channels, out_channels = channel_configs[i]
+                            stride = strides[i]
+                            if i == 0:
+                                in_channels = self.input_channels
+
+                            block = ForwardForwardResNetBlock(
+                                in_channels=in_channels,
+                                out_channels=out_channels,
+                                stride=stride,
+                                dropout=self.dropout,
+                                goodness_dim=self.ff_goodness_dim
+                            )
+                            self.ff_blocks_list.append(block)
+                    
+                    def _create_cafo_blocks(self):
+                 
+                        if self.variant in ['resnet18', 'resnet34']:
+                            channel_configs = [(64, 64), (64, 128), (128, 256), (256, 512)]
+                            strides = [1, 2, 2, 2]
+                        else:  # ResNet50+
+                            channel_configs = [(64, 256), (256, 512), (512, 1024), (1024, 2048)]
+                            strides = [1, 2, 2, 2]
+                        
+                        for i in range(min(self.cafo_blocks, len(channel_configs))):
+                            in_channels, out_channels = channel_configs[i]
+                            stride = strides[i]
+                            if i == 0:
+                                in_channels = self.input_channels
+                            
+                            block = CaFoResNetBlock(
+                                in_channels=in_channels,
+                                out_channels=out_channels,
+                                stride=stride,
+                                output_dim=self.output_dim,
+                                dropout=self.dropout
+                            )
+                            self.blocks.append(block)
+                    
+                    def _build_layers(self):
+                    
+                        # This is a simplified version for standard ResNet
+                        from torchvision import models
+                        
+                        variant_map = {
+                            'resnet18': models.resnet18,
+                            'resnet34': models.resnet34,
+                            'resnet50': models.resnet50,
+                            'resnet101': models.resnet101,
+                            'resnet152': models.resnet152
+                        }
+                        
+                        if self.variant in variant_map:
+                            resnet_model = variant_map[self.variant](pretrained=self.pretrained)
+                            in_features = resnet_model.fc.in_features
+                            resnet_model.fc = torch.nn.Linear(in_features, self.output_dim)
+                            self.model = resnet_model
+                        else:
+                            # Fallback to creating a simple CNN
+                            print(f"Warning: Variant {self.variant} not found, using simple CNN")
+                            self.model = torch.nn.Sequential(
+                                torch.nn.Conv2d(self.input_channels, 64, kernel_size=3, padding=1),
+                                torch.nn.ReLU(),
+                                torch.nn.MaxPool2d(2),
+                                torch.nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                                torch.nn.ReLU(),
+                                torch.nn.MaxPool2d(2),
+                                torch.nn.Flatten(),
+                                torch.nn.Linear(128 * 56 * 56, 512),
+                                torch.nn.ReLU(),
+                                torch.nn.Linear(512, self.output_dim)
+                            )
+                    
+                    def forward(self, x):
+                   
+                        if self.use_cafo:
+                            if not getattr(self, "cafo_trained", False):
+                                raise RuntimeError("CAFO model must be trained using train_cafo() before inference")
+                            return self._forward_cafo(x)
+                        elif self.use_forward_forward:
+                            if not getattr(self, "ff_trained", False):
+                                raise RuntimeError("FF model must be trained using train_forward_forward() before inference")
+                            return self._forward_ff(x)
+                        else:
+                            if hasattr(self, 'model'):
+                                return self.model(x)
+                            else:
+                                # Fallback forward
+                                return torch.zeros(x.shape[0], self.output_dim).to(self.device)
+                    
+                    def _forward_cafo(self, x):
+                      
+                        current_input = x
+                        for i, block in enumerate(self.blocks):
+                            features = block.forward(current_input)
+                            if i == len(self.blocks) - 1:
+                                return block.predict_local(features)
+                            else:
+                                current_input = features
+                        return current_input
+                    
+                    def _forward_ff(self, x):
+                        
+                        current = x
+                        for block in self.ff_blocks_list:
+                            current = block.forward(current)
+                        pooled = torch.nn.functional.adaptive_avg_pool2d(current, (1, 1))
+                        pooled = torch.flatten(pooled, 1)
+                        if self.ff_classifier is None:
+                            # Create classifier if needed
+                            in_features = pooled.shape[1]
+                            self.ff_classifier = torch.nn.Linear(in_features, self.output_dim).to(self.device)
+                        logits = self.ff_classifier(pooled)
+                        return logits
+                    
+                    def get_num_parameters(self):
+                        
+                        return sum(p.numel() for p in self.parameters())
+                    
+                    def get_model_info(self):
+                
+                        return {
+                            'model_class': self.__class__.__name__,
+                            'variant': self.variant,
+                            'input_channels': self.input_channels,
+                            'output_dim': self.output_dim,
+                            'use_cafo': self.use_cafo,
+                            'use_forward_forward': self.use_forward_forward,
+                            'num_parameters': self.get_num_parameters()
+                        }
+                
+                return PatchedResNet
+                
+            except ImportError as e:
+                print(f"Warning: Could not import Enhanced ResNet: {e}")
+                return None
+
         # Parse arguments
         parser = argparse.ArgumentParser()
         parser.add_argument("--data_path", required=True)
@@ -294,7 +512,7 @@ implementation:
         model_config['input_channels'] = model_cfg.get('input_channels', 3)
         model_config['variant'] = model_cfg.get('variant', 'resnet50')
         model_config['pretrained'] = model_cfg.get('pretrained', True)
-        model_config['dropout'] = model_cfg.get('dropout', 0.0)
+        model_config['dropout'] = model_cfg.get('dropout', 0.0)  # Include dropout
         
         # Set output dimension
         model_config['output_dim'] = num_classes
@@ -332,12 +550,15 @@ implementation:
         print(f"\\nConfiguration:")
         print(f"  Variant: {model_config.get('variant', 'resnet50')}")
         print(f"  Output dim: {model_config.get('output_dim')}")
-        print(f"  Dropout: {model_config.get('dropout', 'Not specified')}")
+        print(f"  Dropout: {model_config.get('dropout', 0.0)}")
         print(f"  Training mode: {training_mode}")
 
         # Create or load model
         net = None
         model_source = "freshly_created"
+        
+        # Get the patched ResNet class
+        PatchedResNet = create_patched_resnet_class()
         
         if args.model_input and os.path.exists(args.model_input):
             # Load existing model
@@ -359,11 +580,14 @@ implementation:
                     # Determine which ResNet class to use
                     if use_cafo or use_forward_forward:
                         print(f"Creating Enhanced ResNet for {training_mode} training...")
-                        try:
-                            from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
-                            net = EnhancedResNet(model_config)
-                        except ImportError as e:
-                            print(f"Warning: Could not import Enhanced ResNet: {e}")
+                        
+                        if PatchedResNet is not None:
+                            net = PatchedResNet(model_config)
+                            print("✓ Created Patched ResNet")
+                        else:
+                            print("Warning: PatchedResNet not available, using standard ResNet")
+                            model_config['use_cafo'] = False
+                            model_config['use_forward_forward'] = False
                             net = CNNFactory.create_model('resnet', model_config)
                     else:
                         print("Creating standard ResNet for backpropagation...")
@@ -378,13 +602,11 @@ implementation:
                     except Exception as e:
                         print(f"Warning: Could not load weights: {e}")
                         print("Creating fresh model instead...")
-                        if use_cafo or use_forward_forward:
-                            try:
-                                from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
-                                net = EnhancedResNet(model_config)
-                            except ImportError:
-                                net = CNNFactory.create_model('resnet', model_config)
+                        if use_cafo or use_forward_forward and PatchedResNet is not None:
+                            net = PatchedResNet(model_config)
                         else:
+                            model_config['use_cafo'] = False
+                            model_config['use_forward_forward'] = False
                             net = CNNFactory.create_model('resnet', model_config)
                         model_source = "fresh_after_failed_load"
                         
@@ -392,13 +614,11 @@ implementation:
                     # Just state dict
                     print("Loading model state dict...")
                     
-                    if use_cafo or use_forward_forward:
-                        try:
-                            from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
-                            net = EnhancedResNet(model_config)
-                        except ImportError:
-                            net = CNNFactory.create_model('resnet', model_config)
+                    if use_cafo or use_forward_forward and PatchedResNet is not None:
+                        net = PatchedResNet(model_config)
                     else:
+                        model_config['use_cafo'] = False
+                        model_config['use_forward_forward'] = False
                         net = CNNFactory.create_model('resnet', model_config)
                     
                     try:
@@ -407,39 +627,36 @@ implementation:
                         model_source = "loaded_state_dict"
                     except Exception as e:
                         print(f"Warning: Could not load weights: {e}")
-                        if use_cafo or use_forward_forward:
-                            try:
-                                from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
-                                net = EnhancedResNet(model_config)
-                            except ImportError:
-                                net = CNNFactory.create_model('resnet', model_config)
+                        if use_cafo or use_forward_forward and PatchedResNet is not None:
+                            net = PatchedResNet(model_config)
                         else:
+                            model_config['use_cafo'] = False
+                            model_config['use_forward_forward'] = False
                             net = CNNFactory.create_model('resnet', model_config)
                         model_source = "fresh_after_failed_load"
                     
             except Exception as e:
                 print(f"Error loading model: {e}")
                 print("Creating fresh model instead...")
-                if use_cafo or use_forward_forward:
-                    try:
-                        from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
-                        net = EnhancedResNet(model_config)
-                    except ImportError:
-                        net = CNNFactory.create_model('resnet', model_config)
+                if use_cafo or use_forward_forward and PatchedResNet is not None:
+                    net = PatchedResNet(model_config)
                 else:
+                    model_config['use_cafo'] = False
+                    model_config['use_forward_forward'] = False
                     net = CNNFactory.create_model('resnet', model_config)
                 model_source = "fresh_after_failed_load"
         else:
             # Create fresh model
             print("\\nNo model input provided, creating fresh model...")
             if use_cafo or use_forward_forward:
-                try:
-                    from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
-                    print(f"Creating Enhanced ResNet for {training_mode} training...")
-                    net = EnhancedResNet(model_config)
-                except ImportError as e:
-                    print(f"Warning: Could not import Enhanced ResNet: {e}")
-                    print("Falling back to standard ResNet")
+                if PatchedResNet is not None:
+                    print(f"Creating Patched ResNet for {training_mode} training...")
+                    net = PatchedResNet(model_config)
+                else:
+                    print(f"Warning: PatchedResNet not available")
+                    print("Falling back to standard ResNet (CAFO/FF training won't work)")
+                    model_config['use_cafo'] = False
+                    model_config['use_forward_forward'] = False
                     net = CNNFactory.create_model('resnet', model_config)
             else:
                 print("Creating standard ResNet for backpropagation...")
@@ -557,7 +774,7 @@ implementation:
         with open(args.training_history, "w") as f:
             json.dump(history, f, indent=2)
 
-        # Process training history into flattened format - OPTION 3 FIX
+        # Process training history into flattened format
         print("\\nProcessing training history...")
         processed_rows = process_training_history(history, args.max_history_rows)
 
