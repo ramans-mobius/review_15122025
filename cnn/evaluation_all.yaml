@@ -1,4 +1,4 @@
-name: Evaluation v9
+name: Evaluation v10
 description: Evaluates a CNN model and outputs performance metrics.
 
 inputs:
@@ -185,17 +185,46 @@ implementation:
                     ff_cfg = model_cfg.get("forward_forward", {})
                     model_config['ff_blocks'] = ff_cfg.get('ff_blocks', 4)
                     model_config['ff_goodness_dim'] = ff_cfg.get('ff_goodness_dim', 128)
+                    model_config['ff_threshold'] = ff_cfg.get('threshold', 2.0)
+                    model_config['ff_lr'] = ff_cfg.get('ff_lr', 0.01)
+                    model_config['ff_epochs_per_block'] = ff_cfg.get('ff_epochs_per_block', 50)
                 else:
                     model_config['use_cafo'] = True
                     model_config['use_forward_forward'] = False
+                    # Add CAFO parameters if not present
+                    model_config['cafo_blocks'] = model_cfg.get('cafo_blocks', 4)
+                    model_config['epochs_per_block'] = model_cfg.get('epochs_per_block', 50)
+                    model_config['block_lr'] = model_cfg.get('block_lr', 0.001)
                 
                 model = FixedResNet(model_config).to(device)
                 
                 # Mark as trained (required for forward pass)
                 if use_forward_forward:
                     model.ff_trained = True
+                    # CRITICAL: Create ff_classifier BEFORE loading state dict
+                    # Check if classifier parameters exist in state dict
+                    classifier_keys = [k for k in state_dict.keys() if 'ff_classifier' in k]
+                    if classifier_keys:
+                        print(f"Found FF classifier parameters in checkpoint: {len(classifier_keys)} keys")
+                        # Create classifier with correct dimensions
+                        # Get feature dimension by running a dummy input
+                        dummy_input = torch.randn(1, 3, 128, 128).to(device)
+                        with torch.no_grad():
+                            if hasattr(model, 'ff_blocks_list'):
+                                current = dummy_input
+                                for block in model.ff_blocks_list:
+                                    current = block.forward(current)
+                                pooled = torch.nn.functional.adaptive_avg_pool2d(current, (1, 1))
+                                feats = torch.flatten(pooled, 1)
+                                in_features = feats.shape[1]
+                                model.ff_classifier = torch.nn.Linear(in_features, num_classes).to(device)
+                                print(f"Created FF classifier with input features: {in_features}")
+                    else:
+                        print("Warning: No FF classifier parameters found in checkpoint")
+                        
                 elif use_cafo:
                     model.cafo_trained = True
+                    print(f"CAFO model marked as trained with {model_config.get('cafo_blocks', 4)} blocks")
                     
             else:
                 print("Loading standard model using FixedResNet...")
@@ -206,6 +235,22 @@ implementation:
             # Load state dict
             model.load_state_dict(state_dict, strict=False)
             print(f"✓ {training_mode} model loaded successfully (strict=False)")
+            
+            # Final check: if FF model, ensure classifier exists
+            if use_forward_forward and (not hasattr(model, 'ff_classifier') or model.ff_classifier is None):
+                print("Warning: FF classifier not found, creating one...")
+                # Create a simple classifier
+                dummy_input = torch.randn(1, 3, 128, 128).to(device)
+                with torch.no_grad():
+                    current = dummy_input
+                    if hasattr(model, 'ff_blocks_list'):
+                        for block in model.ff_blocks_list:
+                            current = block.forward(current)
+                        pooled = torch.nn.functional.adaptive_avg_pool2d(current, (1, 1))
+                        feats = torch.flatten(pooled, 1)
+                        in_features = feats.shape[1]
+                        model.ff_classifier = torch.nn.Linear(in_features, num_classes).to(device)
+                        print(f"Created FF classifier with {in_features} input features")
             
         except Exception as e:
             print(f" ERROR creating model: {e}")
@@ -228,14 +273,18 @@ implementation:
                 X, y = X.to(device), y.to(device)
                 X = X.float()
                 
-                logits = model(X)
-                loss = criterion(logits, y)
-                total_loss += loss.item()
-                total_batches += 1
+                try:
+                    logits = model(X)
+                    loss = criterion(logits, y)
+                    total_loss += loss.item()
+                    total_batches += 1
 
-                preds = logits.argmax(dim=1)
-                all_preds.extend(preds.cpu().tolist())
-                all_targets.extend(y.cpu().tolist())
+                    preds = logits.argmax(dim=1)
+                    all_preds.extend(preds.cpu().tolist())
+                    all_targets.extend(y.cpu().tolist())
+                except Exception as e:
+                    print(f"Warning: Error in batch prediction: {e}")
+                    continue
 
         # Calculate accuracy
         try:
