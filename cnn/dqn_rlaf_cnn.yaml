@@ -545,8 +545,8 @@ implementation:
                 
                 print(f"DEBUG: Raw metrics content: {content}")
                 
-                # Parse the plain text format (e.g., "accuracy: 0.85\nloss: 0.23")
-                lines = content.split('\n')
+                # Parse the plain text format (e.g., "accuracy: 0.85\\nloss: 0.23")
+                lines = content.split('\\n')
                 for line in lines:
                     line = line.strip()
                     if ':' in line:
@@ -587,7 +587,7 @@ implementation:
             action_to_use = None  # Initialize
             
             for i in range(2):
-                print(f"\n{'='*60}")
+                print(f"\\n{'='*60}")
                 print(f"DEBUG: Starting RLAF iteration {i+1}")
                 print(f"{'='*60}")
                 
