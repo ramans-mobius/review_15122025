@@ -1,4 +1,4 @@
-name: Trigger CNN Pipeline v8
+name: Trigger CNN Pipeline v9
 description: Triggers an Elyra Kubeflow pipeline for CNN training with DQN optimization.
 inputs:
   - {name: pickle_cdn_url, type: String, description: "URL to the uploaded pickle file"}
@@ -22,7 +22,11 @@ inputs:
   - {name: train_schema, type: String, description: "Schema ID for training history"}
   - {name: eval_schema, type: String, description: "Schema ID for evaluation metrics"}
   - {name: dqn_pipeline_id, type: String, description: "ID of the DQN RLAF pipeline to trigger from within the CNN pipeline"}
-  - {name: rlaf_schema, type: String, description: "Schema ID for RLAF (Reinforcement Learning Agent Framework) metrics"}  # Added RLAF schema
+  - {name: rlaf_schema, type: String, description: "Schema ID for RLAF (Reinforcement Learning Agent Framework) metrics"}
+  # Added missing parameters from pipeline definition
+  - {name: architecture_type, type: String, description: "Architecture type for the model"}
+  - {name: cdn_url, type: String, description: "CDN URL for loading pre-trained models"}
+  - {name: load_from_cdn_url, type: String, description: "Flag to indicate whether to load model from CDN"}
 implementation:
   container:
     image: python:3.8-slim
@@ -67,7 +71,11 @@ implementation:
         parser.add_argument('--train_schema', type=str, required=True, help='Schema ID for training history.')
         parser.add_argument('--eval_schema', type=str, required=True, help='Schema ID for evaluation metrics.')
         parser.add_argument('--dqn_pipeline_id', type=str, required=True, help='ID of the DQN RLAF pipeline.')
-        parser.add_argument('--rlaf_schema', type=str, required=True, help='Schema ID for RLAF metrics.')  # Added RLAF schema argument
+        parser.add_argument('--rlaf_schema', type=str, required=True, help='Schema ID for RLAF metrics.')
+        # Added arguments for missing parameters
+        parser.add_argument('--architecture_type', type=str, required=True, help='Architecture type for the model.')
+        parser.add_argument('--cdn_url', type=str, required=True, help='CDN URL for loading pre-trained models.')
+        parser.add_argument('--load_from_cdn_url', type=str, required=True, help='Flag to indicate whether to load model from CDN.')
         args = parser.parse_args()
 
         def fix_cdn_url(url):
@@ -200,7 +208,11 @@ implementation:
                 "train_schema": args.train_schema,
                 "eval_schema": args.eval_schema,
                 "pipeline_id": args.dqn_pipeline_id,
-                "rlaf_schema": args.rlaf_schema  
+                "rlaf_schema": args.rlaf_schema,
+                # Added missing parameters to payload
+                "architecture_type": args.architecture_type,
+                "cdn_url": args.cdn_url,
+                "load_from_cdn_url": args.load_from_cdn_url
             },
             "version": 1
         }
@@ -351,3 +363,10 @@ implementation:
       - {inputValue: dqn_pipeline_id}
       - --rlaf_schema
       - {inputValue: rlaf_schema}
+      # Added args for missing parameters
+      - --architecture_type
+      - {inputValue: architecture_type}
+      - --cdn_url
+      - {inputValue: cdn_url}
+      - --load_from_cdn_url
+      - {inputValue: load_from_cdn_url}
