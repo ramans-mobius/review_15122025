@@ -1,4 +1,4 @@
-name: Evaluation v2
+name: Evaluation v8
 description: Evaluates a CNN model and outputs performance metrics.
 
 inputs:
@@ -17,12 +17,13 @@ outputs:
 
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v23
+    image: gurpreetgandhi/nesy-factory:v34
     command:
       - sh
       - -c
       - |
         python3 -m pip install --quiet --upgrade pip setuptools wheel
+        python3 -m pip install --quiet "torchvision==0.17.0"
         exec "$0" "$@"
       - python3
       - -u
@@ -158,6 +159,10 @@ implementation:
                 try:
                     from nesy_factory.CNNs.ffresnet import ResNet as EnhancedResNet
                     
+                    # Ensure dropout exists in config
+                    if 'dropout' not in model_config:
+                        model_config['dropout'] = 0.0
+                    
                     if use_forward_forward:
                         model_config['use_forward_forward'] = True
                         model_config['use_cafo'] = False
@@ -210,7 +215,7 @@ implementation:
         model.eval()
         
         # ---------------------------
-        # 6) Evaluate
+        # 6) Evaluate - WITH FIXED FLOAT CONVERSION
         # ---------------------------
         criterion = torch.nn.CrossEntropyLoss()
         all_preds, all_targets = [], []
@@ -229,18 +234,28 @@ implementation:
                 all_preds.extend(preds.cpu().tolist())
                 all_targets.extend(y.cpu().tolist())
 
-        accuracy = float(accuracy_score(all_targets, all_preds))
-        report = classification_report(all_targets, all_preds, digits=4)
+        # Calculate accuracy with error handling
+        try:
+            accuracy = float(accuracy_score(all_targets, all_preds))
+        except Exception as e:
+            print(f"Warning: accuracy_score failed: {e}")
+            # Calculate manually
+            correct = sum(1 for p, t in zip(all_preds, all_targets) if p == t)
+            total = len(all_targets)
+            accuracy = float(correct / total) if total > 0 else 0.0
+        
+        report = classification_report(all_targets, all_preds, digits=4, output_dict=True)
         cm = confusion_matrix(all_targets, all_preds).tolist()
         avg_loss = float(total_loss / max(1, len(test_loader)))
 
+        # Ensure all values are float
         metrics_output = {
-            "accuracy": accuracy,
-            "loss": avg_loss,
+            "accuracy": float(accuracy),
+            "loss": float(avg_loss),
             "confusion_matrix": cm,
             "classification_report": report,
             "training_mode": training_mode,
-            "num_samples": len(all_targets)
+            "num_samples": int(len(all_targets))
         }
 
         # ---------------------------
@@ -252,16 +267,17 @@ implementation:
         with open(args.metrics_json, "w") as f:
             json.dump(metrics_output, f, indent=2)
 
-        # KFP metrics format
+        # KFP metrics format - ensure float values
         with open(args.metrics, "w") as f:
-            f.write(f"accuracy: {accuracy}\\n")
-            f.write(f"loss: {avg_loss}\\n")
+            f.write(f"accuracy: {float(accuracy)}\\n")
+            f.write(f"loss: {float(avg_loss)}\\n")
 
         print("=== EVALUATION COMPLETE ===")
         print(f"Training mode: {training_mode}")
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"Loss: {avg_loss:.4f}")
+        print(f"Accuracy: {float(accuracy):.4f}")
+        print(f"Loss: {float(avg_loss):.4f}")
         print(f"Number of samples: {len(all_targets)}")
+        print(f"Metrics saved: accuracy={float(accuracy)}, loss={float(avg_loss)}")
 
     args:
       - --trained_model
