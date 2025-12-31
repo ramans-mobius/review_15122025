@@ -1,4 +1,4 @@
-name: DQN RLAF Loop CNN v3
+name: DQN RLAF Loop CNN v4
 description: Triggers the DQN RLAF pipeline in a loop to optimize CNN model hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -390,7 +390,7 @@ implementation:
                 return metrics
 
         def create_model_from_checkpoint_and_config(checkpoint, model_config):
-            """Create model from checkpoint using FixedResNet"""
+          
             print(f"DEBUG: Creating FixedResNet model from checkpoint")
             
             # Extract config from checkpoint or use model_config
@@ -432,7 +432,7 @@ implementation:
             return model, base_config
 
         def load_model_weights_with_fallback(model, checkpoint):
-            """Load weights with multiple fallback strategies"""
+           
             print(f"DEBUG: Loading model weights")
             
             if isinstance(checkpoint, dict):
@@ -661,7 +661,7 @@ implementation:
                 with open(args.init_metrics, 'r') as f:
                     content = f.read().strip()
                 
-                lines = content.split('\n')
+                lines = content.split('\\n')
                 for line in lines:
                     line = line.strip()
                     if ':' in line:
@@ -697,7 +697,7 @@ implementation:
             action_to_use = None
             
             for i in range(2):
-                print(f"\n{'='*60}")
+                print(f"\\n{'='*60}")
                 print(f"DEBUG: Starting RLAF iteration {i+1}")
                 print(f"{'='*60}")
                 
