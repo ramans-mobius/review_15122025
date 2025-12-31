@@ -11,7 +11,7 @@ outputs:
   - {name: config_cdn_url, type: String, description: "URL to the uploaded config string"}
 implementation:
   container:
-    image: python:3.8-slim
+    image: nikhilv215/nesy-factory:v23
     command:
       - sh
       - -ec
