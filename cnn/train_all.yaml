@@ -1,4 +1,4 @@
-name: Train v5
+name: Train v6
 description: Trains CNN using nesyfactory with NO fallbacks
 inputs:
   - name: data_path
@@ -38,6 +38,7 @@ implementation:
       - |
         import torch
         import argparse, pickle, os, json, sys, io, traceback
+        import numpy as np
         from torch.utils.data import TensorDataset, DataLoader
         
         # Import nesyfactory modules
@@ -318,6 +319,92 @@ implementation:
             traceback.print_exc()
             sys.exit(1)
 
+        # ===========================================
+        # FIXED: Convert CAFO results before JSON serialization
+        # ===========================================
+        def convert_tensors_to_json(obj):
+            """Recursively convert PyTorch tensors to JSON-serializable types."""
+            if torch.is_tensor(obj):
+                if obj.numel() == 1:
+                    return float(obj.cpu().detach().numpy())
+                else:
+                    return obj.cpu().detach().numpy().tolist()
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_tensors_to_json(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_tensors_to_json(item) for item in obj]
+            else:
+                return obj
+        
+        def clean_cafo_results(cafo_results):
+            """Clean CAFO results by removing large tensors."""
+            if not isinstance(cafo_results, dict):
+                return cafo_results
+            
+            cleaned = {}
+            
+            # Process block_results
+            if 'block_results' in cafo_results:
+                cleaned_block_results = []
+                for block in cafo_results['block_results']:
+                    cleaned_block = {}
+                    
+                    # Keep loss values
+                    for key in ['train_losses', 'val_losses', 'best_val_loss', 'best_epoch']:
+                        if key in block:
+                            value = block[key]
+                            cleaned_block[key] = convert_tensors_to_json(value)
+                    
+                    # Remove large tensor fields but keep their info
+                    for key in ['final_features', 'final_model_state']:
+                        if key in block:
+                            # Just keep shape info, not the actual tensor
+                            value = block[key]
+                            if torch.is_tensor(value):
+                                cleaned_block[f'{key}_info'] = {
+                                    'shape': list(value.shape),
+                                    'dtype': str(value.dtype)
+                                }
+                            elif isinstance(value, dict):  # state dict
+                                cleaned_block[f'{key}_info'] = {
+                                    'num_params': sum(p.numel() for p in value.values()),
+                                    'keys': list(value.keys())
+                                }
+                    
+                    cleaned_block_results.append(cleaned_block)
+                
+                cleaned['block_results'] = cleaned_block_results
+            
+            # Process other fields
+            for key in ['total_training_time', 'all_features']:
+                if key in cafo_results:
+                    value = cafo_results[key]
+                    if key == 'all_features':
+                        # Convert list of tensors to list of shapes
+                        if isinstance(value, list):
+                            cleaned['all_features_info'] = []
+                            for tensor in value:
+                                if torch.is_tensor(tensor):
+                                    cleaned['all_features_info'].append({
+                                        'shape': list(tensor.shape),
+                                        'dtype': str(tensor.dtype)
+                                    })
+                    else:
+                        cleaned[key] = convert_tensors_to_json(value)
+            
+            return cleaned
+
+        # Convert results based on training mode
+        print("\\nConverting training results for JSON serialization...")
+        if training_mode == "CAFO":
+            print("Processing CAFO results...")
+            serializable_results = clean_cafo_results(results)
+        else:
+            # FF and backprop results are already serializable
+            serializable_results = convert_tensors_to_json(results)
+
         # Save results
         print("\\nSaving model and training history...")
         os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
@@ -336,51 +423,95 @@ implementation:
         # Save training history
         history = {
             "training_mode": training_mode,
-            "results": results,
+            "results": serializable_results,
             "config": model_cfg,
             "num_classes": num_classes
         }
-        with open(args.training_history, "w") as f:
-            json.dump(history, f, indent=2)
+        
+        try:
+            with open(args.training_history, "w") as f:
+                json.dump(history, f, indent=2)
+            print("✓ Training history saved successfully")
+        except Exception as e:
+            print(f" ERROR saving history: {e}")
+            traceback.print_exc()
+            # Create minimal history
+            with open(args.training_history, "w") as f:
+                json.dump({
+                    "training_mode": training_mode,
+                    "config": model_cfg,
+                    "num_classes": num_classes,
+                    "error": f"Failed to serialize: {str(e)}"
+                }, f, indent=2)
 
+        # ===========================================
         # Process history for output
+        # ===========================================
+        print("\\nProcessing history for output...")
         processed_rows = []
-        if training_mode == "CAFO":
-            if "results" in history and "block_results" in history["results"]:
-                block_results = history["results"]["block_results"]
-                epoch = 0
-                for block_idx, block in enumerate(block_results):
-                    train_losses = block.get("train_losses", [])
-                    val_losses = block.get("val_losses", [])
+        
+        try:
+            if training_mode == "CAFO":
+                if "results" in history and "block_results" in history["results"]:
+                    block_results = history["results"]["block_results"]
+                    epoch = 0
+                    for block_idx, block in enumerate(block_results):
+                        train_losses = block.get("train_losses", [])
+                        val_losses = block.get("val_losses", [])
+                        
+                        # Ensure lists
+                        if not isinstance(train_losses, list):
+                            train_losses = [train_losses] if train_losses is not None else []
+                        if not isinstance(val_losses, list):
+                            val_losses = [val_losses] if val_losses is not None else []
+                        
+                        for loss_idx in range(len(train_losses)):
+                            row = {
+                                "epoch": epoch,
+                                "loss": float(train_losses[loss_idx]) if loss_idx < len(train_losses) else 0.0,
+                                "block": block_idx + 1
+                            }
+                            if loss_idx < len(val_losses):
+                                row["validation_loss"] = float(val_losses[loss_idx])
+                            processed_rows.append(row)
+                            epoch += 1
+                            
+            elif training_mode == "Forward-Forward":
+                if "results" in history and "block_results" in history["results"]:
+                    block_results = history["results"]["block_results"]
+                    epoch = 0
+                    for block_idx, block in enumerate(block_results):
+                        losses = block.get("epoch_losses", [])
+                        # Ensure it's a list
+                        if not isinstance(losses, list):
+                            losses = [losses] if losses is not None else []
+                        for loss in losses:
+                            processed_rows.append({"epoch": epoch, "loss": float(loss), "block": block_idx + 1})
+                            epoch += 1
+                            
+            else:  # Backpropagation
+                if "results" in history:
+                    results_data = history["results"]
+                    train_losses = results_data.get("train_losses", [])
+                    val_losses = results_data.get("val_losses", [])
                     
-                    for loss_idx in range(len(train_losses)):
-                        row = {"epoch": epoch, "loss": float(train_losses[loss_idx]), "block": block_idx + 1}
-                        if loss_idx < len(val_losses):
-                            row["validation_loss"] = float(val_losses[loss_idx])
+                    # Ensure lists
+                    if not isinstance(train_losses, list):
+                        train_losses = [train_losses] if train_losses is not None else []
+                    if not isinstance(val_losses, list):
+                        val_losses = [val_losses] if val_losses is not None else []
+                    
+                    for epoch_idx in range(len(train_losses)):
+                        row = {"epoch": epoch_idx + 1, "loss": float(train_losses[epoch_idx])}
+                        if epoch_idx < len(val_losses):
+                            row["validation_loss"] = float(val_losses[epoch_idx])
                         processed_rows.append(row)
-                        epoch += 1
                         
-        elif training_mode == "Forward-Forward":
-            if "results" in history and "block_results" in history["results"]:
-                block_results = history["results"]["block_results"]
-                epoch = 0
-                for block_idx, block in enumerate(block_results):
-                    losses = block.get("epoch_losses", [])
-                    for loss in losses:
-                        processed_rows.append({"epoch": epoch, "loss": float(loss), "block": block_idx + 1})
-                        epoch += 1
-                        
-        else:  # Backpropagation
-            if "results" in history:
-                results_data = history["results"]
-                train_losses = results_data.get("train_losses", [])
-                val_losses = results_data.get("val_losses", [])
-                
-                for epoch_idx in range(len(train_losses)):
-                    row = {"epoch": epoch_idx + 1, "loss": float(train_losses[epoch_idx])}
-                    if epoch_idx < len(val_losses):
-                        row["validation_loss"] = float(val_losses[epoch_idx])
-                    processed_rows.append(row)
+        except Exception as e:
+            print(f" ERROR processing history rows: {e}")
+            traceback.print_exc()
+            # Create fallback row
+            processed_rows = [{"epoch": 0, "loss": 0.0, "validation_loss": 0.0, "block": 0}]
 
         # Limit rows
         processed_rows = processed_rows[:args.max_history_rows]
