@@ -29,7 +29,7 @@ inputs:
   - {name: load_from_cdn_url, type: String, description: "Flag to indicate whether to load model from CDN"}
 implementation:
   container:
-    image: python:3.8-slim
+    image: nikhilv215/nesy-factory:v23
     command:
       - sh
       - -ec
