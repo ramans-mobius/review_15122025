@@ -17,7 +17,6 @@ implementation:
         # Install required packages
         apt-get update > /dev/null && apt-get install -y curl > /dev/null
         pip install torch pillow --quiet
-        python3 -m pip install --quiet "torchvision==0.17.0"
         exec "$0" "$@"
       - python3
       - -u
