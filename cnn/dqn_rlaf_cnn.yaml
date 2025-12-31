@@ -1,4 +1,4 @@
-name: DQN RLAF Loop CNN v2
+name: DQN RLAF Loop CNN v3
 description: Triggers the DQN RLAF pipeline in a loop to optimize CNN model hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -47,6 +47,25 @@ implementation:
         import torch.optim as optim
         from nesy_factory.CNNs.factory import CNNFactory
 
+        # ===========================================
+        # FIXED RESNET CLASS WITH CRITERION FIX (FROM BUILD BRICK)
+        # ===========================================
+        try:
+            from nesy_factory.CNNs.ffresnet import ResNet
+            
+            class FixedResNet(ResNet):
+                def __init__(self, config):
+                    # CRITICAL: Set dropout attribute BEFORE calling parent init
+                    self.dropout = config.get('dropout', 0.0)
+                    # Now call parent init
+                    super().__init__(config)
+                    # Ensure criterion exists (for consistency across bricks)
+                    if not hasattr(self, 'criterion') or self.criterion is None:
+                        self.criterion = torch.nn.CrossEntropyLoss()
+        except ImportError:
+            print("WARNING: nesy_factory.CNNs.ffresnet not available")
+            FixedResNet = None
+
         def get_retry_session():
             retry_strategy = Retry(
                 total=5,
@@ -65,7 +84,6 @@ implementation:
                 http = get_retry_session()
                 url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
                 
-                # Create pipeline parameters including model_id
                 pipeline_params = {}
                 if dqn_params:
                     pipeline_params["param_json"] = json.dumps(dqn_params)
@@ -371,6 +389,105 @@ implementation:
                 print(f"DEBUG: Continual metrics: {metrics}")
                 return metrics
 
+        def create_model_from_checkpoint_and_config(checkpoint, model_config):
+            """Create model from checkpoint using FixedResNet"""
+            print(f"DEBUG: Creating FixedResNet model from checkpoint")
+            
+            # Extract config from checkpoint or use model_config
+            if isinstance(checkpoint, dict) and 'config' in checkpoint:
+                base_config = checkpoint['config']
+                print(f"DEBUG: Using config from checkpoint")
+            else:
+                print(f"DEBUG: Using provided model_config")
+                base_config = model_config.copy()
+            
+            # Ensure required parameters are present
+            defaults = {
+                'output_dim': 10,
+                'input_channels': 3,
+                'input_size': [224, 224],
+                'pretrained': True,
+                'use_cafo': False,
+                'use_forward_forward': False,
+                'variant': 'resnet50',
+                'dropout': 0.0
+            }
+            
+            for param, default_value in defaults.items():
+                if param not in base_config:
+                    base_config[param] = default_value
+            
+            # Set device
+            base_config['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+            
+            print(f"DEBUG: Model config for FixedResNet: {base_config}")
+            
+            if FixedResNet is None:
+                raise ImportError("FixedResNet class not available. Check nesy_factory installation.")
+            
+            # Create the model
+            model = FixedResNet(base_config)
+            print(f"DEBUG: FixedResNet model created successfully")
+            
+            return model, base_config
+
+        def load_model_weights_with_fallback(model, checkpoint):
+            """Load weights with multiple fallback strategies"""
+            print(f"DEBUG: Loading model weights")
+            
+            if isinstance(checkpoint, dict):
+                # Try different keys
+                load_success = False
+                
+                # Strategy 1: model_state_dict
+                if 'model_state_dict' in checkpoint:
+                    try:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                        print("DEBUG: Loaded from model_state_dict")
+                        load_success = True
+                    except Exception as e:
+                        print(f"DEBUG: Failed to load from model_state_dict: {e}")
+                
+                # Strategy 2: state_dict
+                if not load_success and 'state_dict' in checkpoint:
+                    try:
+                        model.load_state_dict(checkpoint['state_dict'])
+                        print("DEBUG: Loaded from state_dict")
+                        load_success = True
+                    except Exception as e:
+                        print(f"DEBUG: Failed to load from state_dict: {e}")
+                
+                # Strategy 3: strict=False
+                if not load_success:
+                    try:
+                        if 'model_state_dict' in checkpoint:
+                            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                            print("DEBUG: Loaded from model_state_dict with strict=False")
+                        elif 'state_dict' in checkpoint:
+                            model.load_state_dict(checkpoint['state_dict'], strict=False)
+                            print("DEBUG: Loaded from state_dict with strict=False")
+                        else:
+                            model.load_state_dict(checkpoint, strict=False)
+                            print("DEBUG: Loaded checkpoint directly with strict=False")
+                        load_success = True
+                    except Exception as e:
+                        print(f"DEBUG: Failed to load with strict=False: {e}")
+                
+                if not load_success:
+                    raise RuntimeError("Failed to load model weights with any strategy")
+                    
+            else:
+                # Checkpoint is direct state_dict
+                try:
+                    model.load_state_dict(checkpoint)
+                    print("DEBUG: Loaded from direct state_dict")
+                except Exception as e:
+                    print(f"DEBUG: Failed to load direct state_dict, trying strict=False: {e}")
+                    model.load_state_dict(checkpoint, strict=False)
+                    print("DEBUG: Loaded direct state_dict with strict=False")
+            
+            return model
+
         def cnn_retraining(action, model_path, data_path, config_str, tasks_path, output_model_path, previous_metrics, dqn_params):
             print("DEBUG: Starting CNN retraining function")
             print(f"DEBUG: Model path: {model_path}")
@@ -390,6 +507,10 @@ implementation:
             print(f"DEBUG: Model config: {model_config}")
             print(f"DEBUG: Training config: {training_config}")
             
+            # Ensure optimizer section exists
+            if 'optimizer' not in training_config:
+                training_config['optimizer'] = {}
+            
             print("DEBUG: Applying action parameters to config")
             for param_key, param_value in action.items():
                 print(f"DEBUG: Processing parameter: {param_key} = {param_value}")
@@ -402,6 +523,15 @@ implementation:
                 elif 'epochs' in param_key:
                     training_config['epochs'] = int(param_value)
                     print(f"DEBUG: Set epochs to {param_value}")
+                elif 'weight_decay' in param_key:
+                    training_config['optimizer']['weight_decay'] = float(param_value)
+                    print(f"DEBUG: Set weight_decay to {param_value}")
+                elif 'gradient_clip' in param_key:
+                    training_config['optimizer']['gradient_clip'] = float(param_value)
+                    print(f"DEBUG: Set gradient_clip to {param_value}")
+                elif 'label_smoothing' in param_key:
+                    training_config['label_smoothing'] = float(param_value)
+                    print(f"DEBUG: Set label_smoothing to {param_value}")
                 elif 'architecture' in param_key:
                     model_config['architecture'] = param_value
                     print(f"DEBUG: Set architecture to {param_value}")
@@ -409,39 +539,18 @@ implementation:
                     model_config['variant'] = param_value
                     print(f"DEBUG: Set variant to {param_value}")
             
-            print(f"DEBUG: Creating model with architecture: {model_config['architecture']}")
-            
-            # Ensure dropout exists
-            if 'dropout' not in model_config:
-                model_config['dropout'] = 0.0
-                
-            model = CNNFactory.create_model(model_config['architecture'], model_config)
-            print(f"DEBUG: Model created: {type(model)}")
-            
-            print("DEBUG: Loading pre-trained weights...")
-            print(f"DEBUG: Model file exists: {os.path.exists(model_path)}")
-            
+            # Load checkpoint
+            print("DEBUG: Loading checkpoint...")
             checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
             print(f"DEBUG: Checkpoint type: {type(checkpoint)}")
-            print(f"DEBUG: Checkpoint keys: {list(checkpoint.keys()) if isinstance(checkpoint, dict) else 'Not a dict'}")
-            
             if isinstance(checkpoint, dict):
-                if 'model_state_dict' in checkpoint:
-                    print("DEBUG: Found model_state_dict in checkpoint")
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                    print("DEBUG: Loaded model from model_state_dict")
-                elif 'state_dict' in checkpoint:
-                    print("DEBUG: Found state_dict in checkpoint")
-                    model.load_state_dict(checkpoint['state_dict'])
-                    print("DEBUG: Loaded model from state_dict")
-                else:
-                    print("DEBUG: No standard keys found, attempting to load checkpoint as direct state dict")
-                    model.load_state_dict(checkpoint)
-                    print("DEBUG: Loaded model from direct state dict")
-            else:
-                print("DEBUG: Checkpoint is not a dict, attempting to load as direct state dict")
-                model.load_state_dict(checkpoint)
-                print("DEBUG: Loaded model from direct state dict")
+                print(f"DEBUG: Checkpoint keys: {list(checkpoint.keys())}")
+            
+            # Create model using FixedResNet
+            model, final_model_config = create_model_from_checkpoint_and_config(checkpoint, model_config)
+            
+            # Load weights
+            model = load_model_weights_with_fallback(model, checkpoint)
             
             print("DEBUG: Starting continual training...")
             trainer = CNNContinualTrainer(config)
@@ -468,11 +577,23 @@ implementation:
             if improvement_score > 0:
                 print("DEBUG: Improvement detected - saving retrained model")
                 final_model = results['naive']['final_model']
-                torch.save(final_model.state_dict(), output_model_path)
+                # Save in same format as input
+                save_dict = {
+                    'model_state_dict': final_model.state_dict(),
+                    'config': final_model_config,
+                    'training_mode': 'continual',
+                    'model_info': {
+                        'model_class': 'FixedResNet',
+                        'training_mode': 'continual',
+                        'iteration': 'retrained'
+                    }
+                }
+                torch.save(save_dict, output_model_path)
                 print(f"DEBUG: Retrained model saved to: {output_model_path}")
             else:
                 print("DEBUG: No improvement - saving original model state")
-                torch.save(model.state_dict(), output_model_path)
+                # Save original checkpoint
+                torch.save(checkpoint, output_model_path)
                 print(f"DEBUG: Original model saved to: {output_model_path}")
 
             return {"metrics": average_eval_metrics, "model_path": output_model_path}
@@ -528,33 +649,25 @@ implementation:
             args = parser.parse_args()
 
             print("DEBUG: Starting CNN RLAF Loop main function")
-            print(f"DEBUG: All input arguments parsed successfully")
             
             with open(args.access_token, 'r') as f:
                 access_token = f.read().strip()
-            print("DEBUG: Access token loaded")
             
-            # FIXED: Parse metrics file correctly (it's plain text, not JSON)
+            # Parse metrics
             print("DEBUG: Loading initial metrics...")
             current_metrics = {}
 
             try:
-                # Read the metrics file (it's plain text, not JSON)
                 with open(args.init_metrics, 'r') as f:
                     content = f.read().strip()
                 
-                print(f"DEBUG: Raw metrics content: {content}")
-                
-                # Parse the plain text format (e.g., "accuracy: 0.85\\nloss: 0.23")
-                lines = content.split('\\n')
+                lines = content.split('\n')
                 for line in lines:
                     line = line.strip()
                     if ':' in line:
                         key, value = line.split(':', 1)
                         key = key.strip()
                         value = value.strip()
-                        
-                        # Try to convert to float
                         try:
                             if value:
                                 current_metrics[key] = float(value)
@@ -563,13 +676,10 @@ implementation:
                         except (ValueError, TypeError):
                             current_metrics[key] = 0.0
                 
-                print(f"DEBUG: Parsed metrics: {current_metrics}")
-                
             except Exception as e:
                 print(f"DEBUG: Error parsing metrics file, using defaults: {e}")
                 current_metrics = {'accuracy': 50.0, 'loss': 1.0}
 
-            # Ensure we have required keys
             if 'accuracy' not in current_metrics:
                 current_metrics['accuracy'] = 50.0
             if 'loss' not in current_metrics:
@@ -577,56 +687,47 @@ implementation:
 
             print(f"DEBUG: Final metrics to use: {current_metrics}")
             
-            # FIXED DQN PARAMETERS - Use the same ones that work for LLM/VAE
+            # DQN parameters
             fixed_dqn_params = [
                 {"key": "accuracy", "sign": "+", "mul": 1.0},
                 {"key": "loss", "sign": "-", "mul": 1.0},
                 {"key": "epochs", "sign": "-", "mul": 0.1}
             ]
             
-            action_to_use = None  # Initialize
+            action_to_use = None
             
             for i in range(2):
-                print(f"\\n{'='*60}")
+                print(f"\n{'='*60}")
                 print(f"DEBUG: Starting RLAF iteration {i+1}")
                 print(f"{'='*60}")
                 
-                # Map CNN metrics to DQN expected parameters
                 cleaned_metrics = {}
-                # Use fixed parameters but map our actual metrics to them
                 for param in fixed_dqn_params:
                     key = param['key']
                     if key in current_metrics:
                         cleaned_metrics[key] = float(current_metrics[key])
                     else:
-                        # Provide default values for expected parameters
                         if key == "accuracy":
                             cleaned_metrics[key] = float(current_metrics.get('accuracy', 50.0))
                         elif key == "loss":
                             cleaned_metrics[key] = float(current_metrics.get('loss', 1.0))
                         elif key == "epochs":
-                            # Use training epochs as a proxy
                             config_data = json.loads(args.config)
                             training_config = config_data.get('training', {})
                             cleaned_metrics[key] = float(training_config.get('epochs', 5))
                         else:
                             cleaned_metrics[key] = 0.0
                 
-                print(f"DEBUG: Using fixed DQN parameters: {json.dumps(fixed_dqn_params, indent=2)}")
                 print(f"DEBUG: Mapped metrics for DQN: {cleaned_metrics}")
                 
                 try:
-                    print("DEBUG: Attempting to get instance from database")
                     instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
-                    print(f"DEBUG: Instance retrieved: {instance.get('model_id')}")
                     
                     if instance.get('pierce2rlaf'):
                         latest_pierce2rlaf = instance['pierce2rlaf'][-1]
                         previous_state = latest_pierce2rlaf['current_state']
-                        print("DEBUG: Found existing pierce2rlaf history")
                     else:
                         previous_state = {key: 0.0 for key in cleaned_metrics.keys()}
-                        print("DEBUG: No pierce2rlaf history found, creating default previous_state")
                     
                     new_pierce2rlaf_entry = {
                         "action_id": -1, 
@@ -638,18 +739,15 @@ implementation:
                     
                     pierce2rlaf_history = instance.get("pierce2rlaf", [])
                     pierce2rlaf_history.append(new_pierce2rlaf_entry)
-                    print(f"DEBUG: Updating pierce2rlaf with {len(pierce2rlaf_history)} entries")
                     
                     update_instance_field(access_token, args.domain, args.schema_id, args.model_id, 
                                         "pierce2rlaf", pierce2rlaf_history)
-                    print("DEBUG: Database update completed")
                     
                 except Exception as e:
                     print(f"ERROR: Database update failed: {str(e)}")
                     raise
                 
                 try:
-                    print("DEBUG: Attempting to trigger DQN pipeline")
                     dqn_config = {
                         "pipeline_id": args.dqn_pipeline_id, 
                         "experiment_id": args.dqn_experiment_id, 
@@ -659,22 +757,18 @@ implementation:
                         dqn_config, 
                         args.pipeline_domain, 
                         fixed_dqn_params,
-                        args.model_id  # Pass model_id from CNN to DQN
+                        args.model_id
                     )
                     
                     if dqn_success:
-                        print("DEBUG: DQN pipeline succeeded, fetching recommendations")
                         updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                         
                         if updated_instance.get('rlaf2pierce'):
                             latest_rlaf2pierce = updated_instance['rlaf2pierce'][-1]
-                            print(f"DEBUG: Latest rlaf2pierce: {latest_rlaf2pierce}")
                             
                             if latest_rlaf2pierce.get("pierce_or_not", True):
                                 rlaf_actions = updated_instance.get('rlaf_actions', {}).get('actions', [])
                                 action_id = latest_rlaf2pierce['action_id']
-                                print(f"DEBUG: Looking for action_id: {action_id} in {len(rlaf_actions)} actions")
-                                
                                 action_details = next((a for a in rlaf_actions if a["id"] == action_id), None)
                                 
                                 if action_details:
@@ -706,10 +800,9 @@ implementation:
                     args.tasks,
                     args.retrained_model, 
                     previous_state, 
-                    fixed_dqn_params  # Use fixed params here too
+                    fixed_dqn_params
                 )
                 
-                # Update current_metrics with the new training results
                 current_metrics = retraining_results["metrics"]
                 print(f"DEBUG: Retraining completed. New metrics: {current_metrics}")
             
@@ -740,22 +833,22 @@ implementation:
       - --data_path
       - {inputPath: data_path}
       - --config
-      - {inputValue: config}
+      - {inputPath: config}
       - --domain
-      - {inputValue: domain}
+      - {inputPath: domain}
       - --schema_id
-      - {inputValue: schema_id}
+      - {inputPath: schema_id}
       - --model_id
-      - {inputValue: model_id}
+      - {inputPath: model_id}
       - --dqn_pipeline_id
-      - {inputValue: dqn_pipeline_id}
+      - {inputPath: dqn_pipeline_id}
       - --dqn_experiment_id
-      - {inputValue: dqn_experiment_id}
+      - {inputPath: dqn_experiment_id}
       - --access_token
       - {inputPath: access_token}
       - --tasks
       - {inputPath: tasks}
       - --pipeline_domain
-      - {inputValue: pipeline_domain}
+      - {inputPath: pipeline_domain}
       - --retrained_model
       - {outputPath: retrained_model}
