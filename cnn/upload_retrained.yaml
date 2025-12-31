@@ -1,0 +1,119 @@
+name: Upload Retrained Model to CDN
+description: Uploads retrained model to Mobius CDN and updates schema with CDN URL.
+
+inputs:
+  - {name: retrained_model, type: Model, description: "Path to retrained model weights (.pth)"}
+  - {name: access_token, type: String, description: "Bearer access token file"}
+  - {name: domain, type: String, description: "Base API domain (e.g., https://ig.mobiusdtaas.ai)"}
+  - {name: schema_id, type: String, description: "Schema ID for model instances"}
+  - {name: model_id, type: String, description: "Model ID whose instance will be updated"}
+  - {name: cdn_domain, type: String, description: "Mobius CDN domain (e.g., https://cdn-new.gov-cloud.ai)"}
+
+outputs:
+  - {name: updated_instance, type: String, description: "Updated schema instance with retrained model CDN path"}
+
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v23
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import os, sys, argparse, json, uuid, subprocess, requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        def get_retry_session():
+            retry_strategy = Retry(total=5, status_forcelist=[500,502,503,504], backoff_factor=1)
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session = requests.Session()
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            return session
+
+        def upload_file_to_cdn(file_path, token, domain, cdn_domain):
+            import uuid
+            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                print(f"File {file_path} is empty or does not exist. Skipping upload.")
+                return None
+            temp_file_path = f"/tmp/{uuid.uuid4()}.pth"
+            with open(file_path, 'rb') as f_in, open(temp_file_path, 'wb') as f_out:
+                f_out.write(f_in.read())
+            upload_url = f"{domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdqn%2Fweights%2F"
+            print(f"Uploading file from {temp_file_path} to {upload_url}")
+            curl_command = [
+                "curl", "--location", upload_url,
+                "--header", f"Authorization: Bearer {token}",
+                "--form", f"file=@{temp_file_path}",
+                "--fail", "--show-error",
+                "--connect-timeout", "30"
+            ]
+            result = subprocess.run(curl_command, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"Upload failed: {result.stderr}")
+            response_json = json.loads(result.stdout)
+            print(f"CDN upload response: {response_json}")
+
+            #  Fix: return cdnUrl (relative or absolute) instead of missing filePath
+            cdn_url = response_json.get("cdnUrl") or response_json.get("url")
+            if cdn_url and not cdn_url.startswith("http"):
+                cdn_url = f"{cdn_domain}{cdn_url}"
+            return cdn_url
+
+        def update_instance_field(access_token, domain, schema_id, model_id, field, value):
+            http = get_retry_session()
+            url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            payload = {
+                "dbType": "TIDB",
+                "conditionalFilter": {"conditions": [{"field": "model_id","operator":"EQUAL","value": model_id}]},
+                "partialUpdateRequests": [{"patch": [{"operation": "REPLACE","path": f"{field}","value": value}]}]
+            }
+            print("Updating schema instance with new CDN path...")
+            response = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+            response.raise_for_status()
+            return response.json()
+
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--retrained_model', type=str, required=True)
+            parser.add_argument('--access_token', type=str, required=True)
+            parser.add_argument('--domain', type=str, required=True)
+            parser.add_argument('--schema_id', type=str, required=True)
+            parser.add_argument('--model_id', type=str, required=True)
+            parser.add_argument('--cdn_domain', type=str, required=True)
+            parser.add_argument('--updated_instance', type=str, required=True)
+            args = parser.parse_args()
+
+            with open(args.access_token, 'r') as f: 
+                token = f.read().strip()
+
+            cdn_url = upload_file_to_cdn(args.retrained_model, token, args.domain, args.cdn_domain)
+            if not cdn_url:
+                raise RuntimeError("CDN upload failed or file missing.")
+
+            updated_instance = update_instance_field(token, args.domain, args.schema_id, args.model_id, "model_weights_cdn", cdn_url)
+
+            os.makedirs(os.path.dirname(args.updated_instance), exist_ok=True)
+            with open(args.updated_instance, 'w') as f:
+                json.dump({"cdn_url": cdn_url, "schema_response": updated_instance}, f, indent=2)
+            print(f"Schema updated successfully with CDN URL: {cdn_url}")
+
+        if __name__ == "__main__":
+            main()
+    args:
+      - --retrained_model
+      - {inputPath: retrained_model}
+      - --access_token
+      - {inputPath: access_token}
+      - --domain
+      - {inputValue: domain}
+      - --schema_id
+      - {inputValue: schema_id}
+      - --model_id
+      - {inputValue: model_id}
+      - --cdn_domain
+      - {inputValue: cdn_domain}
+      - --updated_instance
+      - {outputPath: updated_instance}
