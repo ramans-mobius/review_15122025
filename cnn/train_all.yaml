@@ -1,4 +1,4 @@
-name: Train v6
+name: Train v7
 description: Trains CNN using nesyfactory with NO fallbacks
 inputs:
   - name: data_path
@@ -323,7 +323,7 @@ implementation:
         # FIXED: Convert CAFO results before JSON serialization
         # ===========================================
         def convert_tensors_to_json(obj):
-            """Recursively convert PyTorch tensors to JSON-serializable types."""
+     
             if torch.is_tensor(obj):
                 if obj.numel() == 1:
                     return float(obj.cpu().detach().numpy())
@@ -339,7 +339,7 @@ implementation:
                 return obj
         
         def clean_cafo_results(cafo_results):
-            """Clean CAFO results by removing large tensors."""
+         
             if not isinstance(cafo_results, dict):
                 return cafo_results
             
