@@ -1,4 +1,4 @@
-name: DQN RLAF Loop CNN v4
+name: DQN RLAF Loop CNN 
 description: Triggers the DQN RLAF pipeline in a loop to optimize CNN model hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -390,7 +390,7 @@ implementation:
                 return metrics
 
         def create_model_from_checkpoint_and_config(checkpoint, model_config):
-          
+            
             print(f"DEBUG: Creating FixedResNet model from checkpoint")
             
             # Extract config from checkpoint or use model_config
@@ -740,7 +740,7 @@ implementation:
                     pierce2rlaf_history = instance.get("pierce2rlaf", [])
                     pierce2rlaf_history.append(new_pierce2rlaf_entry)
                     
-                    update_instance_field(access_token, args.domain, args.schema_id, args.model_id, 
+                    update_instance_field(access_token, args.domain, args.schema_id, args.model_id,
                                         "pierce2rlaf", pierce2rlaf_history)
                     
                 except Exception as e:
@@ -833,22 +833,22 @@ implementation:
       - --data_path
       - {inputPath: data_path}
       - --config
-      - {inputPath: config}
+      - {inputValue: config}
       - --domain
-      - {inputPath: domain}
+      - {inputValue: domain}
       - --schema_id
-      - {inputPath: schema_id}
+      - {inputValue: schema_id}
       - --model_id
-      - {inputPath: model_id}
+      - {inputValue: model_id}
       - --dqn_pipeline_id
-      - {inputPath: dqn_pipeline_id}
+      - {inputValue: dqn_pipeline_id}
       - --dqn_experiment_id
-      - {inputPath: dqn_experiment_id}
+      - {inputValue: dqn_experiment_id}
       - --access_token
       - {inputPath: access_token}
       - --tasks
       - {inputPath: tasks}
       - --pipeline_domain
-      - {inputPath: pipeline_domain}
+      - {inputValue: pipeline_domain}
       - --retrained_model
       - {outputPath: retrained_model}
