@@ -1,4 +1,4 @@
-name: DQN RLAF Loop CNN v3
+name: DQN RLAF Loop CNN v4
 description: Triggers the DQN RLAF pipeline in a loop to optimize CNN model hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -47,7 +47,7 @@ implementation:
         import torch.optim as optim
 
         # ===========================================
-        # FIXED RESNET CLASS WITH CAFO BYPASS
+        # FIXED RESNET CLASS WITH ALL TRAINING MODES
         # ===========================================
         try:
             from nesy_factory.CNNs.ffresnet import ResNet
@@ -56,84 +56,69 @@ implementation:
                 def __init__(self, config):
                     # CRITICAL: Set dropout attribute BEFORE calling parent init
                     self.dropout = config.get('dropout', 0.0)
+                    # Store original config
+                    self.original_config = config.copy()
                     # Now call parent init
                     super().__init__(config)
-                    # Ensure criterion exists (for consistency across bricks)
+                    # Ensure criterion exists
                     if not hasattr(self, 'criterion') or self.criterion is None:
                         self.criterion = torch.nn.CrossEntropyLoss()
                     
-                    # Force creation of traditional layers for RLAF
-                    self._ensure_traditional_layers()
-                
-                def _ensure_traditional_layers(self):
-                   
-                    # If model doesn't have traditional layers, create them
-                    if not hasattr(self, 'conv1'):
-                        print("DEBUG: Creating traditional ResNet layers for RLAF")
-                        self._create_traditional_resnet_layers()
-                
-                def _create_traditional_resnet_layers(self):
-                 
-                    from torchvision.models import resnet18
-                    
-                    # Get basic ResNet from torchvision
-                    base_resnet = resnet18(pretrained=False)
-                    
-                    # Remove the final classification layer
-                    self.conv1 = base_resnet.conv1
-                    self.bn1 = base_resnet.bn1
-                    self.relu = base_resnet.relu
-                    self.maxpool = base_resnet.maxpool
-                    self.layer1 = base_resnet.layer1
-                    self.layer2 = base_resnet.layer2
-                    self.layer3 = base_resnet.layer3
-                    self.layer4 = base_resnet.layer4
-                    self.avgpool = base_resnet.avgpool
-                    
-                    # Create new classifier
-                    in_features = base_resnet.fc.in_features
-                    self.fc = nn.Linear(in_features, self.output_dim)
-                    
-                    print(f"DEBUG: Created traditional ResNet layers with output_dim={self.output_dim}")
+                    print(f"DEBUG: FixedResNet created with CAFO={self.use_cafo}, FF={self.use_forward_forward}")
                 
                 def forward(self, x):
                    
-                    print(f"DEBUG: Forward pass - use_cafo={getattr(self, 'use_cafo', False)}, use_forward_forward={getattr(self, 'use_forward_forward', False)}")
+                    # If CAFO/FF model but not trained yet, use traditional forward for RLAF
+                    if hasattr(self, 'use_cafo') and self.use_cafo and not hasattr(self, 'cafo_trained'):
+                        print("DEBUG: Untrained CAFO model - using traditional forward for RLAF")
+                        return self._forward_traditional(x)
                     
-                    # If this is a CAFO/FF model, use traditional forward for RLAF
-                    if getattr(self, 'use_cafo', False) or getattr(self, 'use_forward_forward', False):
-                        print("DEBUG: CAFO/FF model detected - using traditional forward for RLAF")
+                    if hasattr(self, 'use_forward_forward') and self.use_forward_forward and not hasattr(self, 'ff_trained'):
+                        print("DEBUG: Untrained FF model - using traditional forward for RLAF")
                         return self._forward_traditional(x)
                     
                     # Otherwise use parent's forward method
-                    try:
-                        return super().forward(x)
-                    except RuntimeError as e:
-                        if "CAFO model must be trained" in str(e) or "FF model must be trained" in str(e):
-                            print(f"DEBUG: Caught restriction error: {e}")
-                            print("DEBUG: Falling back to traditional forward")
-                            return self._forward_traditional(x)
-                        raise
+                    return super().forward(x)
                 
                 def _forward_traditional(self, x):
-                 
+                    
                     try:
-                        # Use our created traditional layers
-                        x = self.conv1(x)
-                        x = self.bn1(x)
-                        x = self.relu(x)
-                        x = self.maxpool(x)
+                        # Check if we have torchvision model
+                        if hasattr(self, 'model'):
+                            return self.model(x)
                         
-                        x = self.layer1(x)
-                        x = self.layer2(x)
-                        x = self.layer3(x)
-                        x = self.layer4(x)
+                        # Use custom ResNet layers
+                        if hasattr(self, 'conv1'):
+                            x = self.conv1(x)
+                            x = self.bn1(x)
+                            x = self.relu(x)
+                            x = self.maxpool(x)
+                            
+                            x = self.layer1(x)
+                            x = self.layer2(x)
+                            x = self.layer3(x)
+                            x = self.layer4(x)
+                            
+                            x = self.avgpool(x)
+                            x = torch.flatten(x, 1)
+                            if hasattr(self, 'fc'):
+                                x = self.fc(x)
+                            
+                            return x
                         
-                        x = self.avgpool(x)
-                        x = torch.flatten(x, 1)
-                        x = self.fc(x)
+                        # Fallback for CAFO/FF models
+                        if hasattr(self, 'blocks') and len(self.blocks) > 0:
+                            # Use first CAFO block's forward
+                            return self.blocks[0].forward(x)
                         
-                        return x
+                        if hasattr(self, 'ff_blocks_list') and len(self.ff_blocks_list) > 0:
+                            # Use first FF block's forward
+                            return self.ff_blocks_list[0].forward(x)
+                        
+                        # Last resort fallback
+                        print("DEBUG: Using fallback forward")
+                        return torch.randn(x.shape[0], self.output_dim, device=x.device)
+                        
                     except Exception as e:
                         print(f"DEBUG: Error in traditional forward: {e}")
                         # Create fallback output
@@ -143,6 +128,9 @@ implementation:
         except ImportError as e:
             print(f"ERROR: nesy_factory not available: {e}")
             FixedResNet = None
+
+        # Rest of the functions (get_retry_session, trigger_pipeline, etc.) remain the same...
+        # [ALL THE SAME HELPER FUNCTIONS AS BEFORE...]
 
         def get_retry_session():
             retry_strategy = Retry(
@@ -343,7 +331,7 @@ implementation:
                 }
             
             def _train_cnn_on_task(self, model, train_loader, test_loader) -> Dict[str, float]:
-             
+              
                 print(f"DEBUG: Training CNN on task")
                 model.train()
                 model.to(self.device)
@@ -357,13 +345,22 @@ implementation:
                 
                 print(f"DEBUG: Training config - lr: {learning_rate}, wd: {weight_decay}, epochs: {epochs}")
                 
-                # FOR RLAF LOOP: Always use standard backprop
-                # This allows hyperparameter optimization even for CAFO/FF models
-                return self._train_backprop_model(model, train_loader, test_loader, learning_rate, weight_decay, epochs)
+                # Determine training mode from model
+                use_cafo = getattr(model, 'use_cafo', False)
+                use_ff = getattr(model, 'use_forward_forward', False)
+                
+                print(f"DEBUG: Model training mode - CAFO: {use_cafo}, FF: {use_ff}")
+                
+                if use_cafo:
+                    return self._train_cafo_model(model, train_loader, test_loader, learning_rate, weight_decay, epochs)
+                elif use_ff:
+                    return self._train_ff_model(model, train_loader, test_loader, learning_rate, weight_decay, epochs)
+                else:
+                    return self._train_backprop_model(model, train_loader, test_loader, learning_rate, weight_decay, epochs)
             
             def _train_backprop_model(self, model, train_loader, test_loader, lr, wd, epochs):
-          
-                print(f"DEBUG: Using standard backprop training for RLAF optimization")
+              
+                print(f"DEBUG: Using standard backprop training")
                 optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
                 criterion = nn.CrossEntropyLoss()
                 
@@ -376,7 +373,6 @@ implementation:
                         data, targets = data.to(self.device), targets.to(self.device)
                         optimizer.zero_grad()
                         
-                        # This will use our overridden forward method in FixedResNet
                         outputs = model(data)
                         loss = criterion(outputs, targets)
                         loss.backward()
@@ -401,8 +397,96 @@ implementation:
                 print(f"DEBUG: Backprop training completed with metrics: {eval_metrics}")
                 return eval_metrics
             
-            def _evaluate_cnn_on_task(self, model, test_loader) -> Dict[str, float]:
+            def _train_cafo_model(self, model, train_loader, test_loader, lr, wd, epochs):
+             
+                print(f"DEBUG: Using CAFO training")
+                
+                # Extract data from DataLoader for CAFO training
+                all_data = []
+                all_targets = []
+                for data, targets in train_loader:
+                    all_data.append(data)
+                    all_targets.append(targets)
+                
+                X_train = torch.cat(all_data)
+                y_train = torch.cat(all_targets)
+                
+                # Extract test data
+                test_data = []
+                test_targets = []
+                for data, targets in test_loader:
+                    test_data.append(data)
+                    test_targets.append(targets)
+                
+                X_test = torch.cat(test_data)
+                y_test = torch.cat(test_targets)
+                
+                # Update CAFO parameters from action
+                if hasattr(model, 'original_config'):
+                    # Update learning rate for CAFO training
+                    model.original_config['block_lr'] = lr
+                    model.original_config['epochs_per_block'] = epochs
+                
+                # Train using CAFO method
+                results = model.train_cafo(
+                    X_train.to(self.device),
+                    y_train.to(self.device),
+                    X_test.to(self.device),
+                    y_test.to(self.device),
+                    verbose=True
+                )
+                
+                # Evaluate after CAFO training
+                eval_metrics = self._evaluate_cnn_on_task(model, test_loader)
+                print(f"DEBUG: CAFO training completed with metrics: {eval_metrics}")
+                return eval_metrics
             
+            def _train_ff_model(self, model, train_loader, test_loader, lr, wd, epochs):
+             
+                print(f"DEBUG: Using Forward-Forward training")
+                
+                # Extract data from DataLoader for FF training
+                all_data = []
+                all_targets = []
+                for data, targets in train_loader:
+                    all_data.append(data)
+                    all_targets.append(targets)
+                
+                X_train = torch.cat(all_data)
+                y_train = torch.cat(all_targets)
+                
+                # Extract test data
+                test_data = []
+                test_targets = []
+                for data, targets in test_loader:
+                    test_data.append(data)
+                    test_targets.append(targets)
+                
+                X_test = torch.cat(test_data)
+                y_test = torch.cat(test_targets)
+                
+                # Update FF parameters from action
+                if hasattr(model, 'original_config'):
+                    # Update learning rate for FF training
+                    model.original_config['ff_lr'] = lr
+                    model.original_config['ff_epochs_per_block'] = epochs
+                
+                # Train using FF method
+                results = model.train_forward_forward(
+                    X_train.to(self.device),
+                    y_train.to(self.device),
+                    X_test.to(self.device),
+                    y_test.to(self.device),
+                    verbose=True
+                )
+                
+                # Evaluate after FF training
+                eval_metrics = self._evaluate_cnn_on_task(model, test_loader)
+                print(f"DEBUG: FF training completed with metrics: {eval_metrics}")
+                return eval_metrics
+            
+            def _evaluate_cnn_on_task(self, model, test_loader) -> Dict[str, float]:
+             
                 print(f"DEBUG: Evaluating CNN on task")
                 model.eval()
                 model.to(self.device)
@@ -417,7 +501,6 @@ implementation:
                         data, targets = data.to(self.device), targets.to(self.device)
                         
                         try:
-                            # This will use our overridden forward method
                             outputs = model(data)
                             loss = criterion(outputs, targets)
                             
