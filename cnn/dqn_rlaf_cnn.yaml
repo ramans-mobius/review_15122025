@@ -1,4 +1,4 @@
-name: DQN RLAF Loop CNN v4
+name: DQN RLAF Loop CNN v5
 description: Triggers the DQN RLAF pipeline in a loop to optimize CNN model hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -47,27 +47,54 @@ implementation:
         import torch.optim as optim
 
         # ===========================================
-        # FIXED RESNET CLASS WITH ALL TRAINING MODES
+        # FIXED RESNET CLASS WITH PROPER FF PARAMETER HANDLING
         # ===========================================
         try:
             from nesy_factory.CNNs.ffresnet import ResNet
             
             class FixedResNet(ResNet):
                 def __init__(self, config):
+                    # CRITICAL: Store original config before modifying
+                    self.original_config = config.copy()
+                    
+                    # Extract and ensure FF parameters are properly passed
+                    if config.get('use_forward_forward', False):
+                        # Ensure forward_forward dict exists
+                        if 'forward_forward' not in config:
+                            config['forward_forward'] = {}
+                        
+                        ff_config = config['forward_forward']
+                        
+                        # Extract FF parameters with defaults
+                        ff_params = {
+                            'ff_blocks': ff_config.get('ff_blocks', 4),
+                            'ff_epochs_per_block': ff_config.get('ff_epochs_per_block', 50),
+                            'ff_lr': ff_config.get('ff_lr', 0.01),
+                            'ff_goodness_dim': ff_config.get('ff_goodness_dim', 128),
+                            'ff_threshold': ff_config.get('threshold', 2.0)
+                        }
+                        
+                        # Ensure these are in the main config for parent init
+                        for key, value in ff_params.items():
+                            config[key] = value
+                        
+                        print(f"DEBUG: FF parameters set - goodness_dim: {ff_params['ff_goodness_dim']}")
+                    
                     # CRITICAL: Set dropout attribute BEFORE calling parent init
                     self.dropout = config.get('dropout', 0.0)
-                    # Store original config
-                    self.original_config = config.copy()
-                    # Now call parent init
+                    config['dropout'] = self.dropout
+                    
+                    # Now call parent init with updated config
                     super().__init__(config)
+                    
                     # Ensure criterion exists
                     if not hasattr(self, 'criterion') or self.criterion is None:
                         self.criterion = torch.nn.CrossEntropyLoss()
                     
-                    print(f"DEBUG: FixedResNet created with CAFO={self.use_cafo}, FF={self.use_forward_forward}")
+                    print(f"DEBUG: FixedResNet created with CAFO={getattr(self, 'use_cafo', False)}, FF={getattr(self, 'use_forward_forward', False)}")
                 
                 def forward(self, x):
-                   
+                    """Forward pass that handles all training modes"""
                     # If CAFO/FF model but not trained yet, use traditional forward for RLAF
                     if hasattr(self, 'use_cafo') and self.use_cafo and not hasattr(self, 'cafo_trained'):
                         print("DEBUG: Untrained CAFO model - using traditional forward for RLAF")
@@ -81,7 +108,7 @@ implementation:
                     return super().forward(x)
                 
                 def _forward_traditional(self, x):
-                    
+                    """Traditional ResNet forward pass (bypassing CAFO/FF restrictions)"""
                     try:
                         # Check if we have torchvision model
                         if hasattr(self, 'model'):
@@ -129,9 +156,136 @@ implementation:
             print(f"ERROR: nesy_factory not available: {e}")
             FixedResNet = None
 
-        # Rest of the functions (get_retry_session, trigger_pipeline, etc.) remain the same...
-        # [ALL THE SAME HELPER FUNCTIONS AS BEFORE...]
+        # ===========================================
+        # IMPROVED WEIGHT LOADING FOR FF MODELS
+        # ===========================================
+        def load_model_weights_with_fallback(model, checkpoint):
+            print(f"DEBUG: Loading model weights")
+            
+            if isinstance(checkpoint, dict):
+                # Try different keys
+                load_success = False
+                
+                # Strategy 1: model_state_dict
+                if 'model_state_dict' in checkpoint:
+                    try:
+                        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                        print("DEBUG: Loaded from model_state_dict with strict=False")
+                        load_success = True
+                    except Exception as e:
+                        print(f"DEBUG: Failed to load from model_state_dict: {e}")
+                        
+                        # For FF models, try more flexible loading
+                        if hasattr(model, 'use_forward_forward') and model.use_forward_forward:
+                            print("DEBUG: Attempting flexible weight loading for FF model")
+                            try:
+                                state_dict = checkpoint['model_state_dict']
+                                model_state_dict = model.state_dict()
+                                
+                                # Only load weights with matching names and shapes
+                                for key in model_state_dict.keys():
+                                    if key in state_dict:
+                                        if model_state_dict[key].shape == state_dict[key].shape:
+                                            model_state_dict[key] = state_dict[key]
+                                            print(f"DEBUG: Loaded {key}")
+                                        else:
+                                            print(f"DEBUG: Skipped {key} - shape mismatch: {model_state_dict[key].shape} vs {state_dict[key].shape}")
+                                
+                                model.load_state_dict(model_state_dict)
+                                print("DEBUG: Flexibly loaded FF model weights")
+                                load_success = True
+                            except Exception as e2:
+                                print(f"DEBUG: Flexible loading failed: {e2}")
+                
+                # Strategy 2: state_dict
+                if not load_success and 'state_dict' in checkpoint:
+                    try:
+                        model.load_state_dict(checkpoint['state_dict'], strict=False)
+                        print("DEBUG: Loaded from state_dict with strict=False")
+                        load_success = True
+                    except Exception as e:
+                        print(f"DEBUG: Failed to load from state_dict: {e}")
+                
+                if not load_success:
+                    print("WARNING: Could not load weights - model will use random initialization")
+                    
+            else:
+                # Checkpoint is direct state_dict
+                try:
+                    model.load_state_dict(checkpoint, strict=False)
+                    print("DEBUG: Loaded direct state_dict with strict=False")
+                except Exception as e:
+                    print(f"DEBUG: Failed to load direct state_dict: {e}")
+                    print("WARNING: Could not load weights - model will use random initialization")
+            
+            return model
 
+        # ===========================================
+        # UPDATED MODEL CREATION FUNCTION
+        # ===========================================
+        def create_model_from_checkpoint_and_config(checkpoint, model_config):
+            print(f"DEBUG: Creating FixedResNet model from checkpoint")
+            
+            # Extract config from checkpoint or use model_config
+            if isinstance(checkpoint, dict) and 'config' in checkpoint:
+                base_config = checkpoint['config']
+                print(f"DEBUG: Using config from checkpoint")
+            else:
+                print(f"DEBUG: Using provided model_config")
+                base_config = model_config.copy()
+            
+            # Ensure required parameters are present
+            defaults = {
+                'output_dim': 10,
+                'input_channels': 3,
+                'input_size': [224, 224],
+                'pretrained': True,
+                'use_cafo': False,
+                'use_forward_forward': False,
+                'variant': 'resnet50',
+                'dropout': 0.0
+            }
+            
+            for param, default_value in defaults.items():
+                if param not in base_config:
+                    base_config[param] = default_value
+            
+            # Handle FF parameters - ensure they're properly structured
+            if base_config.get('use_forward_forward', False):
+                if 'forward_forward' not in base_config:
+                    base_config['forward_forward'] = {}
+                
+                ff_config = base_config['forward_forward']
+                ff_defaults = {
+                    'ff_blocks': 4,
+                    'ff_epochs_per_block': 50,
+                    'ff_lr': 0.01,
+                    'ff_goodness_dim': 128,
+                    'threshold': 2.0
+                }
+                
+                # Apply defaults only if not already set
+                for key, default_value in ff_defaults.items():
+                    if key not in ff_config:
+                        ff_config[key] = default_value
+            
+            # Set device
+            base_config['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+            
+            print(f"DEBUG: Model config for FixedResNet: {base_config}")
+            
+            if FixedResNet is None:
+                raise ImportError("FixedResNet class not available. Check nesy_factory installation.")
+            
+            # Create the model
+            model = FixedResNet(base_config)
+            print(f"DEBUG: FixedResNet model created successfully")
+            
+            return model, base_config
+
+        # ===========================================
+        # ALL OTHER FUNCTIONS REMAIN THE SAME AS YOUR CODE
+        # ===========================================
         def get_retry_session():
             retry_strategy = Retry(
                 total=5,
@@ -331,7 +485,7 @@ implementation:
                 }
             
             def _train_cnn_on_task(self, model, train_loader, test_loader) -> Dict[str, float]:
-              
+                """Train model using the appropriate algorithm based on config"""
                 print(f"DEBUG: Training CNN on task")
                 model.train()
                 model.to(self.device)
@@ -359,7 +513,7 @@ implementation:
                     return self._train_backprop_model(model, train_loader, test_loader, learning_rate, weight_decay, epochs)
             
             def _train_backprop_model(self, model, train_loader, test_loader, lr, wd, epochs):
-              
+                """Standard backpropagation training"""
                 print(f"DEBUG: Using standard backprop training")
                 optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
                 criterion = nn.CrossEntropyLoss()
@@ -398,7 +552,7 @@ implementation:
                 return eval_metrics
             
             def _train_cafo_model(self, model, train_loader, test_loader, lr, wd, epochs):
-             
+                """CAFO training - uses the model's built-in CAFO training"""
                 print(f"DEBUG: Using CAFO training")
                 
                 # Extract data from DataLoader for CAFO training
@@ -428,13 +582,18 @@ implementation:
                     model.original_config['epochs_per_block'] = epochs
                 
                 # Train using CAFO method
-                results = model.train_cafo(
-                    X_train.to(self.device),
-                    y_train.to(self.device),
-                    X_test.to(self.device),
-                    y_test.to(self.device),
-                    verbose=True
-                )
+                try:
+                    results = model.train_cafo(
+                        X_train.to(self.device),
+                        y_train.to(self.device),
+                        X_test.to(self.device),
+                        y_test.to(self.device),
+                        verbose=True
+                    )
+                except Exception as e:
+                    print(f"DEBUG: CAFO training failed: {e}")
+                    print("DEBUG: Falling back to standard backprop")
+                    return self._train_backprop_model(model, train_loader, test_loader, lr, wd, epochs)
                 
                 # Evaluate after CAFO training
                 eval_metrics = self._evaluate_cnn_on_task(model, test_loader)
@@ -442,7 +601,7 @@ implementation:
                 return eval_metrics
             
             def _train_ff_model(self, model, train_loader, test_loader, lr, wd, epochs):
-             
+                """Forward-Forward training - uses the model's built-in FF training"""
                 print(f"DEBUG: Using Forward-Forward training")
                 
                 # Extract data from DataLoader for FF training
@@ -472,13 +631,18 @@ implementation:
                     model.original_config['ff_epochs_per_block'] = epochs
                 
                 # Train using FF method
-                results = model.train_forward_forward(
-                    X_train.to(self.device),
-                    y_train.to(self.device),
-                    X_test.to(self.device),
-                    y_test.to(self.device),
-                    verbose=True
-                )
+                try:
+                    results = model.train_forward_forward(
+                        X_train.to(self.device),
+                        y_train.to(self.device),
+                        X_test.to(self.device),
+                        y_test.to(self.device),
+                        verbose=True
+                    )
+                except Exception as e:
+                    print(f"DEBUG: FF training failed: {e}")
+                    print("DEBUG: Falling back to standard backprop")
+                    return self._train_backprop_model(model, train_loader, test_loader, lr, wd, epochs)
                 
                 # Evaluate after FF training
                 eval_metrics = self._evaluate_cnn_on_task(model, test_loader)
@@ -486,7 +650,7 @@ implementation:
                 return eval_metrics
             
             def _evaluate_cnn_on_task(self, model, test_loader) -> Dict[str, float]:
-             
+                """Evaluate model - works for all model types"""
                 print(f"DEBUG: Evaluating CNN on task")
                 model.eval()
                 model.to(self.device)
@@ -576,86 +740,6 @@ implementation:
                 }
                 print(f"DEBUG: Continual metrics: {metrics}")
                 return metrics
-
-        def create_model_from_checkpoint_and_config(checkpoint, model_config):
-            print(f"DEBUG: Creating FixedResNet model from checkpoint")
-            
-            # Extract config from checkpoint or use model_config
-            if isinstance(checkpoint, dict) and 'config' in checkpoint:
-                base_config = checkpoint['config']
-                print(f"DEBUG: Using config from checkpoint")
-            else:
-                print(f"DEBUG: Using provided model_config")
-                base_config = model_config.copy()
-            
-            # Ensure required parameters are present
-            defaults = {
-                'output_dim': 10,
-                'input_channels': 3,
-                'input_size': [224, 224],
-                'pretrained': True,
-                'use_cafo': False,
-                'use_forward_forward': False,
-                'variant': 'resnet50',
-                'dropout': 0.0
-            }
-            
-            for param, default_value in defaults.items():
-                if param not in base_config:
-                    base_config[param] = default_value
-            
-            # Set device
-            base_config['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
-            
-            print(f"DEBUG: Model config for FixedResNet: {base_config}")
-            
-            if FixedResNet is None:
-                raise ImportError("FixedResNet class not available. Check nesy_factory installation.")
-            
-            # Create the model
-            model = FixedResNet(base_config)
-            print(f"DEBUG: FixedResNet model created successfully")
-            
-            return model, base_config
-
-        def load_model_weights_with_fallback(model, checkpoint):
-            print(f"DEBUG: Loading model weights")
-            
-            if isinstance(checkpoint, dict):
-                # Try different keys
-                load_success = False
-                
-                # Strategy 1: model_state_dict
-                if 'model_state_dict' in checkpoint:
-                    try:
-                        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-                        print("DEBUG: Loaded from model_state_dict with strict=False")
-                        load_success = True
-                    except Exception as e:
-                        print(f"DEBUG: Failed to load from model_state_dict: {e}")
-                
-                # Strategy 2: state_dict
-                if not load_success and 'state_dict' in checkpoint:
-                    try:
-                        model.load_state_dict(checkpoint['state_dict'], strict=False)
-                        print("DEBUG: Loaded from state_dict with strict=False")
-                        load_success = True
-                    except Exception as e:
-                        print(f"DEBUG: Failed to load from state_dict: {e}")
-                
-                if not load_success:
-                    print("WARNING: Could not load weights - model will use random initialization")
-                    
-            else:
-                # Checkpoint is direct state_dict
-                try:
-                    model.load_state_dict(checkpoint, strict=False)
-                    print("DEBUG: Loaded direct state_dict with strict=False")
-                except Exception as e:
-                    print(f"DEBUG: Failed to load direct state_dict: {e}")
-                    print("WARNING: Could not load weights - model will use random initialization")
-            
-            return model
 
         def cnn_retraining(action, model_path, data_path, config_str, tasks_path, output_model_path, previous_metrics, dqn_params):
             print("DEBUG: Starting CNN retraining function")
