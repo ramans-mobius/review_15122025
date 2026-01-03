@@ -1,4 +1,4 @@
-name: DQN RLAF Loop CNN v5
+name: DQN RLAF Loop CNN v6
 description: Triggers the DQN RLAF pipeline in a loop to optimize CNN model hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -94,7 +94,7 @@ implementation:
                     print(f"DEBUG: FixedResNet created with CAFO={getattr(self, 'use_cafo', False)}, FF={getattr(self, 'use_forward_forward', False)}")
                 
                 def forward(self, x):
-                    """Forward pass that handles all training modes"""
+                 
                     # If CAFO/FF model but not trained yet, use traditional forward for RLAF
                     if hasattr(self, 'use_cafo') and self.use_cafo and not hasattr(self, 'cafo_trained'):
                         print("DEBUG: Untrained CAFO model - using traditional forward for RLAF")
@@ -108,7 +108,7 @@ implementation:
                     return super().forward(x)
                 
                 def _forward_traditional(self, x):
-                    """Traditional ResNet forward pass (bypassing CAFO/FF restrictions)"""
+                  
                     try:
                         # Check if we have torchvision model
                         if hasattr(self, 'model'):
@@ -485,7 +485,7 @@ implementation:
                 }
             
             def _train_cnn_on_task(self, model, train_loader, test_loader) -> Dict[str, float]:
-                """Train model using the appropriate algorithm based on config"""
+            
                 print(f"DEBUG: Training CNN on task")
                 model.train()
                 model.to(self.device)
@@ -513,7 +513,7 @@ implementation:
                     return self._train_backprop_model(model, train_loader, test_loader, learning_rate, weight_decay, epochs)
             
             def _train_backprop_model(self, model, train_loader, test_loader, lr, wd, epochs):
-                """Standard backpropagation training"""
+         
                 print(f"DEBUG: Using standard backprop training")
                 optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
                 criterion = nn.CrossEntropyLoss()
@@ -552,7 +552,7 @@ implementation:
                 return eval_metrics
             
             def _train_cafo_model(self, model, train_loader, test_loader, lr, wd, epochs):
-                """CAFO training - uses the model's built-in CAFO training"""
+             
                 print(f"DEBUG: Using CAFO training")
                 
                 # Extract data from DataLoader for CAFO training
@@ -601,7 +601,7 @@ implementation:
                 return eval_metrics
             
             def _train_ff_model(self, model, train_loader, test_loader, lr, wd, epochs):
-                """Forward-Forward training - uses the model's built-in FF training"""
+        
                 print(f"DEBUG: Using Forward-Forward training")
                 
                 # Extract data from DataLoader for FF training
@@ -650,7 +650,7 @@ implementation:
                 return eval_metrics
             
             def _evaluate_cnn_on_task(self, model, test_loader) -> Dict[str, float]:
-                """Evaluate model - works for all model types"""
+            
                 print(f"DEBUG: Evaluating CNN on task")
                 model.eval()
                 model.to(self.device)
