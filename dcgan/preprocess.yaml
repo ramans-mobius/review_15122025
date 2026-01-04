@@ -1,0 +1,214 @@
+name: Preprocess
+description: Preprocesses dataset for GAN and updates master config
+inputs:
+  - name: train_data
+    type: Dataset
+  - name: dataset_info
+    type: DatasetInfo
+  - name: gan_config_json
+    type: String
+    description: Master GAN configuration as JSON string
+outputs:
+  - name: processed_data
+    type: Dataset
+  - name: gan_config_base64
+    type: String
+    description: Updated master GAN configuration (base64 encoded)
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v35
+    command:
+      - sh
+      - -c
+      - |
+        echo "Torchvision installed"
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import json
+        import pickle
+        import base64
+        import io
+        import torch
+        import torchvision.transforms as transforms
+        from PIL import Image
+        import time
+        
+        parser = argparse.ArgumentParser(description='GAN Preprocessing')
+        parser.add_argument('--train_data', type=str, required=True, help='Path to train data')
+        parser.add_argument('--dataset_info', type=str, required=True, help='Path to dataset info')
+        parser.add_argument('--gan_config_json', type=str, required=True, help='Master GAN config as JSON string')
+        parser.add_argument('--processed_data', type=str, required=True, help='Output path for processed data')
+        parser.add_argument('--gan_config_base64', type=str, required=True, help='Output path for updated GAN config (base64)')
+        args = parser.parse_args()
+        
+        print("GAN PREPROCESSING STARTING")
+        print("="*60)
+        print(f"gan_config_json length: {len(args.gan_config_json)}")
+        print(f"gan_config_json preview: {args.gan_config_json[:200]}...")
+        
+        # Parse master config (JSON string)
+        try:
+            gan_config = json.loads(args.gan_config_json)
+            print("Master GAN config parsed successfully")
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON config: {e}")
+            # Create default config
+            gan_config = {
+                'pipeline_name': 'gan_pipeline',
+                'version': '1.0.0',
+                'dataset': {},
+                'model': {},
+                'training': {},
+                'evaluation': {},
+                'paths': {},
+                'metadata': {'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ')}
+            }
+        
+        # Load data
+        with open(args.train_data, 'rb') as f:
+            train_data = pickle.load(f)
+        
+        with open(args.dataset_info, 'rb') as f:
+            dataset_info = pickle.load(f)
+        
+        print(f"Train data samples: {len(train_data)}")
+        
+        # Get model type from config
+        model_type = gan_config.get('model', {}).get('gan_type', 'dcgan').lower()
+        if model_type not in ['dcgan', 'vanilla_gan']:
+            model_type = 'dcgan'
+        
+        # Get image size from config or data
+        image_size = gan_config.get('dataset', {}).get('image_size', 64)
+        channels = gan_config.get('dataset', {}).get('channels', 3)
+        
+        print(f"Processing for {model_type.upper()}")
+        print(f"Image size: {image_size}x{image_size}")
+        print(f"Channels: {channels}")
+        
+        # Define dataset class
+        class GANDataset:
+            def __init__(self, data_list, transform=None, model_type='dcgan', target_size=64, channels=3):
+                self.data_list = data_list
+                self.transform = transform
+                self.model_type = model_type
+                self.target_size = target_size
+                self.channels = channels
+            
+            def __len__(self):
+                return len(self.data_list)
+            
+            def __getitem__(self, idx):
+                item = self.data_list[idx]
+                try:
+                    img_data = base64.b64decode(item['image_data'])
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    if self.channels == 1 and img.mode != 'L':
+                        img = img.convert('L')
+                    elif self.channels == 3 and img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    
+                    if self.transform:
+                        img = self.transform(img)
+                    
+                    return img
+                except Exception as e:
+                    print(f"Error processing image {idx}: {e}")
+                    return torch.zeros(self.channels, self.target_size, self.target_size)
+        
+        # Create transform
+        if channels == 1:
+            transform = transforms.Compose([
+                transforms.Resize(image_size),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,), (0.5,))
+            ])
+        else:
+            transform = transforms.Compose([
+                transforms.Resize(image_size),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            ])
+        
+        # Create dataset
+        dataset = GANDataset(train_data, transform, model_type, image_size, channels)
+        
+        # Calculate input dimension for vanilla GAN
+        input_dim = None
+        if model_type == 'vanilla_gan':
+            input_dim = image_size * image_size * channels
+            print(f"Vanilla GAN input dimension: {input_dim}")
+        
+        # Create data wrapper
+        data_wrapper = {
+            'dataset': dataset,
+            'model_type': model_type,
+            'input_dim': input_dim,
+            'image_size': image_size,
+            'channels': channels,
+            'num_samples': len(dataset),
+            'is_flattened': model_type == 'vanilla_gan'
+        }
+        
+        # Save processed data
+        os.makedirs(os.path.dirname(args.processed_data) or '.', exist_ok=True)
+        with open(args.processed_data, 'wb') as f:
+            pickle.dump(data_wrapper, f)
+        print(f"Processed data saved: {args.processed_data}")
+        
+        # Update master config
+        gan_config['dataset'].update({
+            'processed_samples': len(dataset),
+            'actual_image_size': image_size,
+            'actual_channels': channels,
+            'input_dim': input_dim
+        })
+        
+        gan_config['model'].update({
+            'model_type': model_type,
+            'input_dim': input_dim,
+            'image_size': image_size,
+            'channels': channels
+        })
+        
+        gan_config['metadata'].update({
+            'preprocessed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'preprocessing_step': 'completed'
+        })
+        
+        # Encode to base64 for next bricks
+        config_json = json.dumps(gan_config)
+        config_base64 = base64.b64encode(config_json.encode('utf-8')).decode('utf-8')
+        
+        # Save base64 config
+        os.makedirs(os.path.dirname(args.gan_config_base64) or '.', exist_ok=True)
+        with open(args.gan_config_base64, 'w') as f:
+            f.write(config_base64)
+        
+        print("="*60)
+        print("PreprocessForGAN completed successfully")
+        print(f"Processed data: {args.processed_data}")
+        print(f"Config (base64) saved: {args.gan_config_base64}")
+        print(f"Config size: {len(config_base64)} bytes")
+        print("="*60)
+
+    args:
+      - --train_data
+      - {inputPath: train_data}
+      - --dataset_info
+      - {inputPath: dataset_info}
+      - --gan_config_json
+      - {inputValue: gan_config_json}
+      - --processed_data
+      - {outputPath: processed_data}
+      - --gan_config_base64
+      - {outputPath: gan_config_base64}
