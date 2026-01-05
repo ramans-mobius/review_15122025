@@ -1,0 +1,430 @@
+- name: DCGAN RLAF Optimization
+  description: Real Reinforcement Learning Assisted Fine-tuning for DCGAN
+  inputs:
+    - name: trained_model
+      type: Model
+    - name: data_path
+      type: Dataset
+    - name: config
+      type: String
+    - name: rlaf_iterations
+      type: Integer
+      default: "3"
+      description: "Number of RLAF iterations"
+    - name: hyperparameter_space
+      type: String
+      description: "JSON defining hyperparameter search space"
+  outputs:
+    - name: optimized_model
+      type: Model
+    - name: optimization_history
+      type: String
+    - name: best_hyperparameters
+      type: String
+
+  implementation:
+    container:
+      image: nikhilv215/nesy-factory:v23
+      command:
+        - sh
+        - -c
+        - |
+          echo "Starting DCGAN RLAF Optimization..."
+          exec "$0" "$@"
+        - python3
+        - -u
+        - -c
+        - |
+          import torch
+          import argparse
+          import pickle
+          import json
+          import os
+          import sys
+          import numpy as np
+          from torch.utils.data import DataLoader
+          import random
+          
+          # Import from your DCGAN library
+          try:
+              from nesy_factory.GANs.dcgan import (
+                  create_dcgan,
+                  OptimizerFactory,
+                  TrainerFactory,
+                  DcganMetrics
+              )
+              print(" Successfully imported DCGAN modules")
+          except ImportError as e:
+              print(f" ERROR: Failed to import DCGAN modules: {e}")
+              sys.exit(1)
+          
+          parser = argparse.ArgumentParser()
+          parser.add_argument('--trained_model', type=str, required=True)
+          parser.add_argument('--data_path', type=str, required=True)
+          parser.add_argument('--config', type=str, required=True)
+          parser.add_argument('--rlaf_iterations', type=int, default=3)
+          parser.add_argument('--hyperparameter_space', type=str, default='{}')
+          parser.add_argument('--optimized_model', type=str, required=True)
+          parser.add_argument('--optimization_history', type=str, required=True)
+          parser.add_argument('--best_hyperparameters', type=str, required=True)
+          args = parser.parse_args()
+          
+          print(f"\\n{'='*80}")
+          print(f" DCGAN RLAF OPTIMIZATION")
+          print(f"{'='*80}")
+          print(f"Iterations: {args.rlaf_iterations}")
+          
+          # Load config
+          config = json.loads(args.config)
+          train_config = config.get('train', {})
+          
+          # Load hyperparameter space
+          hp_space = json.loads(args.hyperparameter_space) if args.hyperparameter_space else {
+              'generator_lr': [0.0001, 0.0002, 0.0005],
+              'discriminator_lr': [0.0002, 0.0004, 0.001],
+              'batch_size': [32, 64, 128],
+              'z_dim': [50, 100, 200],
+              'learning_rate_decay': [0.95, 0.99, 1.0]
+          }
+          
+          print(f"\\n Hyperparameter Search Space:")
+          for key, values in hp_space.items():
+              print(f"  {key}: {values}")
+          
+          # Load data
+          with open(args.data_path, 'rb') as f:
+              data_wrapper = pickle.load(f)
+          
+          dataset = data_wrapper['dataset']
+          print(f"Dataset: {len(dataset)} samples")
+          
+          # Load model
+          print(f"\\n Loading model...")
+          checkpoint = torch.load(args.trained_model, map_location='cpu')
+          
+          if isinstance(checkpoint, dict) and 'config' in checkpoint:
+              original_config = checkpoint['config']
+              generator, discriminator, _ = create_dcgan(original_config)
+              
+              generator.load_state_dict(checkpoint['generator_state_dict'])
+              discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+              
+              algorithm = checkpoint.get('training_algorithm', 'backprop')
+              print(f" Model loaded (Algorithm: {algorithm.upper()})")
+          else:
+              print(" Invalid checkpoint format")
+              sys.exit(1)
+          
+          # Set device
+          device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+          print(f"Device: {device}")
+          
+          generator.to(device)
+          discriminator.to(device)
+          
+          # ================================================================
+          # REAL RLAF IMPLEMENTATION
+          # ================================================================
+          
+          def evaluate_model(generator, discriminator, data_loader, num_batches=5):
+            
+              generator.eval()
+              discriminator.eval()
+              
+              real_scores = []
+              fake_scores = []
+              
+              with torch.no_grad():
+                  for batch_idx, batch in enumerate(data_loader):
+                      if batch_idx >= num_batches:
+                          break
+                      
+                      real_images = batch.to(device) if torch.is_tensor(batch) else batch[0].to(device)
+                      
+                      # Real images
+                      real_output = discriminator(real_images)
+                      real_scores.append(real_output.mean().item())
+                      
+                      # Generate fake images
+                      z = torch.randn(real_images.size(0), generator.z_dim, device=device)
+                      fake_images = generator(z)
+                      fake_output = discriminator(fake_images)
+                      fake_scores.append(fake_output.mean().item())
+              
+              avg_real = np.mean(real_scores) if real_scores else 0.0
+              avg_fake = np.mean(fake_scores) if fake_scores else 0.0
+              discriminator_gap = abs(avg_real - avg_fake)
+              
+              return {
+                  'real_score': avg_real,
+                  'fake_score': avg_fake,
+                  'discriminator_gap': discriminator_gap,
+                  'diversity_score': np.std(fake_scores) if fake_scores else 0.0
+              }
+          
+          def train_with_hyperparameters(generator, discriminator, data_loader, hyperparams, epochs=2):
+            
+              print(f"\\n  Training with different parameters: {hyperparams}")
+              
+              # Create config with new hyperparameters
+              modified_config = original_config.copy()
+              
+              if 'generator_lr' in hyperparams:
+                  modified_config['generator']['learning_rate'] = hyperparams['generator_lr']
+              
+              if 'discriminator_lr' in hyperparams:
+                  modified_config['discriminator']['learning_rate'] = hyperparams['discriminator_lr']
+              
+              # Create optimizers
+              optimizer_g = OptimizerFactory.create_optimizer(generator, modified_config, 'generator')
+              optimizer_d = OptimizerFactory.create_optimizer(discriminator, modified_config, 'discriminator')
+              
+              # Create trainer
+              if algorithm == 'forward_forward':
+                  from nesy_factory.GANs.dcgan import ForwardForwardTrainer
+                  trainer = ForwardForwardTrainer(modified_config, device)
+              elif algorithm == 'cafo':
+                  from nesy_factory.GANs.dcgan import CAFOTrainer
+                  trainer = CAFOTrainer(modified_config, device)
+              else:
+                  from nesy_factory.GANs.dcgan import BackpropTrainer
+                  trainer = BackpropTrainer(modified_config, device)
+              
+              # Training history
+              history = []
+              
+              for epoch in range(epochs):
+                  metrics = trainer.train_epoch(
+                      generator, discriminator, data_loader,
+                      optimizer_g, optimizer_d, epoch
+                  )
+                  
+                  history.append(metrics)
+                  
+                  if (epoch + 1) % 1 == 0:
+                      print(f"    Epoch {epoch+1}: G Loss: {metrics['g_loss']:.4f}, D Loss: {metrics['d_loss']:.4f}")
+              
+              return history
+          
+          def random_hyperparameter_search():
+            
+              hyperparams = {}
+              
+              for key, values in hp_space.items():
+                  if isinstance(values, list):
+                      hyperparams[key] = random.choice(values)
+                  elif isinstance(values, dict) and 'min' in values and 'max' in values:
+                      # Continuous range
+                      if 'log' in values and values['log']:
+                          # Log scale
+                          hyperparams[key] = np.exp(random.uniform(
+                              np.log(values['min']), 
+                              np.log(values['max'])
+                          ))
+                      else:
+                          # Linear scale
+                          hyperparams[key] = random.uniform(values['min'], values['max'])
+                  else:
+                      # Default to first value
+                      hyperparams[key] = values[0] if isinstance(values, list) else values
+              
+              return hyperparams
+          
+          def calculate_reward(metrics_before, metrics_after, hyperparams):
+              
+              # Reward based on improvement in discriminator gap
+              gap_improvement = metrics_after['discriminator_gap'] - metrics_before['discriminator_gap']
+              
+              # Reward for diversity
+              diversity_reward = metrics_after['diversity_score'] * 0.1
+              
+              # Penalty for extreme hyperparameters
+              penalty = 0.0
+              if 'generator_lr' in hyperparams and hyperparams['generator_lr'] > 0.001:
+                  penalty += 0.1
+              if 'discriminator_lr' in hyperparams and hyperparams['discriminator_lr'] > 0.002:
+                  penalty += 0.1
+              
+              total_reward = gap_improvement + diversity_reward - penalty
+              return total_reward
+          
+          # ================================================================
+          # RLAF OPTIMIZATION LOOP
+          # ================================================================
+          
+          print(f"\\n Starting RLAF Optimization Loop")
+          
+          # Create data loader
+          data_loader = DataLoader(
+              dataset,
+              batch_size=train_config.get('batch_size', 64),
+              shuffle=True,
+              drop_last=True
+          )
+          
+          # Initial evaluation
+          print(f"\\n Initial Evaluation:")
+          initial_metrics = evaluate_model(generator, discriminator, data_loader)
+          print(f"  Discriminator Gap: {initial_metrics['discriminator_gap']:.4f}")
+          print(f"  Real Score: {initial_metrics['real_score']:.4f}")
+          print(f"  Fake Score: {initial_metrics['fake_score']:.4f}")
+          
+          # Store best results
+          best_reward = -float('inf')
+          best_hyperparams = {}
+          best_model_state = {
+              'generator': copy.deepcopy(generator.state_dict()),
+              'discriminator': copy.deepcopy(discriminator.state_dict())
+          }
+          
+          optimization_history = {
+              'initial_metrics': initial_metrics,
+              'iterations': [],
+              'best_reward': best_reward,
+              'best_hyperparameters': {}
+          }
+          
+          # RLAF iterations
+          for iteration in range(args.rlaf_iterations):
+              print(f"\\n{'='*60}")
+              print(f"RLAF Iteration {iteration + 1}/{args.rlaf_iterations}")
+              print(f"{'='*60}")
+              
+              # Sample hyperparameters
+              hyperparams = random_hyperparameter_search()
+              print(f"\\n Testing hyperparameters:")
+              for key, value in hyperparams.items():
+                  print(f"  {key}: {value}")
+              
+              # Create copy of model for this trial
+              trial_generator = create_dcgan(original_config)[0].to(device)
+              trial_discriminator = create_dcgan(original_config)[1].to(device)
+              
+              trial_generator.load_state_dict(generator.state_dict())
+              trial_discriminator.load_state_dict(discriminator.state_dict())
+              
+              # Evaluate before training
+              metrics_before = evaluate_model(trial_generator, trial_discriminator, data_loader)
+              
+              # Train with hyperparameters
+              training_history = train_with_hyperparameters(
+                  trial_generator, trial_discriminator, data_loader, hyperparams, epochs=2
+              )
+              
+              # Evaluate after training
+              metrics_after = evaluate_model(trial_generator, trial_discriminator, data_loader)
+              
+              # Calculate reward
+              reward = calculate_reward(metrics_before, metrics_after, hyperparams)
+              
+              print(f"\\n Results:")
+              print(f"  Before - D Gap: {metrics_before['discriminator_gap']:.4f}")
+              print(f"  After  - D Gap: {metrics_after['discriminator_gap']:.4f}")
+              print(f"  Improvement: {metrics_after['discriminator_gap'] - metrics_before['discriminator_gap']:.4f}")
+              print(f"  Reward: {reward:.4f}")
+              
+              # Store iteration results
+              iteration_result = {
+                  'iteration': iteration,
+                  'hyperparameters': hyperparams,
+                  'metrics_before': metrics_before,
+                  'metrics_after': metrics_after,
+                  'reward': reward,
+                  'training_history': [{
+                      'g_loss': h['g_loss'],
+                      'd_loss': h['d_loss'],
+                      'real_score': h['real_score'],
+                      'fake_score': h['fake_score']
+                  } for h in training_history]
+              }
+              
+              optimization_history['iterations'].append(iteration_result)
+              
+              # Update best if better
+              if reward > best_reward:
+                  best_reward = reward
+                  best_hyperparams = hyperparams
+                  best_model_state = {
+                      'generator': copy.deepcopy(trial_generator.state_dict()),
+                      'discriminator': copy.deepcopy(trial_discriminator.state_dict())
+                  }
+                  
+                  print(f"   NEW BEST! Reward: {reward:.4f}")
+              
+              # Update main model with some probability (exploration vs exploitation)
+              if reward > 0 or random.random() < 0.3:  # 30% chance to explore
+                  generator.load_state_dict(trial_generator.state_dict())
+                  discriminator.load_state_dict(trial_discriminator.state_dict())
+                  print(f"   Updated main model")
+          
+          # ================================================================
+          # FINALIZE AND SAVE
+          # ================================================================
+          
+          print(f"\\n{'='*80}")
+          print(f" RLAF OPTIMIZATION COMPLETED")
+          print(f"{'='*80}")
+          
+          # Load best model
+          generator.load_state_dict(best_model_state['generator'])
+          discriminator.load_state_dict(best_model_state['discriminator'])
+          
+          # Final evaluation
+          final_metrics = evaluate_model(generator, discriminator, data_loader, num_batches=10)
+          
+          print(f"\\n FINAL RESULTS:")
+          print(f"  Best Reward: {best_reward:.4f}")
+          print(f"  Final Discriminator Gap: {final_metrics['discriminator_gap']:.4f}")
+          print(f"  Improvement from initial: {final_metrics['discriminator_gap'] - initial_metrics['discriminator_gap']:.4f}")
+          
+          print(f"\\n BEST HYPERPARAMETERS:")
+          for key, value in best_hyperparams.items():
+              print(f"  {key}: {value}")
+          
+          # Update checkpoint
+          checkpoint['generator_state_dict'] = generator.state_dict()
+          checkpoint['discriminator_state_dict'] = discriminator.state_dict()
+          checkpoint['rlaf_optimization'] = {
+              'iterations': args.rlaf_iterations,
+              'best_reward': float(best_reward),
+              'best_hyperparameters': best_hyperparams,
+              'final_metrics': final_metrics,
+              'improvement': float(final_metrics['discriminator_gap'] - initial_metrics['discriminator_gap'])
+          }
+          
+          # Save outputs
+          os.makedirs(os.path.dirname(args.optimized_model), exist_ok=True)
+          os.makedirs(os.path.dirname(args.optimization_history), exist_ok=True)
+          os.makedirs(os.path.dirname(args.best_hyperparameters), exist_ok=True)
+          
+          torch.save(checkpoint, args.optimized_model)
+          
+          with open(args.optimization_history, 'w') as f:
+              json.dump(optimization_history, f, indent=2)
+          
+          with open(args.best_hyperparameters, 'w') as f:
+              json.dump(best_hyperparams, f, indent=2)
+          
+          print(f"\\n Outputs saved:")
+          print(f"  Optimized model: {args.optimized_model}")
+          print(f"  Optimization history: {args.optimization_history}")
+          print(f"  Best hyperparameters: {args.best_hyperparameters}")
+          print(f"{'='*80}")
+
+    args:
+      - --trained_model
+      - {inputPath: trained_model}
+      - --data_path
+      - {inputPath: data_path}
+      - --config
+      - {inputValue: config}
+      - --rlaf_iterations
+      - {inputValue: rlaf_iterations}
+      - --hyperparameter_space
+      - {inputValue: hyperparameter_space}
+      - --optimized_model
+      - {outputPath: optimized_model}
+      - --optimization_history
+      - {outputPath: optimization_history}
+      - --best_hyperparameters
+      - {outputPath: best_hyperparameters}
