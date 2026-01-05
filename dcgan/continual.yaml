@@ -1,4 +1,4 @@
-name: Continual Tasks Generator
+name: Continual Tasks Generator v10
 description: Creates continual learning tasks for DCGAN with consistent format
 inputs:
   - name: data_pickle
