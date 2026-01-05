@@ -1,15 +1,12 @@
-name: Train v10
-description: Trains DCGAN using preprocessed data
+name: Train 
+description: Trains DCGAN using single master config
 inputs:
   - name: data_path
     type: Dataset
-    description: "Preprocessed data from Preprocess brick"
-  - name: config
+  - name: master_config
     type: String
-    description: "GAN configuration"
   - name: model_input
     type: Model
-    description: "Model from Build Model brick"
 outputs:
   - name: trained_model
     type: Model
@@ -25,7 +22,6 @@ implementation:
       - sh
       - -c
       - |
-        python3 -m pip install --quiet --upgrade pip setuptools wheel
         exec "$0" "$@"
       - python3
       - -u
@@ -34,9 +30,8 @@ implementation:
         import torch
         import argparse, pickle, os, json, sys, io, traceback
         import numpy as np
-        from torch.utils.data import TensorDataset, DataLoader
+        from torch.utils.data import DataLoader
         
-        # Import from your DCGAN library
         try:
             from nesy_factory.GANs.dcgan import (
                 create_dcgan,
@@ -48,98 +43,52 @@ implementation:
             print(f" ERROR: nesyfactory not available: {e}")
             sys.exit(1)
         
-        # ============================================================================
-        # COMPATIBILITY CLASSES (Must match Preprocess brick)
-        # ============================================================================
-        
-        class GANDataset:
-            def __init__(self, data_list, transform=None, image_size=64, channels=3):
-                self.data_list = data_list
-                self.transform = transform
-                self.image_size = image_size
-                self.channels = channels
-            
-            def __len__(self):
-                return len(self.data_list)
-            
-            def __getitem__(self, idx):
-                return self.data_list[idx]
-        
-        class GANDataWrapper:
-            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
-                        transform_params=None):
-                self.dataset = dataset
-                self.model_type = model_type
-                self.image_size = image_size
-                self.channels = channels
-                self.transform_params = transform_params or {}
-                self.num_samples = len(dataset)
-            
-            def __len__(self):
-                return len(self.dataset)
-            
-            def __getitem__(self, idx):
-                return self.dataset[idx]
-        
-        # ============================================================================
-        # MAIN TRAINING LOGIC
-        # ============================================================================
-        
         parser = argparse.ArgumentParser()
         parser.add_argument("--data_path", required=True)
-        parser.add_argument("--config", required=True)
+        parser.add_argument("--master_config", required=True)
         parser.add_argument("--model_input", required=False)
         parser.add_argument("--trained_model", required=True)
         parser.add_argument("--training_history", required=True)
         parser.add_argument("--processed_history_json", required=True)
         args = parser.parse_args()
         
-        print("Starting DCGAN Training with Preprocessed Data")
-        print("="*60)
+        print("Starting DCGAN Training")
+        
+        # Parse master config
+        config = json.loads(args.master_config)
+        gan_cfg = config['gan']
+        training_cfg = gan_cfg['training']
         
         # Load preprocessed data
         with open(args.data_path, "rb") as f:
             data_wrapper = pickle.load(f)
         
-        # Extract dataset from wrapper
+        # Extract dataset
         if hasattr(data_wrapper, 'dataset'):
             dataset = data_wrapper.dataset
             image_size = data_wrapper.image_size
             channels = data_wrapper.channels
-            model_type = data_wrapper.model_type
             print(f"Loaded preprocessed dataset:")
             print(f"  Samples: {len(dataset)}")
             print(f"  Image size: {image_size}x{image_size}")
             print(f"  Channels: {channels}")
-            print(f"  Model type: {model_type}")
         elif isinstance(data_wrapper, dict) and 'dataset' in data_wrapper:
-            # Backward compatibility with dict format
             dataset = data_wrapper['dataset']
             image_size = data_wrapper.get('image_size', 32)
             channels = data_wrapper.get('channels', 1)
-            model_type = data_wrapper.get('model_type', 'dcgan')
             print(f"Loaded preprocessed dataset (dict format):")
             print(f"  Samples: {len(dataset)}")
-            print(f"  Image size: {image_size}x{image_size}")
-            print(f"  Channels: {channels}")
         else:
             print("Error: Invalid preprocessed data format")
             sys.exit(1)
         
-        # Load config
-        cfg = json.loads(args.config)
-        model_cfg = cfg.get('model', {})
-        training_cfg = cfg.get('training', {})
-        
         # Extract training mode
         algorithm = training_cfg.get('algorithm', 'backprop')
-        use_cafo = model_cfg.get('use_cafo', False) or algorithm == 'cafo'
-        use_forward_forward = model_cfg.get('use_forward_forward', False) or algorithm == 'forward_forward'
         
-        if use_cafo:
-            training_mode = "CAFO"
-        elif use_forward_forward:
+        if algorithm == 'forward_forward':
             training_mode = "Forward-Forward"
+        elif algorithm == 'cafo':
+            training_mode = "CAFO"
         else:
             training_mode = "Backpropagation"
         
@@ -155,14 +104,17 @@ implementation:
             try:
                 checkpoint = torch.load(args.model_input, map_location='cpu')
                 
-                # Extract config from checkpoint
                 if isinstance(checkpoint, dict) and 'config' in checkpoint:
                     model_config = checkpoint['config']
                 else:
-                    # Fallback to config from input
-                    model_config = model_cfg
+                    # Create config from master config
+                    model_config = {
+                        'dataset': {'resize_size': image_size},
+                        'generator': gan_cfg['generator'],
+                        'discriminator': gan_cfg['discriminator'],
+                        'train': training_cfg
+                    }
                 
-                # Ensure device is set
                 model_config['device'] = str(device)
                 
                 # Create DCGAN models
@@ -231,14 +183,13 @@ implementation:
                 'g_loss': [],
                 'd_loss': [],
                 'real_score': [],
-                'fake_score': [],
-                'block_training': {}
+                'fake_score': []
             }
             
             for epoch in range(epochs):
                 print(f"\\nEpoch {epoch+1}/{epochs}")
                 
-                # Train one epoch using trainer
+                # Train one epoch
                 metrics = trainer.train_epoch(
                     generator, discriminator, train_loader,
                     optimizer_g, optimizer_d, epoch
@@ -287,100 +238,3 @@ implementation:
         serializable_results = convert_tensors_to_json(results)
         
         # Save results
-        print("\\nSaving model and training history...")
-        os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
-        os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
-        os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
-        
-        # Create checkpoint
-        checkpoint = {
-            'config': full_config,
-            'generator_state_dict': generator.state_dict(),
-            'discriminator_state_dict': discriminator.state_dict(),
-            'training_mode': training_mode,
-            'model_info': {
-                'generator_params': sum(p.numel() for p in generator.parameters()),
-                'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
-                'image_size': generator.image_size,
-                'channels': generator.image_channels
-            }
-        }
-        torch.save(checkpoint, args.trained_model)
-        
-        # Save training history
-        history = {
-            "training_mode": training_mode,
-            "results": serializable_results,
-            "config": model_cfg,
-            "epochs": epochs
-        }
-        
-        with open(args.training_history, "w") as f:
-            json.dump(history, f, indent=2)
-        
-        # Process history for output
-        processed_rows = []
-        g_losses = history["results"].get("g_loss", [])
-        d_losses = history["results"].get("d_loss", [])
-        
-        if not isinstance(g_losses, list):
-            g_losses = [g_losses] if g_losses is not None else []
-        if not isinstance(d_losses, list):
-            d_losses = [d_losses] if d_losses is not None else []
-        
-        for epoch_idx in range(len(g_losses)):
-            row = {
-                "epoch": epoch_idx + 1,
-                "loss": float(g_losses[epoch_idx]),
-                "component": "generator"
-            }
-            processed_rows.append(row)
-        
-        for epoch_idx in range(len(d_losses)):
-            row = {
-                "epoch": epoch_idx + 1,
-                "loss": float(d_losses[epoch_idx]),
-                "component": "discriminator"
-            }
-            processed_rows.append(row)
-        
-        # Create output format
-        if processed_rows:
-            last_row = processed_rows[-1]
-            output = {
-                "epoch": int(last_row.get("epoch", len(processed_rows))),
-                "loss": float(last_row.get("loss", 0.0)),
-                "data": processed_rows
-            }
-        else:
-            output = {
-                "epoch": 0,
-                "loss": 0.0,
-                "component": "unknown",
-                "data": []
-            }
-        
-        # Save processed history
-        with open(args.processed_history_json, "w") as f:
-            json.dump(output, f, indent=2)
-        
-        print(f"\\n{'✓'*60}")
-        print(f"SUCCESS: {training_mode} TRAINING COMPLETED")
-        print(f"{'✓'*60}")
-        print(f"✓ Model saved to: {args.trained_model}")
-        print(f"✓ Training rows: {len(processed_rows)}")
-        print(f"✓ History JSON: {args.processed_history_json}")
-
-    args:
-      - --data_path
-      - {inputPath: data_path}
-      - --config
-      - {inputValue: config}
-      - --model_input
-      - {inputPath: model_input}
-      - --trained_model
-      - {outputPath: trained_model}
-      - --training_history
-      - {outputPath: training_history}
-      - --processed_history_json
-      - {outputPath: processed_history_json}
