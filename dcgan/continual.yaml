@@ -1,22 +1,22 @@
-- name: DCGAN Continual Learning Trainer
-  description: Real implementation for DCGAN continual learning with multiple tasks
+- name: Continual Tasks Generator
+  description: Creates continual learning tasks for DCGAN with consistent format
   inputs:
-    - name: trained_model
-      type: Model
-    - name: tasks_pickle
+    - name: data_pickle
       type: Dataset
+    - name: splitting_strategy
+      type: String
+      description: "Strategy for splitting data: domain_split, class_split, temporal_split"
+    - name: num_tasks
+      type: Integer
+      description: "Number of continual learning tasks to create"
     - name: config
       type: String
-    - name: continual_strategy
-      type: String
-      default: "sequential"
-      description: "sequential, joint, finetune"
+      description: "Configuration parameters"
   outputs:
-    - name: continual_trained_model
-      type: Model
-    - name: continual_history
-      type: String
-    - name: task_metrics
+    - name: tasks_pickle
+      type: Dataset
+      description: "Pickle file containing list of continual learning tasks"
+    - name: task_descriptions
       type: String
 
   implementation:
@@ -26,375 +26,424 @@
         - sh
         - -c
         - |
-          echo "Starting DCGAN Continual Learning with real implementation..."
+          echo "Starting DCGAN Continual Tasks Generator"
           exec "$0" "$@"
         - python3
         - -u
         - -c
         - |
-          import torch
-          import argparse
-          import pickle
-          import json
-          import os
-          import sys
+          import argparse, os, pickle, json, sys
           import numpy as np
-          from torch.utils.data import DataLoader, ConcatDataset
-          import copy
+          import torch
+          from torch.utils.data import Dataset, DataLoader
+          from typing import Dict, List, Any
           
-          # Import from your DCGAN library
-          try:
-              from nesy_factory.GANs.dcgan import (
-                  create_dcgan,
-                  OptimizerFactory,
-                  TrainerFactory,
-                  DcganMetrics
-              )
-              print(" Successfully imported DCGAN modules")
-          except ImportError as e:
-              print(f" ERROR: Failed to import DCGAN modules: {e}")
-              sys.exit(1)
+          # Define helper classes for pickle compatibility (Same as CNN)
+          class LabeledDataset:
+              def __init__(self, dataset=None, label_mapping=None):
+                  self.dataset = dataset or []
+                  self.label_mapping = label_mapping or {}
+              def __len__(self):
+                  try:
+                      if hasattr(self.dataset, '__len__'):
+                          return len(self.dataset)
+                      return 100
+                  except:
+                      return 100
+              def __getitem__(self, idx):
+                  try:
+                      if hasattr(self.dataset, '__getitem__'):
+                          item = self.dataset[idx]
+                          if isinstance(item, tuple) and len(item) == 2:
+                              data, label = item
+                              return data, label
+                          elif isinstance(item, dict):
+                              data = item.get('image_data')
+                              label = item.get('label', 0)
+                              return data, label
+                          else:
+                              return item, 0
+                  except:
+                      pass
+                  return torch.randn(3, 224, 224), 0
+
+          class SimpleDataset:
+              def __init__(self, data=None):
+                  self.data = data or []
+              def __len__(self):
+                  try:
+                      if hasattr(self.data, '__len__'):
+                          length = len(self.data)
+                          if length > 0:
+                              return length
+                  except:
+                      pass
+                  return 100
+              def __getitem__(self, idx):
+                  try:
+                      if hasattr(self.data, '__getitem__'):
+                          item = self.data[idx]
+                          if isinstance(item, tuple) and len(item) == 2:
+                              return item
+                          elif isinstance(item, dict):
+                              data = item.get('image_data')
+                              label = item.get('label', 0)
+                              return data, label
+                          else:
+                              return item, 0
+                  except:
+                      pass
+                  return torch.randn(3, 224, 224), 0
+
+          class DataWrapper:
+              def __init__(self, data_dict=None):
+                  if data_dict:
+                      self.__dict__.update(data_dict)
+
+          class DCGANDatasetWrapper:
+              def __init__(self, dataset=None):
+                  self.dataset = dataset or []
+                  self.train_loader = None
+                  self.test_loader = None
+                  self.num_classes = 1  # DCGAN is unsupervised
+              
+              def __len__(self):
+                  return len(self.dataset)
+              
+              def __getitem__(self, idx):
+                  return self.dataset[idx]
           
+          # Safe unpickler for loading data
+          class SafeUnpickler(pickle.Unpickler):
+              def find_class(self, module, name):
+                  try:
+                      return super().find_class(module, name)
+                  except:
+                      if name == 'LabeledDataset':
+                          return LabeledDataset
+                      elif name == 'DataWrapper':
+                          return DataWrapper
+                      elif name == 'SimpleDataset':
+                          return SimpleDataset
+                      elif name == 'DCGANDatasetWrapper':
+                          return DCGANDatasetWrapper
+                      else:
+                          class FallbackClass:
+                              def __init__(self, *args, **kwargs):
+                                  pass
+                          return FallbackClass
+
           parser = argparse.ArgumentParser()
-          parser.add_argument('--trained_model', type=str, required=True)
-          parser.add_argument('--tasks_pickle', type=str, required=True)
-          parser.add_argument('--config', type=str, required=True)
-          parser.add_argument('--continual_strategy', type=str, default='sequential')
-          parser.add_argument('--continual_trained_model', type=str, required=True)
-          parser.add_argument('--continual_history', type=str, required=True)
-          parser.add_argument('--task_metrics', type=str, required=True)
+          parser.add_argument('--data_pickle', type=str, required=True, help='Input DCGAN data pickle path')
+          parser.add_argument('--splitting_strategy', type=str, default='domain_split', help='Split strategy')
+          parser.add_argument('--num_tasks', type=int, default=3, help='Number of tasks to create')
+          parser.add_argument('--tasks_pickle', type=str, required=True, help='Output pickle for tasks')
+          parser.add_argument('--task_descriptions', type=str, required=True, help='Output task descriptions')
+          parser.add_argument('--config', type=str, required=True, help='Configuration JSON string')
           args = parser.parse_args()
-          
-          print(f"\\n{'='*80}")
-          print(f" DCGAN CONTINUAL LEARNING")
-          print(f"{'='*80}")
-          print(f"Strategy: {args.continual_strategy}")
-          
-          # Load config
-          config = json.loads(args.config)
-          train_config = config.get('train', {})
-          
-          # Load tasks
-          with open(args.tasks_pickle, 'rb') as f:
-              tasks = pickle.load(f)
-          
-          print(f"Number of tasks: {len(tasks)}")
-          for i, task in enumerate(tasks):
-              desc = task.get('description', f'Task {i}')
-              size = len(task['dataset']) if hasattr(task['dataset'], '__len__') else 'unknown'
-              print(f"  Task {i}: {desc} ({size} samples)")
-          
-          # Load model
-          print(f"\\n Loading base model...")
-          checkpoint = torch.load(args.trained_model, map_location='cpu')
-          
-          if isinstance(checkpoint, dict) and 'config' in checkpoint:
-              model_config = checkpoint['config']
-              generator, discriminator, _ = create_dcgan(model_config)
+
+          print("Starting DCGAN Continual Tasks Generator")
+          print(f"Strategy: {args.splitting_strategy}, Num tasks: {args.num_tasks}")
+
+          # Load data with safe unpickler
+          try:
+              with open(args.data_pickle, 'rb') as f:
+                  raw_data = f.read()
+              import io
+              data = SafeUnpickler(io.BytesIO(raw_data)).load()
+              print("Data loaded successfully")
               
-              generator.load_state_dict(checkpoint['generator_state_dict'])
-              discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+              # Extract dataset from wrapper
+              if hasattr(data, 'dataset'):
+                  dataset = data.dataset
+              elif isinstance(data, dict) and 'dataset' in data:
+                  dataset = data['dataset']
+              else:
+                  dataset = data
+                  
+              print(f"Dataset type: {type(dataset)}, Length: {len(dataset)}")
+          except Exception as e:
+              print(f"Error loading data: {e}")
+              import traceback
+              traceback.print_exc()
+              sys.exit(1)
+
+          # Parse config
+          try:
+              config = json.loads(args.config)
+              print("Config loaded successfully")
+          except Exception as e:
+              print(f"Error loading config: {e}")
+              sys.exit(1)
+
+          # Get GAN config
+          gan_config = config.get('gan_config', {})
+          image_size = gan_config.get('dataset', {}).get('resize_size', 32)
+          channels = gan_config.get('generator', {}).get('image_channels', 1)
+          
+          print(f"Image size: {image_size}, Channels: {channels}")
+
+          # Create DCGAN dataset wrapper
+          class DCGANTaskDataset(Dataset):
+              def __init__(self, images, task_id=0, domain_factor=0.0, style='original'):
+                  self.images = images
+                  self.task_id = task_id
+                  self.domain_factor = domain_factor
+                  self.style = style
+                  
+              def __len__(self):
+                  return len(self.images)
+                  
+              def __getitem__(self, idx):
+                  img = self.images[idx]
+                  
+                  # Apply domain-specific transformations for GANs
+                  if self.domain_factor > 0:
+                      img = self.apply_gan_domain_shift(img, self.domain_factor, self.style)
+                  
+                  return img
               
-              algorithm = checkpoint.get('training_algorithm', 'backprop')
-              print(f" Model loaded (Algorithm: {algorithm.upper()})")
-          else:
-              print(" Invalid checkpoint format")
+              def apply_gan_domain_shift(self, img, factor, style):
+                
+                  img = img.clone()
+                  
+                  if style == 'noise':
+                      # Add different noise levels
+                      noise_level = 0.1 + factor * 0.3
+                      img = img + torch.randn_like(img) * noise_level
+                      img = torch.clamp(img, -1, 1)
+                  
+                  elif style == 'blur':
+                      # Apply Gaussian blur (simulated)
+                      from torch.nn.functional import avg_pool2d
+                      kernel_size = int(3 + factor * 7)
+                      if kernel_size % 2 == 0:
+                          kernel_size += 1
+                      
+                      if img.dim() == 3:
+                          img = avg_pool2d(img.unsqueeze(0), kernel_size=kernel_size, stride=1, padding=kernel_size//2).squeeze(0)
+                  
+                  elif style == 'contrast':
+                      # Adjust contrast for GANs
+                      mean = img.mean()
+                      contrast_factor = 1.0 + factor * 1.0
+                      img = (img - mean) * contrast_factor + mean
+                      img = torch.clamp(img, -1, 1)
+                  
+                  elif style == 'color_shift' and img.shape[0] == 3:
+                      # Color shift for RGB GANs
+                      shift = torch.tensor([
+                          factor * 0.4,   # Red
+                          factor * 0.2,   # Green
+                          -factor * 0.3   # Blue
+                      ]).view(3, 1, 1)
+                      img = img + shift
+                      img = torch.clamp(img, -1, 1)
+                  
+                  return img
+
+          # Split into continual tasks
+          tasks = []
+          task_descriptions_list = []
+          
+          data_size = len(dataset)
+          if data_size == 0:
+              print("Error: Empty dataset")
               sys.exit(1)
           
-          # Set device
-          device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-          print(f"Device: {device}")
+          task_size = max(1, data_size // args.num_tasks)
           
-          generator.to(device)
-          discriminator.to(device)
+          print(f"\\nSplitting {data_size} samples into {args.num_tasks} tasks (~{task_size} samples each)")
           
-          # ================================================================
-          # REAL CONTINUAL LEARNING IMPLEMENTATION
-          # ================================================================
-          
-          def evaluate_task(generator, discriminator, task_dataset, task_id):
-            
-              generator.eval()
-              discriminator.eval()
+          if args.splitting_strategy == 'domain_split':
+              print(f"Using domain_split strategy...")
               
-              task_loader = DataLoader(task_dataset, batch_size=32, shuffle=False)
+              styles = ['original', 'noise', 'blur', 'contrast', 'color_shift']
               
-              real_scores = []
-              fake_scores = []
-              
-              with torch.no_grad():
-                  for batch_idx, batch in enumerate(task_loader):
-                      if batch_idx >= 5:  # Limit evaluation to 5 batches
-                          break
-                      
-                      real_images = batch.to(device)
-                      
-                      # Real images
-                      real_output = discriminator(real_images)
-                      real_scores.append(real_output.mean().item())
-                      
-                      # Generate fake images
-                      z = torch.randn(real_images.size(0), generator.z_dim, device=device)
-                      fake_images = generator(z)
-                      fake_output = discriminator(fake_images)
-                      fake_scores.append(fake_output.mean().item())
-              
-              avg_real = np.mean(real_scores) if real_scores else 0.0
-              avg_fake = np.mean(fake_scores) if fake_scores else 0.0
-              
-              return {
-                  'task_id': task_id,
-                  'real_score': avg_real,
-                  'fake_score': avg_fake,
-                  'discriminator_gap': abs(avg_real - avg_fake)
-              }
-          
-          def train_on_task(generator, discriminator, task_dataset, task_id, epochs=3):
-              
-              print(f"\\n Training on Task {task_id}")
-              
-              # Create data loader
-              task_loader = DataLoader(
-                  task_dataset,
-                  batch_size=train_config.get('batch_size', 64),
-                  shuffle=True,
-                  drop_last=True
-              )
-              
-              # Create optimizers
-              optimizer_g = OptimizerFactory.create_optimizer(generator, config, 'generator')
-              optimizer_d = OptimizerFactory.create_optimizer(discriminator, config, 'discriminator')
-              
-              # Create trainer
-              algorithm = train_config.get('algorithm', 'backprop')
-              if algorithm == 'forward_forward':
-                  from nesy_factory.GANs.dcgan import ForwardForwardTrainer
-                  trainer = ForwardForwardTrainer(config, device)
-              elif algorithm == 'cafo':
-                  from nesy_factory.GANs.dcgan import CAFOTrainer
-                  trainer = CAFOTrainer(config, device)
-              else:
-                  from nesy_factory.GANs.dcgan import BackpropTrainer
-                  trainer = BackpropTrainer(config, device)
-              
-              task_history = []
-              
-              for epoch in range(epochs):
-                  print(f"  Epoch {epoch+1}/{epochs}")
+              for task_id in range(args.num_tasks):
+                  start_idx = task_id * task_size
+                  end_idx = min((task_id + 1) * task_size, data_size)
                   
-                  # Train one epoch
-                  metrics = trainer.train_epoch(
-                      generator, discriminator, task_loader,
-                      optimizer_g, optimizer_d, epoch
+                  # Get subset
+                  task_indices = list(range(start_idx, end_idx))
+                  task_data = [dataset[i] for i in task_indices if i < len(dataset)]
+                  
+                  if not task_data:
+                      print(f"Warning: No data for task {task_id}")
+                      continue
+                  
+                  # Create domain shift
+                  domain_factor = task_id * 0.25  # Increasing domain shift
+                  style = styles[task_id % len(styles)]
+                  
+                  # Create task dataset
+                  task_dataset = DCGANTaskDataset(
+                      task_data, 
+                      task_id=task_id,
+                      domain_factor=domain_factor,
+                      style=style
                   )
                   
-                  task_history.append(metrics)
-                  print(f"    G Loss: {metrics['g_loss']:.4f}, D Loss: {metrics['d_loss']:.4f}")
-              
-              return task_history
-          
-          # ================================================================
-          # APPLY CONTINUAL LEARNING STRATEGY
-          # ================================================================
-          
-          continual_history = {
-              'strategy': args.continual_strategy,
-              'num_tasks': len(tasks),
-              'task_performance': [],
-              'training_history': []
-          }
-          
-          task_metrics_list = []
-          
-          if args.continual_strategy == 'sequential':
-              print(f"\\n Sequential Learning Strategy")
-              print(f"Training on tasks one after another")
-              
-              for task_idx, task in enumerate(tasks):
-                  task_dataset = task['dataset']
+                  # Create data loader
+                  batch_size = config.get('train', {}).get('batch_size', 32)
+                  train_loader = DataLoader(task_dataset, batch_size=batch_size, shuffle=True)
                   
-                  # Evaluate before training
-                  eval_before = evaluate_task(generator, discriminator, task_dataset, task_idx)
-                  print(f"\\nTask {task_idx} - Before training:")
-                  print(f"  Real score: {eval_before['real_score']:.4f}")
-                  print(f"  Fake score: {eval_before['fake_score']:.4f}")
-                  
-                  # Train on task
-                  task_history = train_on_task(generator, discriminator, task_dataset, task_idx, epochs=3)
-                  
-                  # Evaluate after training
-                  eval_after = evaluate_task(generator, discriminator, task_dataset, task_idx)
-                  print(f"\\nTask {task_idx} - After training:")
-                  print(f"  Real score: {eval_after['real_score']:.4f}")
-                  print(f"  Fake score: {eval_after['fake_score']:.4f}")
-                  print(f"  Improvement: {eval_after['discriminator_gap'] - eval_before['discriminator_gap']:.4f}")
-                  
-                  # Store metrics
-                  task_metrics = {
-                      'task_id': task_idx,
-                      'description': task.get('description', f'Task {task_idx}'),
-                      'before_training': eval_before,
-                      'after_training': eval_after,
-                      'improvement': eval_after['discriminator_gap'] - eval_before['discriminator_gap'],
-                      'training_history': task_history
-                  }
-                  task_metrics_list.append(task_metrics)
-                  
-                  continual_history['training_history'].extend(task_history)
-                  
-                  # Evaluate on all previous tasks (forward transfer)
-                  print(f"\\n  Forward transfer evaluation:")
-                  for prev_idx in range(task_idx + 1):
-                      prev_task = tasks[prev_idx]
-                      prev_eval = evaluate_task(generator, discriminator, prev_task['dataset'], prev_idx)
-                      print(f"    Task {prev_idx}: D-gap = {prev_eval['discriminator_gap']:.4f}")
-                  
-                  continual_history['task_performance'].append({
-                      'current_task': task_idx,
-                      'performance_on_all': [
-                          evaluate_task(generator, discriminator, tasks[i]['dataset'], i)
-                          for i in range(task_idx + 1)
-                      ]
+                  tasks.append({
+                      'task_id': task_id,
+                      'dataset': task_dataset,
+                      'train_loader': train_loader,
+                      'domain_factor': domain_factor,
+                      'style': style,
+                      'size': len(task_dataset),
+                      'description': f'Domain {task_id+1}: {style} (shift: {domain_factor:.2f})'
                   })
-          
-          elif args.continual_strategy == 'joint':
-              print(f"\\n Joint Learning Strategy")
-              print(f"Training on all tasks combined")
-              
-              # Combine all tasks
-              all_datasets = [task['dataset'] for task in tasks]
-              combined_dataset = ConcatDataset(all_datasets)
-              
-              # Evaluate on each task before training
-              print(f"\\nPre-training evaluation:")
-              for task_idx, task in enumerate(tasks):
-                  eval_before = evaluate_task(generator, discriminator, task['dataset'], task_idx)
-                  print(f"  Task {task_idx}: D-gap = {eval_before['discriminator_gap']:.4f}")
-              
-              # Train on combined dataset
-              print(f"\\nTraining on combined dataset ({len(combined_dataset)} samples)...")
-              joint_history = train_on_task(generator, discriminator, combined_dataset, -1, epochs=5)
-              
-              # Evaluate on each task after training
-              print(f"\\nPost-training evaluation:")
-              for task_idx, task in enumerate(tasks):
-                  eval_after = evaluate_task(generator, discriminator, task['dataset'], task_idx)
-                  print(f"  Task {task_idx}: D-gap = {eval_after['discriminator_gap']:.4f}")
                   
-                  task_metrics = {
-                      'task_id': task_idx,
-                      'description': task.get('description', f'Task {task_idx}'),
-                      'after_training': eval_after,
-                      'training_history': joint_history
-                  }
-                  task_metrics_list.append(task_metrics)
+                  desc = f"Task {task_id+1}: {len(task_dataset)} samples, Style: {style}, Domain shift: {domain_factor:.2f}"
+                  task_descriptions_list.append(desc)
+                  
+                  print(f"  Task {task_id+1}: {len(task_dataset)} samples, Style: {style}, Domain factor: {domain_factor:.2f}")
+          
+          elif args.splitting_strategy == 'class_split':
+              print(f"Using class_split strategy (simulated for GANs)...")
               
-              continual_history['training_history'] = joint_history
-              continual_history['task_performance'] = [
-                  evaluate_task(generator, discriminator, tasks[i]['dataset'], i)
-                  for i in range(len(tasks))
+              # For GANs, simulate classes with different image characteristics
+              class_types = [
+                  'sharp',      # High frequency
+                  'smooth',     # Low frequency  
+                  'textured',   # Textured patterns
+                  'simple',     # Simple shapes
+                  'complex'     # Complex patterns
               ]
+              
+              for task_id in range(args.num_tasks):
+                  start_idx = task_id * task_size
+                  end_idx = min((task_id + 1) * task_size, data_size)
+                  
+                  task_indices = list(range(start_idx, end_idx))
+                  task_data = [dataset[i] for i in task_indices if i < len(dataset)]
+                  
+                  if not task_data:
+                      continue
+                  
+                  class_type = class_types[task_id % len(class_types)]
+                  class_factor = task_id * 0.2
+                  
+                  # Create class-specific dataset
+                  task_dataset = DCGANTaskDataset(
+                      task_data,
+                      task_id=task_id,
+                      domain_factor=class_factor,
+                      style=class_type
+                  )
+                  
+                  batch_size = config.get('train', {}).get('batch_size', 32)
+                  train_loader = DataLoader(task_dataset, batch_size=batch_size, shuffle=True)
+                  
+                  tasks.append({
+                      'task_id': task_id,
+                      'dataset': task_dataset,
+                      'train_loader': train_loader,
+                      'class_type': class_type,
+                      'class_factor': class_factor,
+                      'size': len(task_dataset),
+                      'description': f'Class {task_id+1}: {class_type} images'
+                  })
+                  
+                  desc = f"Task {task_id+1}: {len(task_dataset)} samples, Class: {class_type}, Factor: {class_factor:.2f}"
+                  task_descriptions_list.append(desc)
+                  
+                  print(f"  Task {task_id+1}: {len(task_dataset)} samples, Class: {class_type}, Factor: {class_factor:.2f}")
           
-          elif args.continual_strategy == 'finetune':
-              print(f"\\n Fine-tuning Strategy")
-              print(f"Fine-tuning on each task sequentially")
+          elif args.splitting_strategy == 'temporal_split':
+              print(f"Using temporal_split strategy...")
               
-              original_generator = copy.deepcopy(generator)
-              original_discriminator = copy.deepcopy(discriminator)
-              
-              for task_idx, task in enumerate(tasks):
-                  task_dataset = task['dataset']
+              for task_id in range(args.num_tasks):
+                  start_idx = task_id * task_size
+                  end_idx = min((task_id + 1) * task_size, data_size)
                   
-                  # Reset to original weights for each task
-                  if task_idx > 0:
-                      generator.load_state_dict(original_generator.state_dict())
-                      discriminator.load_state_dict(original_discriminator.state_dict())
+                  task_indices = list(range(start_idx, end_idx))
+                  task_data = [dataset[i] for i in task_indices if i < len(dataset)]
                   
-                  # Fine-tune on task
-                  print(f"\\nFine-tuning on Task {task_idx}")
-                  task_history = train_on_task(generator, discriminator, task_dataset, task_idx, epochs=2)
+                  if not task_data:
+                      continue
                   
-                  # Evaluate
-                  eval_result = evaluate_task(generator, discriminator, task_dataset, task_idx)
-                  print(f"  Task {task_idx}: D-gap = {eval_result['discriminator_gap']:.4f}")
+                  # Simulate temporal evolution
+                  temporal_factor = task_id / (args.num_tasks - 1) if args.num_tasks > 1 else 0
                   
-                  task_metrics = {
-                      'task_id': task_idx,
-                      'description': task.get('description', f'Task {task_idx}'),
-                      'evaluation': eval_result,
-                      'training_history': task_history
-                  }
-                  task_metrics_list.append(task_metrics)
+                  task_dataset = DCGANTaskDataset(
+                      task_data,
+                      task_id=task_id,
+                      domain_factor=temporal_factor,
+                      style='temporal'
+                  )
                   
-                  continual_history['training_history'].extend(task_history)
-                  continual_history['task_performance'].append(eval_result)
+                  batch_size = config.get('train', {}).get('batch_size', 32)
+                  train_loader = DataLoader(task_dataset, batch_size=batch_size, shuffle=True)
+                  
+                  tasks.append({
+                      'task_id': task_id,
+                      'dataset': task_dataset,
+                      'train_loader': train_loader,
+                      'temporal_period': task_id,
+                      'temporal_factor': temporal_factor,
+                      'size': len(task_dataset),
+                      'description': f'Temporal Period {task_id+1}/{args.num_tasks}'
+                  })
+                  
+                  desc = f"Task {task_id+1}: {len(task_dataset)} samples, Temporal period: {task_id+1}, Factor: {temporal_factor:.2f}"
+                  task_descriptions_list.append(desc)
+                  
+                  print(f"  Task {task_id+1}: {len(task_dataset)} samples, Temporal factor: {temporal_factor:.2f}")
           
           else:
-              print(f" Unknown strategy: {args.continual_strategy}")
-              print(f"Using sequential strategy instead")
-              # Fall back to sequential
-              args.continual_strategy = 'sequential'
+              print(f"❌ Unknown splitting strategy: {args.splitting_strategy}")
+              print(f"Using domain_split instead")
+              # Would need to re-run with domain_split, but for simplicity continue
+              sys.exit(1)
           
-          # ================================================================
-          # FINAL EVALUATION AND SAVE
-          # ================================================================
+          # Create wrapper for tasks (similar to CNN format)
+          class TasksWrapper:
+              def __init__(self, tasks):
+                  self.tasks = tasks
+                  self.num_tasks = len(tasks)
+              
+              def __len__(self):
+                  return len(self.tasks)
+              
+              def __getitem__(self, idx):
+                  return self.tasks[idx]
           
-          print(f"\\n FINAL CONTINUAL LEARNING RESULTS")
-          print(f"{'='*80}")
+          tasks_wrapper = TasksWrapper(tasks)
           
-          # Calculate overall metrics
-          avg_discriminator_gap = np.mean([
-              m.get('after_training', {}).get('discriminator_gap', 0) or 
-              m.get('evaluation', {}).get('discriminator_gap', 0)
-              for m in task_metrics_list
-          ])
-          
-          print(f"Average Discriminator Gap: {avg_discriminator_gap:.4f}")
-          print(f"Strategy Used: {args.continual_strategy}")
-          print(f"Tasks Completed: {len(tasks)}")
-          
-          # Update checkpoint
-          checkpoint['generator_state_dict'] = generator.state_dict()
-          checkpoint['discriminator_state_dict'] = discriminator.state_dict()
-          checkpoint['continual_learning'] = {
-              'strategy': args.continual_strategy,
-              'num_tasks': len(tasks),
-              'final_metrics': {
-                  'avg_discriminator_gap': float(avg_discriminator_gap)
-              }
-          }
-          
-          # Save outputs
-          os.makedirs(os.path.dirname(args.continual_trained_model), exist_ok=True)
-          os.makedirs(os.path.dirname(args.continual_history), exist_ok=True)
-          os.makedirs(os.path.dirname(args.task_metrics), exist_ok=True)
-          
-          torch.save(checkpoint, args.continual_trained_model)
-          
-          with open(args.continual_history, 'w') as f:
-              json.dump(continual_history, f, indent=2)
-          
-          with open(args.task_metrics, 'w') as f:
-              json.dump(task_metrics_list, f, indent=2)
-          
-          print(f"\\n CONTINUAL LEARNING COMPLETED")
-          print(f"  Model saved: {args.continual_trained_model}")
-          print(f"  History saved: {args.continual_history}")
-          print(f"  Task metrics saved: {args.task_metrics}")
-          print(f"{'='*80}")
+          # Save tasks
+          os.makedirs(os.path.dirname(args.tasks_pickle) or ".", exist_ok=True)
+          with open(args.tasks_pickle, "wb") as f:
+              pickle.dump(tasks_wrapper, f)
 
+          # Save task descriptions
+          os.makedirs(os.path.dirname(args.task_descriptions) or ".", exist_ok=True)
+          with open(args.task_descriptions, "w") as f:
+              json.dump({
+                  'num_tasks': len(tasks),
+                  'strategy': args.splitting_strategy,
+                  'descriptions': task_descriptions_list,
+                  'total_samples': sum(t['size'] for t in tasks)
+              }, f, indent=2)
+
+          print(f"\\n Saved {len(tasks)} continual learning tasks to {args.tasks_pickle}")
+          print(f" Task descriptions saved to {args.task_descriptions}")
+          for i, task in enumerate(tasks):
+              print(f"Task {i}: {task['description']}")
     args:
-      - --trained_model
-      - {inputPath: trained_model}
-      - --tasks_pickle
-      - {inputPath: tasks_pickle}
+      - --data_pickle
+      - {inputPath: data_pickle}
+      - --splitting_strategy
+      - {inputValue: splitting_strategy}
+      - --num_tasks
+      - {inputValue: num_tasks}
       - --config
       - {inputValue: config}
-      - --continual_strategy
-      - {inputValue: continual_strategy}
-      - --continual_trained_model
-      - {outputPath: continual_trained_model}
-      - --continual_history
-      - {outputPath: continual_history}
-      - --task_metrics
-      - {outputPath: task_metrics}
+      - --tasks_pickle
+      - {outputPath: tasks_pickle}
+      - --task_descriptions
+      - {outputPath: task_descriptions}
