@@ -1,4 +1,4 @@
-name: Preprocess
+name: Preprocess v10
 description: Preprocesses train dataset for GAN and outputs preprocessing metadata
 inputs:
   - name: train_data
