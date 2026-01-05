@@ -1,10 +1,14 @@
 name: Evaluate v2
-description: Evaluates DCGAN model with consistent FF/CAFO handling
+description: Evaluates DCGAN model using preprocess metadata for consistent test data processing
 inputs:
   - name: trained_model
     type: Model
-  - name: data_path
+  - name: test_data
     type: Dataset
+    description: "Raw test data from Load Dataset"
+  - name: preprocess_metadata
+    type: String
+    description: "Preprocessing metadata from Preprocess brick"
   - name: config
     type: String
 outputs:
@@ -27,9 +31,12 @@ implementation:
       - -c
       - |
         import torch
-        import argparse, pickle, json, os, io, sys, traceback
+        import argparse, pickle, json, os, io, traceback
         import numpy as np
-        from torch.utils.data import DataLoader
+        import torchvision.transforms as transforms
+        import torch.nn.functional as F
+        from PIL import Image
+        from torch.utils.data import DataLoader, Dataset
         
         # Import from your DCGAN library
         try:
@@ -43,86 +50,109 @@ implementation:
             print(f" ERROR: nesyfactory not available: {e}")
             sys.exit(1)
         
-        # ===========================================
-        # CONSISTENT UNPICKLER CLASSES (Same as CNN/DCGAN Train)
-        # ===========================================
+        # ============================================================================
+        # COMPATIBILITY CLASSES (Must match Preprocess brick)
+        # ============================================================================
         
-        class LabeledDataset:
-            def __init__(self, *args, **kwargs):
-                obj = kwargs.get("dataset") if "dataset" in kwargs else args[0] if args else kwargs
-                self.dataset = getattr(obj, "dataset", None) or getattr(obj, "data", None) or obj
-
+        class GANDataset(Dataset):
+           
+            def __init__(self, data_list, transform=None, image_size=64, channels=3):
+                self.data_list = data_list
+                self.transform = transform
+                self.image_size = image_size
+                self.channels = channels
+            
             def __len__(self):
-                try:
-                    return len(self.dataset)
-                except:
-                    return 100
-
+                return len(self.data_list)
+            
             def __getitem__(self, idx):
+                item = self.data_list[idx]
                 try:
-                    item = self.dataset[idx]
-                    if isinstance(item, tuple) and len(item) == 2:
-                        return item
-                    if isinstance(item, dict):
-                        return item.get("image_data"), item.get("label", 0)
-                except:
-                    pass
-                return torch.randn(3,224,224), 0
+                    img_data = base64.b64decode(item['image_data'])
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    if self.channels == 1 and img.mode != 'L':
+                        img = img.convert('L')
+                    elif self.channels == 3 and img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    
+                    if self.transform:
+                        img = self.transform(img)
+                    
+                    return img
+                except Exception as e:
+                    print(f"Error processing test image {idx}: {e}")
+                    return torch.zeros(self.channels, self.image_size, self.image_size)
         
-        class CustomJSONDataset(LabeledDataset):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-
-        class DataWrapper:
-            def __init__(self, d=None):
-                if d:
-                    self.__dict__.update(d)
-
-        # Safe unpickler (Same as CNN)
-        class SafeUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                if name == "LabeledDataset":
-                    return LabeledDataset
-                if name == "CustomJSONDataset":
-                    return CustomJSONDataset
-                if name == "DataWrapper":
-                    return DataWrapper
-                return super().find_class(module, name)
-
-        # ===========================================
+        class PreprocessMetadata:
+          
+            def __init__(self, image_size=64, channels=3, model_type='dcgan',
+                        mean=(0.5,), std=(0.5,), transform_params=None):
+                self.image_size = image_size
+                self.channels = channels
+                self.model_type = model_type
+                self.mean = mean
+                self.std = std
+                self.transform_params = transform_params or {}
+        
+        # ============================================================================
         # MAIN EVALUATION LOGIC
-        # ===========================================
+        # ============================================================================
         
         parser = argparse.ArgumentParser()
         parser.add_argument("--trained_model", required=True)
-        parser.add_argument("--data_path", required=True)
+        parser.add_argument("--test_data", required=True)
+        parser.add_argument("--preprocess_metadata", required=True)
         parser.add_argument("--config", required=True)
         parser.add_argument("--metrics", required=True)
         parser.add_argument("--metrics_json", required=True)
         args = parser.parse_args()
-
+        
         print("=== STARTING DCGAN EVALUATION ===")
-
-        # Load dataset using SafeUnpickler
-        with open(args.data_path, "rb") as f:
-            processed = SafeUnpickler(io.BytesIO(f.read())).load()
-
-        # Extract data from DCGAN data wrapper
-        if hasattr(processed, 'dataset'):
-            dataset = processed['dataset']
-            print(f"Dataset: {len(dataset)} samples")
+        
+        # Load raw test data
+        with open(args.test_data, "rb") as f:
+            test_data_raw = pickle.load(f)
+        
+        print(f"Raw test data samples: {len(test_data_raw)}")
+        
+        # Load preprocessing metadata
+        with open(args.preprocess_metadata, "rb") as f:
+            preprocess_meta = pickle.load(f)
+        
+        print(f"Preprocessing metadata loaded:")
+        print(f"  Image size: {preprocess_meta.image_size}")
+        print(f"  Channels: {preprocess_meta.channels}")
+        print(f"  Mean: {preprocess_meta.mean}")
+        print(f"  Std: {preprocess_meta.std}")
+        
+        # Create the same transform used for training
+        if preprocess_meta.channels == 1:
+            transform = transforms.Compose([
+                transforms.Resize(preprocess_meta.image_size),
+                transforms.CenterCrop(preprocess_meta.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
+            ])
         else:
-            dataset = processed
-            print(f"Dataset: {len(dataset)} samples (fallback format)")
-
-        # Load config
-        cfg = json.loads(args.config)
-        model_cfg = cfg.get("model", {})
-
-        # ---------------------------
-        # Load checkpoint and determine model type
-        # ---------------------------
-        print("Loading trained model...")
+            transform = transforms.Compose([
+                transforms.Resize(preprocess_meta.image_size),
+                transforms.CenterCrop(preprocess_meta.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
+            ])
+        
+        # Create preprocessed test dataset
+        test_dataset = GANDataset(
+            test_data_raw,
+            transform=transform,
+            image_size=preprocess_meta.image_size,
+            channels=preprocess_meta.channels
+        )
+        
+        print(f"Preprocessed test dataset: {len(test_dataset)} samples")
+        
+        # Load model and configuration
         checkpoint = torch.load(args.trained_model, map_location='cpu')
         
         if isinstance(checkpoint, dict):
@@ -130,7 +160,7 @@ implementation:
             training_mode = checkpoint.get('training_mode', 'unknown')
             
             # Create DCGAN models
-            generator, discriminator, _ = create_dcgan(model_config)
+            generator, discriminator, full_config = create_dcgan(model_config)
             
             # Load state dicts
             if 'generator_state_dict' in checkpoint:
@@ -142,52 +172,30 @@ implementation:
         else:
             print(" Invalid checkpoint format")
             sys.exit(1)
-
+        
         # Update model_config with user config
-        for key, value in model_cfg.items():
+        cfg = json.loads(args.config)
+        for key, value in cfg.items():
             if key not in model_config:
                 model_config[key] = value
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model_config['device'] = str(device)
         
-        print(f"Model training mode: {training_mode}")
-        
-        # Check FF/CAFO flags
-        use_forward_forward = 'forward' in training_mode.lower() or 'ff' in training_mode.lower()
-        use_cafo = 'cafo' in training_mode.lower()
-        
         # Set device
         generator.to(device)
         discriminator.to(device)
-        
-        # Mark as trained if FF/CAFO
-        if use_forward_forward:
-            if hasattr(discriminator, 'ff_module'):
-                discriminator.ff_trained = True
-                print(f" FF model marked as trained")
-        
-        if use_cafo:
-            if hasattr(generator, 'cafo_module'):
-                generator.cafo_trained = True
-            if hasattr(discriminator, 'cafo_module'):
-                discriminator.cafo_trained = True
-            print(f" CAFO model marked as trained")
         
         # Set to eval mode
         generator.eval()
         discriminator.eval()
         
-        # ---------------------------
         # Create data loader
-        # ---------------------------
         batch_size = cfg.get('train', {}).get('batch_size', 32)
-        test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         
-        # ---------------------------
         # Evaluate
-        # ---------------------------
-        print(f"\\nEvaluating DCGAN on {len(dataset)} samples...")
+        print(f"\\nEvaluating DCGAN on {len(test_dataset)} test samples...")
         
         # Create evaluator
         evaluator = DCGANEvaluator(model_config, device)
@@ -196,7 +204,7 @@ implementation:
         eval_metrics = evaluator.evaluate(
             generator, discriminator, 
             test_loader,
-            num_batches=min(5, len(dataset) // batch_size)
+            num_batches=min(5, len(test_dataset) // batch_size)
         )
         
         # Additional manual metrics
@@ -210,7 +218,8 @@ implementation:
                 if batch_idx >= 10:  # Limit to 10 batches for speed
                     break
                     
-                real_images = batch.to(device) if torch.is_tensor(batch) else batch[0].to(device)
+                real_images = batch
+                real_images = real_images.to(device)
                 
                 # Generate fake images
                 z = torch.randn(real_images.size(0), generator.z_dim, device=device)
@@ -276,38 +285,35 @@ implementation:
         print(f"  Generator Loss: {avg_g_loss:.4f}")
         print(f"  Discriminator Loss: {avg_d_loss:.4f}")
         print(f"  Training Mode: {training_mode}")
+        print(f"  Test samples evaluated: {len(all_targets)}")
         
-        # ---------------------------
         # Save outputs
-        # ---------------------------
         os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
         os.makedirs(os.path.dirname(args.metrics_json), exist_ok=True)
-
+        
         with open(args.metrics_json, "w") as f:
             json.dump(metrics_output, f, indent=2)
-
+        
         # KFP metrics format
         with open(args.metrics, "w") as f:
             f.write(f"accuracy: {float(accuracy)}\\n")
             f.write(f"generator_loss: {float(avg_g_loss)}\\n")
             f.write(f"discriminator_loss: {float(avg_d_loss)}\\n")
             f.write(f"training_mode: {training_mode}\\n")
-
-        print("\\n=== EVALUATION COMPLETE ===")
-        print(f"Training mode: {training_mode}")
-        print(f"Accuracy: {float(accuracy):.4f}")
-        print(f"Generator Loss: {avg_g_loss:.4f}")
-        print(f"Discriminator Loss: {avg_d_loss:.4f}")
-        print(f"Number of samples: {len(all_targets)}")
+            f.write(f"num_samples: {len(all_targets)}\\n")
         
-  args:
-    - --trained_model
-    - {inputPath: trained_model}
-    - --data_path
-    - {inputPath: data_path}
-    - --config
-    - {inputValue: config}
-    - --metrics
-    - {outputPath: metrics}
-    - --metrics_json
-    - {outputPath: metrics_json}
+        print("\\n=== EVALUATION COMPLETE ===")
+        
+    args:
+      - --trained_model
+      - {inputPath: trained_model}
+      - --test_data
+      - {inputPath: test_data}
+      - --preprocess_metadata
+      - {inputPath: preprocess_metadata}
+      - --config
+      - {inputValue: config}
+      - --metrics
+      - {outputPath: metrics}
+      - --metrics_json
+      - {outputPath: metrics_json}
