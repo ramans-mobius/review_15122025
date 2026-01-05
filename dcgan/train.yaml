@@ -238,3 +238,100 @@ implementation:
         serializable_results = convert_tensors_to_json(results)
         
         # Save results
+        print("\\nSaving model and training history...")
+        os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
+        os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
+        os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
+        
+        # Create checkpoint
+        checkpoint = {
+            'config': full_config,
+            'generator_state_dict': generator.state_dict(),
+            'discriminator_state_dict': discriminator.state_dict(),
+            'training_mode': training_mode,
+            'model_info': {
+                'generator_params': sum(p.numel() for p in generator.parameters()),
+                'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
+                'image_size': generator.image_size,
+                'channels': generator.image_channels
+            },
+            'master_config': config  # Save master config
+        }
+        torch.save(checkpoint, args.trained_model)
+        
+        # Save training history
+        history = {
+            "training_mode": training_mode,
+            "results": serializable_results,
+            "config": gan_cfg,
+            "epochs": epochs
+        }
+        
+        with open(args.training_history, "w") as f:
+            json.dump(history, f, indent=2)
+        
+        # Process history for output
+        processed_rows = []
+        g_losses = history["results"].get("g_loss", [])
+        d_losses = history["results"].get("d_loss", [])
+        
+        if not isinstance(g_losses, list):
+            g_losses = [g_losses] if g_losses is not None else []
+        if not isinstance(d_losses, list):
+            d_losses = [d_losses] if d_losses is not None else []
+        
+        for epoch_idx in range(len(g_losses)):
+            row = {
+                "epoch": epoch_idx + 1,
+                "loss": float(g_losses[epoch_idx]),
+                "component": "generator"
+            }
+            processed_rows.append(row)
+        
+        for epoch_idx in range(len(d_losses)):
+            row = {
+                "epoch": epoch_idx + 1,
+                "loss": float(d_losses[epoch_idx]),
+                "component": "discriminator"
+            }
+            processed_rows.append(row)
+        
+        # Create output format
+        if processed_rows:
+            last_row = processed_rows[-1]
+            output = {
+                "epoch": int(last_row.get("epoch", len(processed_rows))),
+                "loss": float(last_row.get("loss", 0.0)),
+                "data": processed_rows
+            }
+        else:
+            output = {
+                "epoch": 0,
+                "loss": 0.0,
+                "component": "unknown",
+                "data": []
+            }
+        
+        # Save processed history
+        with open(args.processed_history_json, "w") as f:
+            json.dump(output, f, indent=2)
+        
+        print(f"\\n{'✓'*60}")
+        print(f"SUCCESS: {training_mode} TRAINING COMPLETED")
+        print(f"{'✓'*60}")
+        print(f"✓ Model saved to: {args.trained_model}")
+        print(f"✓ Training epochs: {epochs}")
+
+    args:
+      - --data_path
+      - {inputPath: data_path}
+      - --master_config
+      - {inputValue: master_config}
+      - --model_input
+      - {inputPath: model_input}
+      - --trained_model
+      - {outputPath: trained_model}
+      - --training_history
+      - {outputPath: training_history}
+      - --processed_history_json
+      - {outputPath: processed_history_json}
