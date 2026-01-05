@@ -1,287 +1,287 @@
-  name: Build Model
-  description: Builds DCGAN model using your config format
-  inputs:
-    - name: config_str
-      type: String
-      description: "Configuration in your DEFAULT_CONFIG format"
-    - name: load_from_cdn
-      type: String
-      default: "false"
-    - name: cdn_url
-      type: String
-  outputs:
-    - name: model_out
-      type: Model
-    - name: config_updated
-      type: String
-    - name: model_info_out
-      type: String
+name: Build Model v2
+description: Builds DCGAN model using your config format
+inputs:
+  - name: config_str
+    type: String
+    description: "Configuration in your DEFAULT_CONFIG format"
+  - name: load_from_cdn
+    type: String
+    default: "false"
+  - name: cdn_url
+    type: String
+outputs:
+  - name: model_out
+    type: Model
+  - name: config_updated
+    type: String
+  - name: model_info_out
+    type: String
 
-  implementation:
-    container:
-      image: nikhilv215/nesy-factory:v23
-      command:
-        - sh
-        - -c
-        - |
-          echo "Building DCGAN Model with your config format..."
-          exec "$0" "$@"
-        - python3
-        - -u
-        - -c
-        - |
-          import torch
-          import argparse
-          import json
-          import os
-          import sys
-          import tempfile
-          import urllib.request
-          
-          # Import from your DCGAN library
-          try:
-              from nesy_factory.GANs.dcgan import create_dcgan, DEFAULT_DCGAN_CONFIG
-              print(" Successfully imported nesy_factory.GANs.dcgan")
-          except ImportError as e:
-              print(f" ERROR: Failed to import nesy_factory.GANs.dcgan: {e}")
-              sys.exit(1)
-          
-          parser = argparse.ArgumentParser()
-          parser.add_argument('--config_str', type=str, required=True)
-          parser.add_argument('--load_from_cdn', type=str, default='false')
-          parser.add_argument('--cdn_url', type=str, default='')
-          parser.add_argument('--model_out', type=str, required=True)
-          parser.add_argument('--config_updated', type=str, required=True)
-          parser.add_argument('--model_info_out', type=str, required=True)
-          args = parser.parse_args()
-          
-          load_from_cdn = args.load_from_cdn.lower() == 'true'
-          
-          # Create output directories
-          os.makedirs(os.path.dirname(args.model_out), exist_ok=True)
-          os.makedirs(os.path.dirname(args.config_updated), exist_ok=True)
-          os.makedirs(os.path.dirname(args.model_info_out), exist_ok=True)
-          
-          if load_from_cdn:
-              # MODE 1: Download model from CDN
-              if not args.cdn_url:
-                  print("ERROR: cdn_url is required when load_from_cdn=true")
-                  sys.exit(1)
-                  
-              print(f"Loading DCGAN model from CDN: {args.cdn_url}")
-              
-              try:
-                  with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
-                      tmp_path = tmp_file.name
-                  
-                  print(f"Downloading from {args.cdn_url}...")
-                  urllib.request.urlretrieve(args.cdn_url, tmp_path)
-                  print("Download completed")
-                  
-                  checkpoint = torch.load(tmp_path, map_location='cpu')
-                  torch.save(checkpoint, args.model_out)
-                  print(f"Model loaded from CDN and saved to: {args.model_out}")
-                  
-                  config = json.loads(args.config_str) if args.config_str else {}
-                  config['model_source'] = 'cdn'
-                  config['cdn_url'] = args.cdn_url
-                  config['model_type'] = 'dcgan'
-                  
-                  with open(args.config_updated, 'w') as f:
-                      json.dump(config, f, indent=2)
-                  
-                  model_info = {
-                      'model_type': 'dcgan',
-                      'model_source': 'cdn',
-                      'cdn_url': args.cdn_url,
-                      'checkpoint_keys': list(checkpoint.keys()) if isinstance(checkpoint, dict) else 'state_dict'
-                  }
-                  with open(args.model_info_out, 'w') as f:
-                      json.dump(model_info, f, indent=2)
-                      
-                  os.unlink(tmp_path)
-                  
-              except Exception as e:
-                  print(f"Failed to load model from CDN: {e}")
-                  sys.exit(1)
-                  
-          else:
-              # MODE 2: Build new DCGAN model using your config format
-              print(f"Building new DCGAN model with your config format...")
-              
-              try:
-                  # Parse user config (your format)
-                  user_config = json.loads(args.config_str)
-                  
-                  print(f" CONFIGURATION ANALYSIS:")
-                  print(f"  Algorithm: {user_config.get('train', {}).get('algorithm', 'backprop').upper()}")
-                  
-                  # Convert your config format to DCGAN library format
-                  # Your config has all needed fields, just need to map structure
-                  dcgan_config = {
-                      'dataset': {
-                          'resize_size': user_config['dataset']['resize_size']
-                      },
-                      'generator': {
-                          'z_dim': user_config['generator']['z_dim'],
-                          'hidden_dims': user_config['generator']['hidden_dims'],
-                          'image_channels': user_config['generator']['image_channels'],
-                          'use_batchnorm': user_config['generator']['use_batchnorm'],
-                          'activation': user_config['generator']['activation'],
-                          'output_activation': user_config['generator']['output_activation'],
-                          'learning_rate': user_config['generator']['learning_rate'],
-                          'loss_type': user_config['generator']['loss_type'],
-                          
-                          # Layer configurations
-                          'kernel_sizes': user_config['generator']['kernel_sizes'],
-                          'strides': user_config['generator']['strides'],
-                          'paddings': user_config['generator']['paddings'],
-                          'output_paddings': user_config['generator']['output_paddings'],
-                          
-                          # FF/CAFO settings (from your config)
-                          'use_forward_forward': user_config['generator']['use_forward_forward'],
-                          'use_cafo': user_config['generator']['use_cafo'],
-                          'ff_epochs_per_block': user_config['generator']['ff_epochs_per_block'],
-                          'cafo_epochs_per_block': user_config['generator']['cafo_epochs_per_block']
-                      },
-                      'discriminator': {
-                          'hidden_dims': user_config['discriminator']['hidden_dims'],
-                          'image_channels': user_config['discriminator']['image_channels'],
-                          'use_batchnorm': user_config['discriminator']['use_batchnorm'],
-                          'activation': user_config['discriminator']['activation'],
-                          'output_activation': user_config['discriminator']['output_activation'],
-                          'learning_rate': user_config['discriminator']['learning_rate'],
-                          'loss_type': user_config['discriminator']['loss_type'],
-                          'dropout': user_config['discriminator']['dropout'],
-                          'label_smoothing': user_config['discriminator'].get('label_smoothing', 0.0),
-                          'n_critic': user_config['discriminator'].get('n_critic', 1),
-                          
-                          # Layer configurations
-                          'kernel_sizes': user_config['discriminator']['kernel_sizes'],
-                          'strides': user_config['discriminator']['strides'],
-                          'paddings': user_config['discriminator']['paddings'],
-                          'output_dim': user_config['discriminator']['output_dim'],
-                          
-                          # FF/CAFO settings (from your config)
-                          'use_forward_forward': user_config['discriminator']['use_forward_forward'],
-                          'use_cafo': user_config['discriminator']['use_cafo'],
-                          'ff_epochs_per_block': user_config['discriminator']['ff_epochs_per_block'],
-                          'cafo_epochs_per_block': user_config['discriminator']['cafo_epochs_per_block'],
-                          
-                          # Advanced GAN settings
-                          'use_wgan': user_config['discriminator'].get('use_wgan', False),
-                          'use_wgan_gp': user_config['discriminator'].get('use_wgan_gp', False),
-                          'wgan_gp_lambda': user_config['discriminator'].get('wgan_gp_lambda', 10.0)
-                      },
-                      'train': {
-                          'algorithm': user_config['train']['algorithm'],
-                          'batch_size': user_config['train']['batch_size'],
-                          'epochs': user_config['train']['epochs']
-                      }
-                  }
-                  
-                  # Set algorithm-specific flags
-                  algorithm = user_config['train']['algorithm']
-                  if algorithm == 'forward_forward':
-                      dcgan_config['discriminator']['use_forward_forward'] = True
-                      print(f"   Forward-Forward enabled for discriminator")
-                      print(f"   FF epochs per block: {user_config['discriminator']['ff_epochs_per_block']}")
-                  elif algorithm == 'cafo':
-                      dcgan_config['generator']['use_cafo'] = True
-                      dcgan_config['discriminator']['use_cafo'] = True
-                      print(f"   CAFO enabled for both generator and discriminator")
-                      print(f"   CAFO epochs per block: Gen={user_config['generator']['cafo_epochs_per_block']}, Disc={user_config['discriminator']['cafo_epochs_per_block']}")
-                  else:
-                      print(f"   Standard Backpropagation")
-                  
-                  print(f"\\n  DCGAN CONFIG SUMMARY:")
-                  print(f"  Image Size: {dcgan_config['dataset']['resize_size']}x{dcgan_config['dataset']['resize_size']}")
-                  print(f"  Channels: {dcgan_config['generator']['image_channels']}")
-                  print(f"  Generator z_dim: {dcgan_config['generator']['z_dim']}")
-                  print(f"  Generator layers: {len(dcgan_config['generator']['hidden_dims'])}")
-                  print(f"  Discriminator layers: {len(dcgan_config['discriminator']['hidden_dims'])}")
-                  
-                  # Create DCGAN models
-                  generator, discriminator, full_config = create_dcgan(dcgan_config)
-                  
-                  print(f"\\n MODELS CREATED:")
-                  print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
-                  print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
-                  
-                  # Verify FF/CAFO modules
-                  if hasattr(generator, 'use_cafo') and generator.use_cafo:
-                      print(f"   Generator CAFO module: {generator.cafo_module.cafo_epochs_per_block} epochs/block")
-                  if hasattr(discriminator, 'use_forward_forward') and discriminator.use_forward_forward:
-                      print(f"   Discriminator FF module: {discriminator.ff_module.ff_epochs_per_block} epochs/block")
-                  if hasattr(discriminator, 'use_cafo') and discriminator.use_cafo:
-                      print(f"   Discriminator CAFO module: {discriminator.cafo_module.cafo_epochs_per_block} epochs/block")
-                  
-                  # Create model info
-                  model_info = {
-                      'model_type': 'dcgan',
-                      'model_source': 'fresh_build',
-                      'training_algorithm': algorithm,
-                      'generator_params': sum(p.numel() for p in generator.parameters()),
-                      'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
-                      'total_params': sum(p.numel() for p in generator.parameters()) + sum(p.numel() for p in discriminator.parameters()),
-                      'z_dim': generator.z_dim,
-                      'image_channels': generator.image_channels,
-                      'image_size': generator.image_size,
-                      'config_source': 'user_provided',
-                      'algorithm_specific': {
-                          'ff_enabled': {
-                              'generator': getattr(generator, 'use_forward_forward', False),
-                              'discriminator': getattr(discriminator, 'use_forward_forward', False)
-                          },
-                          'cafo_enabled': {
-                              'generator': getattr(generator, 'use_cafo', False),
-                              'discriminator': getattr(discriminator, 'use_cafo', False)
-                          }
-                      }
-                  }
-                  
-                  # Save both models in a checkpoint
-                  checkpoint = {
-                      'config': full_config,
-                      'generator_state_dict': generator.state_dict(),
-                      'discriminator_state_dict': discriminator.state_dict(),
-                      'model_info': model_info,
-                      'model_type': 'dcgan',
-                      'training_algorithm': algorithm,
-                      'original_user_config': user_config  # Keep original config
-                  }
-                  
-                  torch.save(checkpoint, args.model_out)
-                  
-                  # Save updated config (merged)
-                  with open(args.config_updated, 'w') as f:
-                      json.dump(full_config, f, indent=2)
-                      
-                  # Save model info
-                  with open(args.model_info_out, 'w') as f:
-                      json.dump(model_info, f, indent=2)
-                      
-                  print(f"\\n DCGAN model built successfully!")
-                  print(f"  Saved to: {args.model_out}")
-                  print(f"  Config saved to: {args.config_updated}")
-                  print(f"  Model info saved to: {args.model_info_out}")
-                  
-              except Exception as e:
-                  print(f" ERROR: Failed to build DCGAN model: {e}")
-                  import traceback
-                  traceback.print_exc()
-                  sys.exit(1)
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v23
+    command:
+      - sh
+      - -c
+      - |
+        echo "Building DCGAN Model with your config format..."
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import torch
+        import argparse
+        import json
+        import os
+        import sys
+        import tempfile
+        import urllib.request
+        
+        # Import from your DCGAN library
+        try:
+            from nesy_factory.GANs.dcgan import create_dcgan, DEFAULT_DCGAN_CONFIG
+            print(" Successfully imported nesy_factory.GANs.dcgan")
+        except ImportError as e:
+            print(f" ERROR: Failed to import nesy_factory.GANs.dcgan: {e}")
+            sys.exit(1)
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--config_str', type=str, required=True)
+        parser.add_argument('--load_from_cdn', type=str, default='false')
+        parser.add_argument('--cdn_url', type=str, default='')
+        parser.add_argument('--model_out', type=str, required=True)
+        parser.add_argument('--config_updated', type=str, required=True)
+        parser.add_argument('--model_info_out', type=str, required=True)
+        args = parser.parse_args()
+        
+        load_from_cdn = args.load_from_cdn.lower() == 'true'
+        
+        # Create output directories
+        os.makedirs(os.path.dirname(args.model_out), exist_ok=True)
+        os.makedirs(os.path.dirname(args.config_updated), exist_ok=True)
+        os.makedirs(os.path.dirname(args.model_info_out), exist_ok=True)
+        
+        if load_from_cdn:
+            # MODE 1: Download model from CDN
+            if not args.cdn_url:
+                print("ERROR: cdn_url is required when load_from_cdn=true")
+                sys.exit(1)
+                
+            print(f"Loading DCGAN model from CDN: {args.cdn_url}")
+            
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
+                    tmp_path = tmp_file.name
+                
+                print(f"Downloading from {args.cdn_url}...")
+                urllib.request.urlretrieve(args.cdn_url, tmp_path)
+                print("Download completed")
+                
+                checkpoint = torch.load(tmp_path, map_location='cpu')
+                torch.save(checkpoint, args.model_out)
+                print(f"Model loaded from CDN and saved to: {args.model_out}")
+                
+                config = json.loads(args.config_str) if args.config_str else {}
+                config['model_source'] = 'cdn'
+                config['cdn_url'] = args.cdn_url
+                config['model_type'] = 'dcgan'
+                
+                with open(args.config_updated, 'w') as f:
+                    json.dump(config, f, indent=2)
+                
+                model_info = {
+                    'model_type': 'dcgan',
+                    'model_source': 'cdn',
+                    'cdn_url': args.cdn_url,
+                    'checkpoint_keys': list(checkpoint.keys()) if isinstance(checkpoint, dict) else 'state_dict'
+                }
+                with open(args.model_info_out, 'w') as f:
+                    json.dump(model_info, f, indent=2)
+                    
+                os.unlink(tmp_path)
+                
+            except Exception as e:
+                print(f"Failed to load model from CDN: {e}")
+                sys.exit(1)
+                
+        else:
+            # MODE 2: Build new DCGAN model using your config format
+            print(f"Building new DCGAN model with your config format...")
+            
+            try:
+                # Parse user config (your format)
+                user_config = json.loads(args.config_str)
+                
+                print(f" CONFIGURATION ANALYSIS:")
+                print(f"  Algorithm: {user_config.get('train', {}).get('algorithm', 'backprop').upper()}")
+                
+                # Convert your config format to DCGAN library format
+                # Your config has all needed fields, just need to map structure
+                dcgan_config = {
+                    'dataset': {
+                        'resize_size': user_config['dataset']['resize_size']
+                    },
+                    'generator': {
+                        'z_dim': user_config['generator']['z_dim'],
+                        'hidden_dims': user_config['generator']['hidden_dims'],
+                        'image_channels': user_config['generator']['image_channels'],
+                        'use_batchnorm': user_config['generator']['use_batchnorm'],
+                        'activation': user_config['generator']['activation'],
+                        'output_activation': user_config['generator']['output_activation'],
+                        'learning_rate': user_config['generator']['learning_rate'],
+                        'loss_type': user_config['generator']['loss_type'],
+                        
+                        # Layer configurations
+                        'kernel_sizes': user_config['generator']['kernel_sizes'],
+                        'strides': user_config['generator']['strides'],
+                        'paddings': user_config['generator']['paddings'],
+                        'output_paddings': user_config['generator']['output_paddings'],
+                        
+                        # FF/CAFO settings (from your config)
+                        'use_forward_forward': user_config['generator']['use_forward_forward'],
+                        'use_cafo': user_config['generator']['use_cafo'],
+                        'ff_epochs_per_block': user_config['generator']['ff_epochs_per_block'],
+                        'cafo_epochs_per_block': user_config['generator']['cafo_epochs_per_block']
+                    },
+                    'discriminator': {
+                        'hidden_dims': user_config['discriminator']['hidden_dims'],
+                        'image_channels': user_config['discriminator']['image_channels'],
+                        'use_batchnorm': user_config['discriminator']['use_batchnorm'],
+                        'activation': user_config['discriminator']['activation'],
+                        'output_activation': user_config['discriminator']['output_activation'],
+                        'learning_rate': user_config['discriminator']['learning_rate'],
+                        'loss_type': user_config['discriminator']['loss_type'],
+                        'dropout': user_config['discriminator']['dropout'],
+                        'label_smoothing': user_config['discriminator'].get('label_smoothing', 0.0),
+                        'n_critic': user_config['discriminator'].get('n_critic', 1),
+                        
+                        # Layer configurations
+                        'kernel_sizes': user_config['discriminator']['kernel_sizes'],
+                        'strides': user_config['discriminator']['strides'],
+                        'paddings': user_config['discriminator']['paddings'],
+                        'output_dim': user_config['discriminator']['output_dim'],
+                        
+                        # FF/CAFO settings (from your config)
+                        'use_forward_forward': user_config['discriminator']['use_forward_forward'],
+                        'use_cafo': user_config['discriminator']['use_cafo'],
+                        'ff_epochs_per_block': user_config['discriminator']['ff_epochs_per_block'],
+                        'cafo_epochs_per_block': user_config['discriminator']['cafo_epochs_per_block'],
+                        
+                        # Advanced GAN settings
+                        'use_wgan': user_config['discriminator'].get('use_wgan', False),
+                        'use_wgan_gp': user_config['discriminator'].get('use_wgan_gp', False),
+                        'wgan_gp_lambda': user_config['discriminator'].get('wgan_gp_lambda', 10.0)
+                    },
+                    'train': {
+                        'algorithm': user_config['train']['algorithm'],
+                        'batch_size': user_config['train']['batch_size'],
+                        'epochs': user_config['train']['epochs']
+                    }
+                }
+                
+                # Set algorithm-specific flags
+                algorithm = user_config['train']['algorithm']
+                if algorithm == 'forward_forward':
+                    dcgan_config['discriminator']['use_forward_forward'] = True
+                    print(f"   Forward-Forward enabled for discriminator")
+                    print(f"   FF epochs per block: {user_config['discriminator']['ff_epochs_per_block']}")
+                elif algorithm == 'cafo':
+                    dcgan_config['generator']['use_cafo'] = True
+                    dcgan_config['discriminator']['use_cafo'] = True
+                    print(f"   CAFO enabled for both generator and discriminator")
+                    print(f"   CAFO epochs per block: Gen={user_config['generator']['cafo_epochs_per_block']}, Disc={user_config['discriminator']['cafo_epochs_per_block']}")
+                else:
+                    print(f"   Standard Backpropagation")
+                
+                print(f"\\n  DCGAN CONFIG SUMMARY:")
+                print(f"  Image Size: {dcgan_config['dataset']['resize_size']}x{dcgan_config['dataset']['resize_size']}")
+                print(f"  Channels: {dcgan_config['generator']['image_channels']}")
+                print(f"  Generator z_dim: {dcgan_config['generator']['z_dim']}")
+                print(f"  Generator layers: {len(dcgan_config['generator']['hidden_dims'])}")
+                print(f"  Discriminator layers: {len(dcgan_config['discriminator']['hidden_dims'])}")
+                
+                # Create DCGAN models
+                generator, discriminator, full_config = create_dcgan(dcgan_config)
+                
+                print(f"\\n MODELS CREATED:")
+                print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
+                print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
+                
+                # Verify FF/CAFO modules
+                if hasattr(generator, 'use_cafo') and generator.use_cafo:
+                    print(f"   Generator CAFO module: {generator.cafo_module.cafo_epochs_per_block} epochs/block")
+                if hasattr(discriminator, 'use_forward_forward') and discriminator.use_forward_forward:
+                    print(f"   Discriminator FF module: {discriminator.ff_module.ff_epochs_per_block} epochs/block")
+                if hasattr(discriminator, 'use_cafo') and discriminator.use_cafo:
+                    print(f"   Discriminator CAFO module: {discriminator.cafo_module.cafo_epochs_per_block} epochs/block")
+                
+                # Create model info
+                model_info = {
+                    'model_type': 'dcgan',
+                    'model_source': 'fresh_build',
+                    'training_algorithm': algorithm,
+                    'generator_params': sum(p.numel() for p in generator.parameters()),
+                    'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
+                    'total_params': sum(p.numel() for p in generator.parameters()) + sum(p.numel() for p in discriminator.parameters()),
+                    'z_dim': generator.z_dim,
+                    'image_channels': generator.image_channels,
+                    'image_size': generator.image_size,
+                    'config_source': 'user_provided',
+                    'algorithm_specific': {
+                        'ff_enabled': {
+                            'generator': getattr(generator, 'use_forward_forward', False),
+                            'discriminator': getattr(discriminator, 'use_forward_forward', False)
+                        },
+                        'cafo_enabled': {
+                            'generator': getattr(generator, 'use_cafo', False),
+                            'discriminator': getattr(discriminator, 'use_cafo', False)
+                        }
+                    }
+                }
+                
+                # Save both models in a checkpoint
+                checkpoint = {
+                    'config': full_config,
+                    'generator_state_dict': generator.state_dict(),
+                    'discriminator_state_dict': discriminator.state_dict(),
+                    'model_info': model_info,
+                    'model_type': 'dcgan',
+                    'training_algorithm': algorithm,
+                    'original_user_config': user_config  # Keep original config
+                }
+                
+                torch.save(checkpoint, args.model_out)
+                
+                # Save updated config (merged)
+                with open(args.config_updated, 'w') as f:
+                    json.dump(full_config, f, indent=2)
+                    
+                # Save model info
+                with open(args.model_info_out, 'w') as f:
+                    json.dump(model_info, f, indent=2)
+                    
+                print(f"\\n DCGAN model built successfully!")
+                print(f"  Saved to: {args.model_out}")
+                print(f"  Config saved to: {args.config_updated}")
+                print(f"  Model info saved to: {args.model_info_out}")
+                
+            except Exception as e:
+                print(f" ERROR: Failed to build DCGAN model: {e}")
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
 
-    args:
-      - --config_str
-      - {inputValue: config_str}
-      - --load_from_cdn
-      - {inputValue: load_from_cdn}
-      - --cdn_url
-      - {inputValue: cdn_url}
-      - --model_out
-      - {outputPath: model_out}
-      - --config_updated
-      - {outputPath: config_updated}
-      - --model_info_out
-      - {outputPath: model_info_out}
+  args:
+    - --config_str
+    - {inputValue: config_str}
+    - --load_from_cdn
+    - {inputValue: load_from_cdn}
+    - --cdn_url
+    - {inputValue: cdn_url}
+    - --model_out
+    - {outputPath: model_out}
+    - --config_updated
+    - {outputPath: config_updated}
+    - --model_info_out
+    - {outputPath: model_info_out}
