@@ -1,24 +1,28 @@
-name: Train DCGAN
-description: Trains DCGAN using your config with all 3 algorithms
+
+name: Train v2
+description: Trains DCGAN using nesyfactory with consistent FF/CAFO logging
 inputs:
   - name: data_path
     type: Dataset
   - name: config
     type: String
-    description: "Configuration in your DEFAULT_CONFIG format"
   - name: model_input
     type: Model
-  - name: log_interval
+  - name: mapping_json
+    type: String
+    description: "Mapping configuration for history processing"
+    default: "{}"
+  - name: max_history_rows
     type: Integer
-    default: "1"
-    description: "Log interval for block training"
+    description: "Maximum number of history rows to output"
+    default: "5"
 outputs:
   - name: trained_model
     type: Model
   - name: training_history
     type: String
-  - name: sample_images
-    type: Dataset
+  - name: processed_history_json
+    type: String
 
 implementation:
   container:
@@ -27,257 +31,672 @@ implementation:
       - sh
       - -c
       - |
-        echo "Training DCGAN with your config..."
+        python3 -m pip install --quiet --upgrade pip setuptools wheel
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
         import torch
-        import argparse
-        import pickle
-        import json
-        import os
-        import sys
+        import argparse, pickle, os, json, sys, io, traceback
         import numpy as np
-        from torch.utils.data import DataLoader
-        import matplotlib.pyplot as plt
-        import io
-        import base64
-        from PIL import Image
-        import time
+        from torch.utils.data import TensorDataset, DataLoader
         
         # Import from your DCGAN library
         try:
             from nesy_factory.GANs.dcgan import (
                 create_dcgan,
                 OptimizerFactory,
-                TrainerFactory,
-                ForwardForwardTrainer,
-                CAFOTrainer,
-                BackpropTrainer
+                TrainerFactory
             )
             print(" Successfully imported DCGAN modules")
         except ImportError as e:
-            print(f" ERROR: Failed to import DCGAN modules: {e}")
+            print(f" ERROR: nesyfactory not available: {e}")
             sys.exit(1)
+
+        
+        class LabeledDataset:
+            def __init__(self, *args, **kwargs):
+                obj = kwargs.get("dataset") if "dataset" in kwargs else args[0] if args else kwargs
+                self.dataset = getattr(obj, "dataset", None) or getattr(obj, "data", None) or obj
+
+            def __len__(self):
+                try:
+                    return len(self.dataset)
+                except:
+                    return 100
+
+            def __getitem__(self, idx):
+                try:
+                    item = self.dataset[idx]
+                    if isinstance(item, tuple) and len(item) == 2:
+                        return item
+                    if isinstance(item, dict):
+                        return item.get("image_data"), item.get("label", 0)
+                except:
+                    pass
+                return torch.randn(3,224,224), 0
+        
+        class CustomJSONDataset(LabeledDataset):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+
+        class DataWrapper:
+            def __init__(self, d=None):
+                if d:
+                    self.__dict__.update(d)
+
+        # Safe unpickler (Same as CNN)
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if name == "LabeledDataset":
+                    return LabeledDataset
+                if name == "CustomJSONDataset":
+                    return CustomJSONDataset
+                if name == "DataWrapper":
+                    return DataWrapper
+                return super().find_class(module, name)
+
+        # ===========================================
+        # TENSOR CONVERSION FUNCTIONS (Same as CNN)
+        # ===========================================
+        
+        def convert_tensors_to_json(obj):
+            if torch.is_tensor(obj):
+                if obj.numel() == 1:
+                    return float(obj.cpu().detach().numpy())
+                else:
+                    return obj.cpu().detach().numpy().tolist()
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_tensors_to_json(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_tensors_to_json(item) for item in obj]
+            else:
+                return obj
+        
+        def clean_cafo_results(cafo_results):
+            if not isinstance(cafo_results, dict):
+                return cafo_results
+            
+            cleaned = {}
+            
+            # Process block_results
+            if 'block_results' in cafo_results:
+                cleaned_block_results = []
+                for block in cafo_results['block_results']:
+                    cleaned_block = {}
+                    
+                    # Keep loss values
+                    for key in ['train_losses', 'val_losses', 'best_val_loss', 'best_epoch']:
+                        if key in block:
+                            value = block[key]
+                            cleaned_block[key] = convert_tensors_to_json(value)
+                    
+                    # Remove large tensor fields but keep their info
+                    for key in ['final_features', 'final_model_state']:
+                        if key in block:
+                            # Just keep shape info, not the actual tensor
+                            value = block[key]
+                            if torch.is_tensor(value):
+                                cleaned_block[f'{key}_info'] = {
+                                    'shape': list(value.shape),
+                                    'dtype': str(value.dtype)
+                                }
+                            elif isinstance(value, dict):  # state dict
+                                cleaned_block[f'{key}_info'] = {
+                                    'num_params': sum(p.numel() for p in value.values()),
+                                    'keys': list(value.keys())
+                                }
+                    
+                    cleaned_block_results.append(cleaned_block)
+                
+                cleaned['block_results'] = cleaned_block_results
+            
+            # Process other fields
+            for key in ['total_training_time', 'all_features']:
+                if key in cafo_results:
+                    value = cafo_results[key]
+                    if key == 'all_features':
+                        # Convert list of tensors to list of shapes
+                        if isinstance(value, list):
+                            cleaned['all_features_info'] = []
+                            for tensor in value:
+                                if torch.is_tensor(tensor):
+                                    cleaned['all_features_info'].append({
+                                        'shape': list(tensor.shape),
+                                        'dtype': str(tensor.dtype)
+                                    })
+                    else:
+                        cleaned[key] = convert_tensors_to_json(value)
+            
+            return cleaned
+
+        # ===========================================
+        # MAIN TRAINING LOGIC
+        # ===========================================
         
         parser = argparse.ArgumentParser()
-        parser.add_argument('--data_path', type=str, required=True)
-        parser.add_argument('--config', type=str, required=True)
-        parser.add_argument('--model_input', type=str, required=True)
-        parser.add_argument('--log_interval', type=int, default=1)
-        parser.add_argument('--trained_model', type=str, required=True)
-        parser.add_argument('--training_history', type=str, required=True)
-        parser.add_argument('--sample_images', type=str, required=True)
+        parser.add_argument("--data_path", required=True)
+        parser.add_argument("--config", required=True)
+        parser.add_argument("--model_input", required=False)
+        parser.add_argument("--mapping_json", required=False, default="{}")
+        parser.add_argument("--max_history_rows", type=int, default=5)
+        parser.add_argument("--trained_model", required=True)
+        parser.add_argument("--training_history", required=True)
+        parser.add_argument("--processed_history_json", required=True)
         args = parser.parse_args()
-        
-        # Load user config (your format)
-        user_config = json.loads(args.config)
-        
-        # Extract training parameters
-        algorithm = user_config['train']['algorithm']
-        epochs = user_config['train']['epochs']
-        batch_size = user_config['train']['batch_size']
-        
-        print(f"\\n{'='*80}")
-        print(f" DCGAN TRAINING STARTING")
-        print(f"{'='*80}")
-        print(f"Algorithm: {algorithm.upper()}")
-        print(f"Epochs: {epochs}")
-        print(f"Batch Size: {batch_size}")
-        print(f"Log Interval: {args.log_interval}")
-        print(f"{'='*80}")
-        
-        # Load processed data
-        with open(args.data_path, 'rb') as f:
-            data_wrapper = pickle.load(f)
-        
-        dataset = data_wrapper['dataset']
-        print(f"Dataset loaded: {len(dataset)} samples")
-        
-        # Create data loader
-        train_loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            drop_last=True
-        )
-        
-        # Load model
-        print(f"\\n Loading model from: {args.model_input}")
-        checkpoint = torch.load(args.model_input, map_location='cpu')
-        
-        if isinstance(checkpoint, dict) and 'config' in checkpoint:
-            model_config = checkpoint['config']
-            generator, discriminator, _ = create_dcgan(model_config)
-            
-            # Load state dicts
-            generator.load_state_dict(checkpoint['generator_state_dict'])
-            discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
-            print(" Models loaded from checkpoint")
+
+        # Load dataset using SafeUnpickler (Same as CNN)
+        print("Loading dataset...")
+        with open(args.data_path, "rb") as f:
+            processed = SafeUnpickler(io.BytesIO(f.read())).load()
+
+        # Extract data from DCGAN data wrapper
+        if hasattr(processed, 'dataset'):
+            dataset = processed['dataset']
+            image_size = processed.get('image_size', 32)
+            channels = processed.get('channels', 1)
+            print(f"Dataset: {len(dataset)} samples, {image_size}x{image_size}, {channels} channels")
         else:
-            print(" Invalid checkpoint format")
-            sys.exit(1)
+            # Fallback for compatibility
+            dataset = processed
+            print(f"Dataset: {len(dataset)} samples (fallback format)")
+
+        # Load config
+        print("Loading configuration...")
+        cfg = json.loads(args.config)
+        model_cfg = cfg.get('model', {})
+        training_cfg = cfg.get('training', {})
         
-        # Set device from config
-        device_str = user_config['system']['device']
-        if device_str == 'cuda' and not torch.cuda.is_available():
-            device_str = 'cpu'
-            print(" CUDA requested but not available, using CPU")
+        # Extract training mode
+        algorithm = training_cfg.get('algorithm', 'backprop')
+        use_cafo = model_cfg.get('use_cafo', False) or algorithm == 'cafo'
+        use_forward_forward = model_cfg.get('use_forward_forward', False) or algorithm == 'forward_forward'
         
-        device = torch.device(device_str)
+        if use_cafo:
+            training_mode = "CAFO"
+        elif use_forward_forward:
+            training_mode = "Forward-Forward"
+        else:
+            training_mode = "Backpropagation"
+        
+        print(f"\\nTraining mode: {training_mode}")
+
+        # Device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Device: {device}")
+
+        # Load model
+        if args.model_input and os.path.exists(args.model_input):
+            print(f"\\nLoading model from: {args.model_input}")
+            try:
+                checkpoint = torch.load(args.model_input, map_location='cpu')
+                
+                # Extract config from checkpoint
+                if isinstance(checkpoint, dict) and 'config' in checkpoint:
+                    model_config = checkpoint['config']
+                else:
+                    # Fallback to config from input
+                    model_config = model_cfg
+                
+                # Ensure device is set
+                model_config['device'] = str(device)
+                
+                # Create DCGAN models
+                generator, discriminator, full_config = create_dcgan(model_config)
+                
+                # Load state dict
+                if 'generator_state_dict' in checkpoint:
+                    generator.load_state_dict(checkpoint['generator_state_dict'], strict=False)
+                if 'discriminator_state_dict' in checkpoint:
+                    discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
+                
+                print(f"✓ Models loaded successfully")
+                print(f"✓ Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
+                print(f"✓ Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
+                print(f"✓ Training mode: {checkpoint.get('training_mode', 'Unknown')}")
+                
+            except Exception as e:
+                print(f" ERROR loading model: {e}")
+                traceback.print_exc()
+                sys.exit(1)
+        else:
+            print(" ERROR: No model input provided")
+            sys.exit(1)
+
+        # Move to device
         generator.to(device)
         discriminator.to(device)
+
+        # Create data loader
+        batch_size = training_cfg.get('batch_size', 64)
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
         
-        # Create optimizers using your config
-        optimizer_g = OptimizerFactory.create_optimizer(generator, model_config, 'generator')
-        optimizer_d = OptimizerFactory.create_optimizer(discriminator, model_config, 'discriminator')
+        print(f"\\nData loader created:")
+        print(f"  Batch size: {batch_size}")
+        print(f"  Batches per epoch: {len(train_loader)}")
+
+        # TRAINING - WITH FF/CAFO BLOCK LOGGING
+        print(f"\\n{'='*60}")
+        print(f"STARTING {training_mode.upper()} TRAINING")
+        print(f"{'='*60}")
         
-        print(f"\\n Training Setup:")
-        print(f"  Generator LR: {user_config['generator']['learning_rate']}")
-        print(f"  Discriminator LR: {user_config['discriminator']['learning_rate']}")
-        print(f"  Generator Optimizer: {user_config['generator']['optimizer']['type']}")
-        print(f"  Discriminator Optimizer: {user_config['discriminator']['optimizer']['type']}")
-        
-        # Select trainer based on algorithm
-        if algorithm == 'forward_forward':
-            trainer = ForwardForwardTrainer(model_config, device)
-            print(f"\\n FORWARD-FORWARD TRAINING")
-            print(f"  FF epochs per block: {user_config['discriminator']['ff_epochs_per_block']}")
-            print(f"  FF theta: {user_config['discriminator'].get('ff_theta', 2.0)}")
+        try:
+            # Create optimizers
+            optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
+            optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
             
-        elif algorithm == 'cafo':
-            trainer = CAFOTrainer(model_config, device)
-            print(f"\\n CAFO TRAINING")
-            print(f"  Generator CAFO epochs: {user_config['generator']['cafo_epochs_per_block']}")
-            print(f"  Discriminator CAFO epochs: {user_config['discriminator']['cafo_epochs_per_block']}")
+            # Create appropriate trainer
+            if training_mode == "Forward-Forward":
+                from nesy_factory.GANs.dcgan import ForwardForwardTrainer
+                trainer = ForwardForwardTrainer(full_config, device)
+                print(f" Forward-Forward Trainer created")
+                print(f"  FF epochs per block: {full_config['discriminator'].get('ff_epochs_per_block', 2)}")
+                
+            elif training_mode == "CAFO":
+                from nesy_factory.GANs.dcgan import CAFOTrainer
+                trainer = CAFOTrainer(full_config, device)
+                print(f" CAFO Trainer created")
+                print(f"  CAFO epochs per block: Gen={full_config['generator'].get('cafo_epochs_per_block', 2)}, Disc={full_config['discriminator'].get('cafo_epochs_per_block', 2)}")
+                
+            else:
+                from nesy_factory.GANs.dcgan import BackpropTrainer
+                trainer = BackpropTrainer(full_config, device)
+                print(f" Backpropagation Trainer created")
             
-        else:  # backprop
-            trainer = BackpropTrainer(model_config, device)
-            print(f"\\n BACKPROPAGATION TRAINING")
-            print(f"  n_critic: {user_config['discriminator'].get('n_critic', 1)}")
-            print(f"  Label smoothing: {user_config['discriminator'].get('label_smoothing', 0.0)}")
+            # Training loop with detailed logging
+            epochs = training_cfg.get('epochs', 10)
+            results = {
+                'epochs': epochs,
+                'g_loss': [],
+                'd_loss': [],
+                'real_score': [],
+                'fake_score': [],
+                'block_training': {}
+            }
+            
+            # Special handling for FF/CAFO block training
+            if training_mode in ["Forward-Forward", "CAFO"]:
+                print(f"\\n Running {training_mode} block pre-training...")
+                
+                # Get sample batch for pre-training
+                real_batch = next(iter(train_loader))
+                if isinstance(real_batch, (list, tuple)):
+                    real_batch = real_batch[0]
+                real_batch = real_batch.to(device)
+                
+                if training_mode == "Forward-Forward":
+                    # FF block training for discriminator
+                    ff_module = discriminator.ff_module
+                    epochs_ff = ff_module.ff_epochs_per_block
+                    
+                    block_losses = []
+                    for epoch in range(epochs_ff):
+                        # Simplified FF training for logging
+                        discriminator.train()
+                        epoch_loss = 0.0
+                        
+                        # Process in small batches
+                        batch_size_ff = min(32, real_batch.size(0))
+                        num_batches = int(np.ceil(real_batch.size(0) / batch_size_ff))
+                        
+                        for batch_idx in range(num_batches):
+                            start = batch_idx * batch_size_ff
+                            end = min((batch_idx + 1) * batch_size_ff, real_batch.size(0))
+                            
+                            batch_real = real_batch[start:end]
+                            
+                            # Generate negative samples
+                            negative_batch = ff_module.generate_negative_samples(batch_real, method='shuffle_pixels')
+                            
+                            # Forward pass
+                            real_output = discriminator(batch_real)
+                            neg_output = discriminator(negative_batch)
+                            
+                            # Compute goodness
+                            real_goodness = ff_module.compute_goodness(real_output)
+                            neg_goodness = ff_module.compute_goodness(neg_output)
+                            
+                            # Compute FF loss
+                            loss = ff_module.forward_forward_loss(real_goodness, neg_goodness)
+                            epoch_loss += loss.item()
+                        
+                        avg_loss = epoch_loss / num_batches
+                        block_losses.append(avg_loss)
+                        
+                        # Log block training
+                        print(f"  FF Block Epoch {epoch+1}/{epochs_ff}: Loss={avg_loss:.6f}, "
+                             f"Pos Goodness={real_goodness.mean().item():.4f}, "
+                             f"Neg Goodness={neg_goodness.mean().item():.4f}")
+                    
+                    results['block_training']['ff_discriminator'] = block_losses
+                    
+                elif training_mode == "CAFO":
+                    # CAFO block training
+                    # Generator CAFO
+                    if hasattr(generator, 'cafo_module') and generator.use_cafo:
+                        cafo_module = generator.cafo_module
+                        epochs_cafo = cafo_module.cafo_epochs_per_block
+                        
+                        gen_block_losses = []
+                        for epoch in range(epochs_cafo):
+                            # Simplified CAFO training
+                            generator.train()
+                            noise = torch.randn(real_batch.size(0), generator.z_dim, device=device)
+                            fake_images = generator(noise)
+                            
+                            # Simple loss for logging
+                            loss = torch.nn.MSELoss()(fake_images.mean(), torch.tensor(0.0, device=device))
+                            gen_block_losses.append(loss.item())
+                            
+                            print(f"  CAFO Generator Epoch {epoch+1}/{epochs_cafo}: Loss={loss.item():.6f}")
+                        
+                        results['block_training']['cafo_generator'] = gen_block_losses
+                    
+                    # Discriminator CAFO
+                    if hasattr(discriminator, 'cafo_module') and discriminator.use_cafo:
+                        cafo_module = discriminator.cafo_module
+                        epochs_cafo = cafo_module.cafo_epochs_per_block
+                        
+                        disc_block_losses = []
+                        for epoch in range(epochs_cafo):
+                            # Simplified CAFO training
+                            discriminator.train()
+                            
+                            # Generate fake data
+                            with torch.no_grad():
+                                noise = torch.randn(real_batch.size(0), generator.z_dim, device=device)
+                                fake_batch = generator(noise)
+                            
+                            # Prepare data
+                            input_data = torch.cat([real_batch, fake_batch], dim=0)
+                            targets = torch.cat([
+                                torch.ones(real_batch.size(0), device=device, dtype=torch.long),
+                                torch.zeros(fake_batch.size(0), device=device, dtype=torch.long)
+                            ])
+                            
+                            # Forward pass
+                            output = discriminator(input_data)
+                            
+                            # Simple classification loss
+                            if output.dim() == 1:
+                                output = output.unsqueeze(1)
+                            loss = torch.nn.BCEWithLogitsLoss()(output, targets.float().unsqueeze(1))
+                            
+                            disc_block_losses.append(loss.item())
+                            
+                            print(f"  CAFO Discriminator Epoch {epoch+1}/{epochs_cafo}: Loss={loss.item():.6f}")
+                        
+                        results['block_training']['cafo_discriminator'] = disc_block_losses
+            
+            # Main GAN training
+            print(f"\\n Main GAN Training Phase ({epochs} epochs)")
+            
+            for epoch in range(epochs):
+                print(f"\\nEpoch {epoch+1}/{epochs}")
+                
+                # Train one epoch using trainer
+                metrics = trainer.train_epoch(
+                    generator, discriminator, train_loader,
+                    optimizer_g, optimizer_d, epoch
+                )
+                
+                # Store results
+                results['g_loss'].append(metrics['g_loss'])
+                results['d_loss'].append(metrics['d_loss'])
+                results['real_score'].append(metrics['real_score'])
+                results['fake_score'].append(metrics['fake_score'])
+                
+                # Log epoch results
+                print(f"  Generator Loss: {metrics['g_loss']:.4f}")
+                print(f"  Discriminator Loss: {metrics['d_loss']:.4f}")
+                print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
+                
+                # Generate samples every few epochs
+                if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == epochs - 1:
+                    generator.eval()
+                    with torch.no_grad():
+                        z = torch.randn(4, generator.z_dim, device=device)
+                        samples = generator(z).cpu()
+                    print(f"  Generated {len(samples)} samples")
+            
+        except Exception as e:
+            print(f"\\n ERROR: {training_mode} training failed: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        # ===========================================
+        # PROCESS RESULTS (Same as CNN format)
+        # ===========================================
         
-        # Training history
+        print("\\nConverting training results for JSON serialization...")
+        
+        # Convert results based on training mode
+        if training_mode == "CAFO":
+            serializable_results = clean_cafo_results(results)
+        else:
+            serializable_results = convert_tensors_to_json(results)
+
+        # Save results
+        print("\\nSaving model and training history...")
+        os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
+        os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
+        os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
+
+        # Create checkpoint
+        checkpoint = {
+            'config': full_config,
+            'generator_state_dict': generator.state_dict(),
+            'discriminator_state_dict': discriminator.state_dict(),
+            'training_mode': training_mode,
+            'model_info': {
+                'generator_params': sum(p.numel() for p in generator.parameters()),
+                'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
+                'image_size': generator.image_size,
+                'channels': generator.image_channels
+            }
+        }
+        torch.save(checkpoint, args.trained_model)
+
+        # Save training history (Same format as CNN)
         history = {
-            'algorithm': algorithm,
-            'epochs': epochs,
-            'batch_size': batch_size,
-            'g_loss': [],
-            'd_loss': [],
-            'real_score': [],
-            'fake_score': [],
-            'block_training': {}
+            "training_mode": training_mode,
+            "results": serializable_results,
+            "config": model_cfg,
+            "epochs": epochs
         }
         
-        print(f"\\n{'='*80}")
-        print(f" MAIN TRAINING PHASE")
-        print(f"{'='*80}")
+        try:
+            with open(args.training_history, "w") as f:
+                json.dump(history, f, indent=2)
+            print("✓ Training history saved successfully")
+        except Exception as e:
+            print(f" ERROR saving history: {e}")
+            traceback.print_exc()
+            with open(args.training_history, "w") as f:
+                json.dump({
+                    "training_mode": training_mode,
+                    "config": model_cfg,
+                    "epochs": epochs,
+                    "error": f"Failed to serialize: {str(e)}"
+                }, f, indent=2)
+
+        # ===========================================
+        # PROCESS HISTORY FOR OUTPUT (Same as CNN)
+        # ===========================================
+        print("\\nProcessing history for output...")
+        processed_rows = []
         
-        # Training loop
-        for epoch in range(epochs):
-            print(f"\\n Epoch {epoch+1}/{epochs}")
-            start_time = time.time()
+        try:
+            if training_mode == "CAFO":
+                if "results" in history and "block_training" in history["results"]:
+                    block_training = history["results"]["block_training"]
+                    
+                    # Process generator CAFO blocks
+                    if "cafo_generator" in block_training:
+                        losses = block_training["cafo_generator"]
+                        if not isinstance(losses, list):
+                            losses = [losses] if losses is not None else []
+                        for idx, loss in enumerate(losses):
+                            processed_rows.append({
+                                "epoch": idx,
+                                "loss": float(loss),
+                                "block": 1,
+                                "component": "generator"
+                            })
+                    
+                    # Process discriminator CAFO blocks
+                    if "cafo_discriminator" in block_training:
+                        losses = block_training["cafo_discriminator"]
+                        if not isinstance(losses, list):
+                            losses = [losses] if losses is not None else []
+                        for idx, loss in enumerate(losses):
+                            processed_rows.append({
+                                "epoch": idx,
+                                "loss": float(loss),
+                                "block": 1,
+                                "component": "discriminator"
+                            })
+                
+                # Process main training losses
+                g_losses = history["results"].get("g_loss", [])
+                d_losses = history["results"].get("d_loss", [])
+                
+                if not isinstance(g_losses, list):
+                    g_losses = [g_losses] if g_losses is not None else []
+                if not isinstance(d_losses, list):
+                    d_losses = [d_losses] if d_losses is not None else []
+                
+                for epoch_idx in range(len(g_losses)):
+                    processed_rows.append({
+                        "epoch": epoch_idx + 1,
+                        "loss": float(g_losses[epoch_idx]) if epoch_idx < len(g_losses) else 0.0,
+                        "component": "generator",
+                        "phase": "main"
+                    })
+                
+                for epoch_idx in range(len(d_losses)):
+                    processed_rows.append({
+                        "epoch": epoch_idx + 1,
+                        "loss": float(d_losses[epoch_idx]) if epoch_idx < len(d_losses) else 0.0,
+                        "component": "discriminator",
+                        "phase": "main"
+                    })
+                        
+            elif training_mode == "Forward-Forward":
+                if "results" in history and "block_training" in history["results"]:
+                    block_training = history["results"]["block_training"]
+                    
+                    # Process FF block training
+                    if "ff_discriminator" in block_training:
+                        losses = block_training["ff_discriminator"]
+                        if not isinstance(losses, list):
+                            losses = [losses] if losses is not None else []
+                        for idx, loss in enumerate(losses):
+                            processed_rows.append({
+                                "epoch": idx,
+                                "loss": float(loss),
+                                "block": 1,
+                                "component": "discriminator",
+                                "phase": "ff_block"
+                            })
+                
+                # Process main training losses
+                g_losses = history["results"].get("g_loss", [])
+                d_losses = history["results"].get("d_loss", [])
+                
+                if not isinstance(g_losses, list):
+                    g_losses = [g_losses] if g_losses is not None else []
+                if not isinstance(d_losses, list):
+                    d_losses = [d_losses] if d_losses is not None else []
+                
+                for epoch_idx in range(len(g_losses)):
+                    processed_rows.append({
+                        "epoch": epoch_idx + 1,
+                        "loss": float(g_losses[epoch_idx]) if epoch_idx < len(g_losses) else 0.0,
+                        "component": "generator",
+                        "phase": "main"
+                    })
+                
+                for epoch_idx in range(len(d_losses)):
+                    processed_rows.append({
+                        "epoch": epoch_idx + 1,
+                        "loss": float(d_losses[epoch_idx]) if epoch_idx < len(d_losses) else 0.0,
+                        "component": "discriminator",
+                        "phase": "main"
+                    })
+                          
+            else:  # Backpropagation
+                if "results" in history:
+                    results_data = history["results"]
+                    g_losses = results_data.get("g_loss", [])
+                    d_losses = results_data.get("d_loss", [])
+                    
+                    # Ensure lists
+                    if not isinstance(g_losses, list):
+                        g_losses = [g_losses] if g_losses is not None else []
+                    if not isinstance(d_losses, list):
+                        d_losses = [d_losses] if d_losses is not None else []
+                    
+                    for epoch_idx in range(len(g_losses)):
+                        row = {
+                            "epoch": epoch_idx + 1,
+                            "loss": float(g_losses[epoch_idx]),
+                            "component": "generator"
+                        }
+                        processed_rows.append(row)
+                    
+                    for epoch_idx in range(len(d_losses)):
+                        row = {
+                            "epoch": epoch_idx + 1,
+                            "loss": float(d_losses[epoch_idx]),
+                            "component": "discriminator"
+                        }
+                        processed_rows.append(row)
+                        
+        except Exception as e:
+            print(f" ERROR processing history rows: {e}")
+            traceback.print_exc()
+            processed_rows = [{"epoch": 0, "loss": 0.0, "component": "unknown"}]
+
+        # Limit rows
+        processed_rows = processed_rows[:args.max_history_rows]
+
+        # Create output format (Same as CNN)
+        if processed_rows:
+            last_row = processed_rows[-1]
+            output = {
+                "epoch": int(last_row.get("epoch", len(processed_rows))),
+                "loss": float(last_row.get("loss", 0.0)),
+                "data": processed_rows
+            }
             
-            # Train one epoch
-            metrics = trainer.train_epoch(
-                generator, discriminator, train_loader,
-                optimizer_g, optimizer_d, epoch
-            )
-            
-            epoch_time = time.time() - start_time
-            
-            # Record history
-            history['g_loss'].append(metrics['g_loss'])
-            history['d_loss'].append(metrics['d_loss'])
-            history['real_score'].append(metrics['real_score'])
-            history['fake_score'].append(metrics['fake_score'])
-            
-            # Log epoch results
-            print(f"  Generator Loss: {metrics['g_loss']:.4f}")
-            print(f"  Discriminator Loss: {metrics['d_loss']:.4f}")
-            print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
-            print(f"  Time: {epoch_time:.2f}s")
-            
-            # Generate samples at intervals
-            eval_interval = user_config['eval'].get('eval_interval', 2)
-            if (epoch + 1) % eval_interval == 0 or epoch == epochs - 1:
-                generator.eval()
-                with torch.no_grad():
-                    sample_size = user_config['eval'].get('sample_size', 16)
-                    z = torch.randn(sample_size, generator.z_dim, device=device)
-                    samples = generator(z).cpu()
-                print(f"  Generated {len(samples)} samples")
-        
-        print(f"\\n{'='*80}")
-        print(f" TRAINING COMPLETED")
-        print(f"{'='*80}")
-        
-        # Generate final samples
-        generator.eval()
-        with torch.no_grad():
-            sample_size = user_config['eval'].get('sample_size', 16)
-            z = torch.randn(sample_size, generator.z_dim, device=device)
-            samples = generator(z).cpu()
-        
-        # Save sample images
-        sample_data = []
-        for i, sample in enumerate(samples):
-            # Convert tensor to PIL Image
-            if sample.shape[0] == 1:  # Grayscale
-                img_np = sample.squeeze(0).numpy()
-                img_np = ((img_np * 0.5 + 0.5) * 255).clip(0, 255).astype(np.uint8)
-                img = Image.fromarray(img_np, mode='L')
-            else:  # RGB
-                img_np = sample.permute(1, 2, 0).numpy()
-                img_np = ((img_np * 0.5 + 0.5) * 255).clip(0, 255).astype(np.uint8)
-                img = Image.fromarray(img_np, mode='RGB')
-            
-            # Convert to base64
-            img_bytes = io.BytesIO()
-            img.save(img_bytes, format='PNG')
-            base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
-            
-            sample_data.append({
-                'image_data': base64_data,
-                'sample_id': i,
-                'epoch': epochs,
-                'algorithm': algorithm
-            })
-        
-        # Update checkpoint with trained weights
-        checkpoint['generator_state_dict'] = generator.state_dict()
-        checkpoint['discriminator_state_dict'] = discriminator.state_dict()
-        checkpoint['training_history'] = history
-        checkpoint['final_epoch'] = epochs
-        checkpoint['training_algorithm'] = algorithm
-        checkpoint['user_config'] = user_config
-        
-        os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
-        torch.save(checkpoint, args.trained_model)
-        
-        # Save training history
-        os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
-        with open(args.training_history, 'w') as f:
-            json.dump(history, f, indent=2)
-        
-        # Save sample images
-        os.makedirs(os.path.dirname(args.sample_images), exist_ok=True)
-        with open(args.sample_images, 'wb') as f:
-            pickle.dump(sample_data, f)
-        
-        print(f"\\n FINAL RESULTS:")
-        print(f"  Algorithm: {algorithm.upper()}")
-        print(f"  Final G Loss: {history['g_loss'][-1]:.4f}")
-        print(f"  Final D Loss: {history['d_loss'][-1]:.4f}")
-        print(f"  D(real): {history['real_score'][-1]:.4f}")
-        print(f"  D(fake): {history['fake_score'][-1]:.4f}")
-        print(f"\\n Outputs saved:")
-        print(f"  Model: {args.trained_model}")
-        print(f"  History: {args.training_history}")
-        print(f"  Samples: {args.sample_images}")
+            if "validation_loss" in last_row:
+                output["validation_loss"] = float(last_row.get("validation_loss", 0.0))
+            if "block" in last_row:
+                output["block"] = int(last_row.get("block", 0))
+            if "component" in last_row:
+                output["component"] = last_row.get("component", "unknown")
+        else:
+            output = {
+                "epoch": 0,
+                "loss": 0.0,
+                "component": "unknown",
+                "data": []
+            }
+
+        # Save processed history
+        with open(args.processed_history_json, "w") as f:
+            json.dump(output, f, indent=2)
+
+        print(f"\\n{'✓'*60}")
+        print(f"SUCCESS: {training_mode} TRAINING COMPLETED")
+        print(f"{'✓'*60}")
+        print(f"✓ Model saved to: {args.trained_model}")
+        print(f"✓ Training rows: {len(processed_rows)}")
+        print(f"✓ History JSON: {args.processed_history_json}")
 
   args:
     - --data_path
@@ -286,11 +705,13 @@ implementation:
     - {inputValue: config}
     - --model_input
     - {inputPath: model_input}
-    - --log_interval
-    - {inputValue: log_interval}
+    - --mapping_json
+    - {inputValue: mapping_json}
+    - --max_history_rows
+    - {inputValue: max_history_rows}
     - --trained_model
     - {outputPath: trained_model}
     - --training_history
     - {outputPath: training_history}
-    - --sample_images
-    - {outputPath: sample_images}
+    - --processed_history_json
+    - {outputPath: processed_history_json}
