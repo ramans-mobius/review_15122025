@@ -1,4 +1,4 @@
-name: Build Model v2
+name: Build Model v10
 description: Builds DCGAN model using your config format
 inputs:
   - name: config_str
