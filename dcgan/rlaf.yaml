@@ -1,430 +1,501 @@
-name: DCGAN RLAF Optimization
-description: Real Reinforcement Learning Assisted Fine-tuning for DCGAN
+name: DCGAN RLAF Loop
+description: Triggers the DCGAN RLAF pipeline in a loop to optimize GAN hyperparameters, controlled by a pierce_or_not flag.
 inputs:
-  - name: trained_model
-    type: Model
-  - name: data_path
-    type: Dataset
-  - name: config
-    type: String
-  - name: rlaf_iterations
-    type: Integer
-    default: "3"
-    description: "Number of RLAF iterations"
-  - name: hyperparameter_space
-    type: String
-    description: "JSON defining hyperparameter search space"
+  - {name: trained_model, type: Model}
+  - {name: init_metrics, type: Metrics}
+  - {name: data_path, type: Dataset}
+  - {name: config, type: String}
+  - {name: domain, type: String}
+  - {name: schema_id, type: String}
+  - {name: model_id, type: String}
+  - {name: dqn_pipeline_id, type: String}
+  - {name: pipeline_domain, type: String}
+  - {name: dqn_experiment_id, type: String}
+  - {name: access_token, type: String}
+  - {name: tasks, type: Dataset}
 outputs:
-  - name: optimized_model
-    type: Model
-  - name: optimization_history
-    type: String
-  - name: best_hyperparameters
-    type: String
-
+  - {name: rlaf_output, type: Dataset}
+  - {name: retrained_model, type: Model}
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v42
+    image: nikhilv215/nesy-factory:v23
     command:
       - sh
       - -c
       - |
-        echo "Starting DCGAN RLAF Optimization..."
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
         import torch
-        import argparse
-        import pickle
-        import json
         import os
-        import sys
+        import json
+        import argparse
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        import time
+        import pickle
+        from typing import List, Dict, Any
         import numpy as np
-        from torch.utils.data import DataLoader
-        import random
+        import torch.nn.functional as F
+        from torch.utils.data import DataLoader, TensorDataset
         
-        # Import from your DCGAN library
-        try:
-            from nesy_factory.GANs.dcgan import (
-                create_dcgan,
-                OptimizerFactory,
-                TrainerFactory,
-                DcganMetrics
-            )
-            print(" Successfully imported DCGAN modules")
-        except ImportError as e:
-            print(f" ERROR: Failed to import DCGAN modules: {e}")
-            sys.exit(1)
+        # ============================================================================
+        # CONSISTENT CLASSES (Match Preprocess brick)
+        # ============================================================================
         
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--trained_model', type=str, required=True)
-        parser.add_argument('--data_path', type=str, required=True)
-        parser.add_argument('--config', type=str, required=True)
-        parser.add_argument('--rlaf_iterations', type=int, default=3)
-        parser.add_argument('--hyperparameter_space', type=str, default='{}')
-        parser.add_argument('--optimized_model', type=str, required=True)
-        parser.add_argument('--optimization_history', type=str, required=True)
-        parser.add_argument('--best_hyperparameters', type=str, required=True)
-        args = parser.parse_args()
-        
-        print(f"\\n{'='*80}")
-        print(f" DCGAN RLAF OPTIMIZATION")
-        print(f"{'='*80}")
-        print(f"Iterations: {args.rlaf_iterations}")
-        
-        # Load config
-        config = json.loads(args.config)
-        train_config = config.get('train', {})
-        
-        # Load hyperparameter space
-        hp_space = json.loads(args.hyperparameter_space) if args.hyperparameter_space else {
-            'generator_lr': [0.0001, 0.0002, 0.0005],
-            'discriminator_lr': [0.0002, 0.0004, 0.001],
-            'batch_size': [32, 64, 128],
-            'z_dim': [50, 100, 200],
-            'learning_rate_decay': [0.95, 0.99, 1.0]
-        }
-        
-        print(f"\\n Hyperparameter Search Space:")
-        for key, values in hp_space.items():
-            print(f"  {key}: {values}")
-        
-        # Load data
-        with open(args.data_path, 'rb') as f:
-            data_wrapper = pickle.load(f)
-        
-        dataset = data_wrapper['dataset']
-        print(f"Dataset: {len(dataset)} samples")
-        
-        # Load model
-        print(f"\\n Loading model...")
-        checkpoint = torch.load(args.trained_model, map_location='cpu')
-        
-        if isinstance(checkpoint, dict) and 'config' in checkpoint:
-            original_config = checkpoint['config']
-            generator, discriminator, _ = create_dcgan(original_config)
+        class GANDataset:
+           
+            def __init__(self, data_list, transform=None, image_size=64, channels=3):
+                self.data_list = data_list
+                self.transform = transform
+                self.image_size = image_size
+                self.channels = channels
             
-            generator.load_state_dict(checkpoint['generator_state_dict'])
-            discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+            def __len__(self):
+                return len(self.data_list)
             
-            algorithm = checkpoint.get('training_algorithm', 'backprop')
-            print(f" Model loaded (Algorithm: {algorithm.upper()})")
-        else:
-            print(" Invalid checkpoint format")
-            sys.exit(1)
+            def __getitem__(self, idx):
+                return self.data_list[idx]
         
-        # Set device
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"Device: {device}")
+        class GANDataWrapper:
+           
+            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
+                        transform_params=None):
+                self.dataset = dataset
+                self.model_type = model_type
+                self.image_size = image_size
+                self.channels = channels
+                self.transform_params = transform_params or {}
+                self.num_samples = len(dataset)
+            
+            def __len__(self):
+                return len(self.dataset)
+            
+            def __getitem__(self, idx):
+                return self.dataset[idx]
         
-        generator.to(device)
-        discriminator.to(device)
+        class PreprocessMetadata:
+         
+            def __init__(self, image_size=64, channels=3, model_type='dcgan',
+                        mean=(0.5,), std=(0.5,), transform_params=None):
+                self.image_size = image_size
+                self.channels = channels
+                self.model_type = model_type
+                self.mean = mean
+                self.std = std
+                self.transform_params = transform_params or {}
         
-        # ================================================================
-        # REAL RLAF IMPLEMENTATION
-        # ================================================================
-        
-        def evaluate_model(generator, discriminator, data_loader, num_batches=5):
+        class TasksWrapper:
           
-            generator.eval()
-            discriminator.eval()
+            def __init__(self, tasks):
+                self.tasks = tasks
+                self.num_tasks = len(tasks)
             
-            real_scores = []
-            fake_scores = []
+            def __len__(self):
+                return len(self.tasks)
             
-            with torch.no_grad():
-                for batch_idx, batch in enumerate(data_loader):
-                    if batch_idx >= num_batches:
-                        break
-                    
-                    real_images = batch.to(device) if torch.is_tensor(batch) else batch[0].to(device)
-                    
-                    # Real images
-                    real_output = discriminator(real_images)
-                    real_scores.append(real_output.mean().item())
-                    
-                    # Generate fake images
-                    z = torch.randn(real_images.size(0), generator.z_dim, device=device)
-                    fake_images = generator(z)
-                    fake_output = discriminator(fake_images)
-                    fake_scores.append(fake_output.mean().item())
-            
-            avg_real = np.mean(real_scores) if real_scores else 0.0
-            avg_fake = np.mean(fake_scores) if fake_scores else 0.0
-            discriminator_gap = abs(avg_real - avg_fake)
-            
-            return {
-                'real_score': avg_real,
-                'fake_score': avg_fake,
-                'discriminator_gap': discriminator_gap,
-                'diversity_score': np.std(fake_scores) if fake_scores else 0.0
-            }
+            def __getitem__(self, idx):
+                return self.tasks[idx]
         
-        def train_with_hyperparameters(generator, discriminator, data_loader, hyperparams, epochs=2):
+        # Safe unpickler
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                try:
+                    return super().find_class(module, name)
+                except:
+                    if name == 'GANDataset':
+                        return GANDataset
+                    elif name == 'GANDataWrapper':
+                        return GANDataWrapper
+                    elif name == 'PreprocessMetadata':
+                        return PreprocessMetadata
+                    elif name == 'TasksWrapper':
+                        return TasksWrapper
+                    else:
+                        class FallbackClass:
+                            def __init__(self, *args, **kwargs):
+                                pass
+                        return FallbackClass
+        
+        # ============================================================================
+        # CONTINUAL GAN TRAINER (Uses consistent classes)
+        # ============================================================================
+        
+        class ContinualGANTrainer:
           
-            print(f"\\n  Training with different parameters: {hyperparams}")
             
-            # Create config with new hyperparameters
-            modified_config = original_config.copy()
+            def __init__(self, config: Dict[str, Any]):
+                self.config = config
+                self.results = {}
+                self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                print(f"Using device: {self.device}")
             
-            if 'generator_lr' in hyperparams:
-                modified_config['generator']['learning_rate'] = hyperparams['generator_lr']
+            def train_continual_gan(
+                self, 
+                tasks: List[Dict], 
+                generator, 
+                discriminator,
+                strategies: List[str] = ['naive']
+            ) -> Dict[str, Any]:
+             
+                results = {}
+                
+                for strategy_name in strategies:
+                    print(f'Training with {strategy_name.upper()} strategy')
+                    strategy_results = self._train_single_strategy(
+                        tasks, strategy_name, generator, discriminator
+                    )
+                    results[strategy_name] = strategy_results
+                    
+                return results
             
-            if 'discriminator_lr' in hyperparams:
-                modified_config['discriminator']['learning_rate'] = hyperparams['discriminator_lr']
-            
-            # Create optimizers
-            optimizer_g = OptimizerFactory.create_optimizer(generator, modified_config, 'generator')
-            optimizer_d = OptimizerFactory.create_optimizer(discriminator, modified_config, 'discriminator')
-            
-            # Create trainer
-            if algorithm == 'forward_forward':
-                from nesy_factory.GANs.dcgan import ForwardForwardTrainer
-                trainer = ForwardForwardTrainer(modified_config, device)
-            elif algorithm == 'cafo':
-                from nesy_factory.GANs.dcgan import CAFOTrainer
-                trainer = CAFOTrainer(modified_config, device)
-            else:
-                from nesy_factory.GANs.dcgan import BackpropTrainer
-                trainer = BackpropTrainer(modified_config, device)
-            
-            # Training history
-            history = []
-            
-            for epoch in range(epochs):
-                metrics = trainer.train_epoch(
-                    generator, discriminator, data_loader,
-                    optimizer_g, optimizer_d, epoch
+            def _train_single_strategy(
+                self, 
+                tasks: List[Dict], 
+                strategy_name: str, 
+                generator, 
+                discriminator
+            ) -> Dict[str, Any]:
+              
+                
+                task_metrics = []
+                all_task_performance = []
+                previous_task_data = []
+                
+                print(f" Learning {len(tasks)} sequential tasks")
+                
+                # Create optimizers
+                optimizer_g = torch.optim.Adam(
+                    generator.parameters(),
+                    lr=self.config.get('generator', {}).get('learning_rate', 0.0002),
+                    betas=(0.5, 0.999)
+                )
+                optimizer_d = torch.optim.Adam(
+                    discriminator.parameters(),
+                    lr=self.config.get('discriminator', {}).get('learning_rate', 0.0004),
+                    betas=(0.5, 0.999)
                 )
                 
-                history.append(metrics)
-                
-                if (epoch + 1) % 1 == 0:
-                    print(f"    Epoch {epoch+1}: G Loss: {metrics['g_loss']:.4f}, D Loss: {metrics['d_loss']:.4f}")
-            
-            return history
-        
-        def random_hyperparameter_search():
-          
-            hyperparams = {}
-            
-            for key, values in hp_space.items():
-                if isinstance(values, list):
-                    hyperparams[key] = random.choice(values)
-                elif isinstance(values, dict) and 'min' in values and 'max' in values:
-                    # Continuous range
-                    if 'log' in values and values['log']:
-                        # Log scale
-                        hyperparams[key] = np.exp(random.uniform(
-                            np.log(values['min']), 
-                            np.log(values['max'])
-                        ))
+                for task_idx, task_data in enumerate(tasks):
+                    task_desc = task_data.get('description', f'Task {task_idx}')
+                    print(f"Learning Task {task_idx + 1}: {task_desc}")
+                    
+                    # Get data loader for current task
+                    if strategy_name == 'naive':
+                        training_loader = task_data['train_loader']
+                    elif strategy_name == 'replay':
+                        if previous_task_data:
+                            training_loader = self._create_replay_loader(task_data, previous_task_data)
+                        else:
+                            training_loader = task_data['train_loader']
                     else:
-                        # Linear scale
-                        hyperparams[key] = random.uniform(values['min'], values['max'])
-                else:
-                    # Default to first value
-                    hyperparams[key] = values[0] if isinstance(values, list) else values
-            
-            return hyperparams
-        
-        def calculate_reward(metrics_before, metrics_after, hyperparams):
-            
-            # Reward based on improvement in discriminator gap
-            gap_improvement = metrics_after['discriminator_gap'] - metrics_before['discriminator_gap']
-            
-            # Reward for diversity
-            diversity_reward = metrics_after['diversity_score'] * 0.1
-            
-            # Penalty for extreme hyperparameters
-            penalty = 0.0
-            if 'generator_lr' in hyperparams and hyperparams['generator_lr'] > 0.001:
-                penalty += 0.1
-            if 'discriminator_lr' in hyperparams and hyperparams['discriminator_lr'] > 0.002:
-                penalty += 0.1
-            
-            total_reward = gap_improvement + diversity_reward - penalty
-            return total_reward
-        
-        # ================================================================
-        # RLAF OPTIMIZATION LOOP
-        # ================================================================
-        
-        print(f"\\n Starting RLAF Optimization Loop")
-        
-        # Create data loader
-        data_loader = DataLoader(
-            dataset,
-            batch_size=train_config.get('batch_size', 64),
-            shuffle=True,
-            drop_last=True
-        )
-        
-        # Initial evaluation
-        print(f"\\n Initial Evaluation:")
-        initial_metrics = evaluate_model(generator, discriminator, data_loader)
-        print(f"  Discriminator Gap: {initial_metrics['discriminator_gap']:.4f}")
-        print(f"  Real Score: {initial_metrics['real_score']:.4f}")
-        print(f"  Fake Score: {initial_metrics['fake_score']:.4f}")
-        
-        # Store best results
-        best_reward = -float('inf')
-        best_hyperparams = {}
-        best_model_state = {
-            'generator': copy.deepcopy(generator.state_dict()),
-            'discriminator': copy.deepcopy(discriminator.state_dict())
-        }
-        
-        optimization_history = {
-            'initial_metrics': initial_metrics,
-            'iterations': [],
-            'best_reward': best_reward,
-            'best_hyperparameters': {}
-        }
-        
-        # RLAF iterations
-        for iteration in range(args.rlaf_iterations):
-            print(f"\\n{'='*60}")
-            print(f"RLAF Iteration {iteration + 1}/{args.rlaf_iterations}")
-            print(f"{'='*60}")
-            
-            # Sample hyperparameters
-            hyperparams = random_hyperparameter_search()
-            print(f"\\n Testing hyperparameters:")
-            for key, value in hyperparams.items():
-                print(f"  {key}: {value}")
-            
-            # Create copy of model for this trial
-            trial_generator = create_dcgan(original_config)[0].to(device)
-            trial_discriminator = create_dcgan(original_config)[1].to(device)
-            
-            trial_generator.load_state_dict(generator.state_dict())
-            trial_discriminator.load_state_dict(discriminator.state_dict())
-            
-            # Evaluate before training
-            metrics_before = evaluate_model(trial_generator, trial_discriminator, data_loader)
-            
-            # Train with hyperparameters
-            training_history = train_with_hyperparameters(
-                trial_generator, trial_discriminator, data_loader, hyperparams, epochs=2
-            )
-            
-            # Evaluate after training
-            metrics_after = evaluate_model(trial_generator, trial_discriminator, data_loader)
-            
-            # Calculate reward
-            reward = calculate_reward(metrics_before, metrics_after, hyperparams)
-            
-            print(f"\\n Results:")
-            print(f"  Before - D Gap: {metrics_before['discriminator_gap']:.4f}")
-            print(f"  After  - D Gap: {metrics_after['discriminator_gap']:.4f}")
-            print(f"  Improvement: {metrics_after['discriminator_gap'] - metrics_before['discriminator_gap']:.4f}")
-            print(f"  Reward: {reward:.4f}")
-            
-            # Store iteration results
-            iteration_result = {
-                'iteration': iteration,
-                'hyperparameters': hyperparams,
-                'metrics_before': metrics_before,
-                'metrics_after': metrics_after,
-                'reward': reward,
-                'training_history': [{
-                    'g_loss': h['g_loss'],
-                    'd_loss': h['d_loss'],
-                    'real_score': h['real_score'],
-                    'fake_score': h['fake_score']
-                } for h in training_history]
-            }
-            
-            optimization_history['iterations'].append(iteration_result)
-            
-            # Update best if better
-            if reward > best_reward:
-                best_reward = reward
-                best_hyperparams = hyperparams
-                best_model_state = {
-                    'generator': copy.deepcopy(trial_generator.state_dict()),
-                    'discriminator': copy.deepcopy(trial_discriminator.state_dict())
+                        training_loader = task_data['train_loader']
+                    
+                    # Train on current task
+                    print(f"  Training on Task {task_idx + 1}")
+                    epochs_per_task = self.config.get('train', {}).get('epochs_per_task', 5)
+                    
+                    for epoch in range(epochs_per_task):
+                        generator.train()
+                        discriminator.train()
+                        
+                        total_g_loss = 0.0
+                        total_d_loss = 0.0
+                        
+                        for batch_idx, batch in enumerate(training_loader):
+                            real_images = batch if torch.is_tensor(batch) else batch[0]
+                            real_images = real_images.to(self.device)
+                            batch_size = real_images.size(0)
+                            
+                            # Train Discriminator
+                            optimizer_d.zero_grad()
+                            
+                            # Generate fake images
+                            z = torch.randn(batch_size, generator.z_dim, device=self.device)
+                            fake_images = generator(z).detach()
+                            
+                            # Forward pass
+                            real_output = discriminator(real_images)
+                            fake_output = discriminator(fake_images)
+                            
+                            # Calculate discriminator loss
+                            d_loss = self._calculate_discriminator_loss(
+                                discriminator, real_output, fake_output, real_images, fake_images
+                            )
+                            
+                            d_loss.backward()
+                            optimizer_d.step()
+                            
+                            # Train Generator
+                            optimizer_g.zero_grad()
+                            
+                            # Generate new fake images
+                            z = torch.randn(batch_size, generator.z_dim, device=self.device)
+                            fake_images = generator(z)
+                            fake_output = discriminator(fake_images)
+                            
+                            # Calculate generator loss
+                            g_loss = self._calculate_generator_loss(fake_output)
+                            g_loss.backward()
+                            optimizer_g.step()
+                            
+                            total_g_loss += g_loss.item()
+                            total_d_loss += d_loss.item()
+                        
+                        avg_g_loss = total_g_loss / len(training_loader)
+                        avg_d_loss = total_d_loss / len(training_loader)
+                        
+                        if epoch % max(1, epochs_per_task // 3) == 0:
+                            print(f"    Epoch {epoch:03d} | G Loss: {avg_g_loss:.4f} | D Loss: {avg_d_loss:.4f}")
+                    
+                    # Store task data for replay if needed
+                    if strategy_name == 'replay':
+                        previous_task_data.append(task_data)
+                        if len(previous_task_data) > 3:
+                            previous_task_data = previous_task_data[-3:]
+                    
+                    # Evaluate on current task
+                    current_metrics = self._evaluate_gan(generator, discriminator, task_data)
+                    task_metrics.append(current_metrics)
+                    
+                    print(f"     Task {task_idx + 1} Evaluation:")
+                    print(f"       Generator Loss: {current_metrics['generator_loss']:.4f}")
+                    print(f"       Discriminator Loss: {current_metrics['discriminator_loss']:.4f}")
+                    print(f"       Real Score: {current_metrics['real_score']:.4f}")
+                    print(f"       Fake Score: {current_metrics['fake_score']:.4f}")
+                    
+                    # Evaluate on all previous tasks
+                    task_performance = []
+                    for eval_task_idx in range(task_idx + 1):
+                        eval_metrics = self._evaluate_gan(generator, discriminator, tasks[eval_task_idx])
+                        task_performance.append({
+                            'task_id': eval_task_idx,
+                            'generator_loss': eval_metrics['generator_loss'],
+                            'discriminator_loss': eval_metrics['discriminator_loss'],
+                            'description': tasks[eval_task_idx].get('description', f'Task {eval_task_idx}')
+                        })
+                    
+                    all_task_performance.append(task_performance)
+                    
+                    # Print performance on previous tasks
+                    if task_idx > 0:
+                        print(f"    Performance on previous tasks:")
+                        for prev_task in task_performance[:-1]:
+                            print(f"      Task {prev_task['task_id'] + 1}: G Loss={prev_task['generator_loss']:.4f}, D Loss={prev_task['discriminator_loss']:.4f}")
+                
+                # Calculate continual learning metrics
+                cl_metrics = self._calculate_continual_metrics(all_task_performance)
+                
+                # Final evaluation on all tasks
+                final_eval_metrics = []
+                for i in range(len(tasks)):
+                    metrics = self._evaluate_gan(generator, discriminator, tasks[i])
+                    final_eval_metrics.append(metrics)
+                
+                # Average metrics
+                avg_metrics = {}
+                if final_eval_metrics:
+                    for key in final_eval_metrics[0]:
+                        avg_metrics[key] = np.mean([m[key] for m in final_eval_metrics])
+                
+                results = {
+                    'strategy': strategy_name,
+                    'task_metrics': task_metrics,
+                    'all_task_performance': all_task_performance,
+                    'continual_metrics': cl_metrics,
+                    'final_generator': generator,
+                    'final_discriminator': discriminator,
+                    'average_eval_metrics': avg_metrics
                 }
                 
-                print(f"   NEW BEST! Reward: {reward:.4f}")
+                return results
             
-            # Update main model with some probability (exploration vs exploitation)
-            if reward > 0 or random.random() < 0.3:  # 30% chance to explore
-                generator.load_state_dict(trial_generator.state_dict())
-                discriminator.load_state_dict(trial_discriminator.state_dict())
-                print(f"   Updated main model")
-        
-        # ================================================================
-        # FINALIZE AND SAVE
-        # ================================================================
-        
-        print(f"\\n{'='*80}")
-        print(f" RLAF OPTIMIZATION COMPLETED")
-        print(f"{'='*80}")
-        
-        # Load best model
-        generator.load_state_dict(best_model_state['generator'])
-        discriminator.load_state_dict(best_model_state['discriminator'])
-        
-        # Final evaluation
-        final_metrics = evaluate_model(generator, discriminator, data_loader, num_batches=10)
-        
-        print(f"\\n FINAL RESULTS:")
-        print(f"  Best Reward: {best_reward:.4f}")
-        print(f"  Final Discriminator Gap: {final_metrics['discriminator_gap']:.4f}")
-        print(f"  Improvement from initial: {final_metrics['discriminator_gap'] - initial_metrics['discriminator_gap']:.4f}")
-        
-        print(f"\\n BEST HYPERPARAMETERS:")
-        for key, value in best_hyperparams.items():
-            print(f"  {key}: {value}")
-        
-        # Update checkpoint
-        checkpoint['generator_state_dict'] = generator.state_dict()
-        checkpoint['discriminator_state_dict'] = discriminator.state_dict()
-        checkpoint['rlaf_optimization'] = {
-            'iterations': args.rlaf_iterations,
-            'best_reward': float(best_reward),
-            'best_hyperparameters': best_hyperparams,
-            'final_metrics': final_metrics,
-            'improvement': float(final_metrics['discriminator_gap'] - initial_metrics['discriminator_gap'])
-        }
-        
-        # Save outputs
-        os.makedirs(os.path.dirname(args.optimized_model), exist_ok=True)
-        os.makedirs(os.path.dirname(args.optimization_history), exist_ok=True)
-        os.makedirs(os.path.dirname(args.best_hyperparameters), exist_ok=True)
-        
-        torch.save(checkpoint, args.optimized_model)
-        
-        with open(args.optimization_history, 'w') as f:
-            json.dump(optimization_history, f, indent=2)
-        
-        with open(args.best_hyperparameters, 'w') as f:
-            json.dump(best_hyperparams, f, indent=2)
-        
-        print(f"\\n Outputs saved:")
-        print(f"  Optimized model: {args.optimized_model}")
-        print(f"  Optimization history: {args.optimization_history}")
-        print(f"  Best hyperparameters: {args.best_hyperparameters}")
-        print(f"{'='*80}")
+            def _create_replay_loader(self, current_task: Dict, previous_tasks: List[Dict]) -> DataLoader:
+             
+                replay_ratio = 0.3
+                
+                # Get samples from current task
+                current_samples = []
+                for batch in current_task['train_loader']:
+                    if torch.is_tensor(batch):
+                        current_samples.append(batch)
+                    else:
+                        current_samples.append(batch[0])
+                        break
+                
+                if not current_samples:
+                    return current_task['train_loader']
+                
+                current_batch = current_samples[0]
+                current_size = current_batch.size(0)
+                replay_size = int(current_size * replay_ratio)
+                
+                replay_samples = []
+                
+                # Collect replay samples from previous tasks
+                for prev_task in previous_tasks[-2:]:
+                    try:
+                        prev_samples = []
+                        for batch in prev_task['train_loader']:
+                            if torch.is_tensor(batch):
+                                prev_samples.append(batch)
+                            else:
+                                prev_samples.append(batch[0])
+                            break
+                        
+                        if prev_samples:
+                            replay_samples.append(prev_samples[0])
+                    except:
+                        continue
+                
+                # Combine current and replay samples
+                if replay_samples:
+                    replay_batch = torch.cat(replay_samples, dim=0)
+                    if replay_batch.size(0) > replay_size:
+                        indices = torch.randperm(replay_batch.size(0))[:replay_size]
+                        replay_batch = replay_batch[indices]
+                    
+                    combined_batch = torch.cat([current_batch, replay_batch], dim=0)
+                else:
+                    combined_batch = current_batch
+                
+                # Create new DataLoader
+                replay_dataset = TensorDataset(combined_batch)
+                return DataLoader(
+                    replay_dataset, 
+                    batch_size=self.config.get('train', {}).get('batch_size', 32),
+                    shuffle=True
+                )
+            
+            def _calculate_discriminator_loss(self, discriminator, real_output, fake_output, 
+                                            real_images=None, fake_images=None):
 
-  args:
-    - --trained_model
-    - {inputPath: trained_model}
-    - --data_path
-    - {inputPath: data_path}
-    - --config
-    - {inputValue: config}
-    - --rlaf_iterations
-    - {inputValue: rlaf_iterations}
-    - --hyperparameter_space
-    - {inputValue: hyperparameter_space}
-    - --optimized_model
-    - {outputPath: optimized_model}
-    - --optimization_history
-    - {outputPath: optimization_history}
-    - --best_hyperparameters
-    - {outputPath: best_hyperparameters}
+                try:
+                    if hasattr(discriminator, 'calculate_loss'):
+                        return discriminator.calculate_loss(real_output, fake_output, real_images, fake_images)
+                except:
+                    pass
+                
+                # Fallback: standard BCE loss
+                real_loss = F.binary_cross_entropy_with_logits(
+                    real_output, torch.ones_like(real_output)
+                )
+                fake_loss = F.binary_cross_entropy_with_logits(
+                    fake_output, torch.zeros_like(fake_output)
+                )
+                return (real_loss + fake_loss) / 2
+            
+            def _calculate_generator_loss(self, fake_output):
+            
+                return F.binary_cross_entropy_with_logits(
+                    fake_output, torch.ones_like(fake_output)
+                )
+            
+            def _evaluate_gan(self, generator, discriminator, task_data: Dict) -> Dict[str, float]:
+             
+                generator.eval()
+                discriminator.eval()
+                
+                test_loader = task_data.get('test_loader', task_data.get('train_loader'))
+                if test_loader is None:
+                    return {
+                        'generator_loss': 0.0,
+                        'discriminator_loss': 0.0,
+                        'real_score': 0.5,
+                        'fake_score': 0.5,
+                        'accuracy': 0.5
+                    }
+                
+                total_g_loss = 0.0
+                total_d_loss = 0.0
+                real_scores = []
+                fake_scores = []
+                total_batches = 0
+                
+                with torch.no_grad():
+                    for batch in test_loader:
+                        real_images = batch if torch.is_tensor(batch) else batch[0]
+                        real_images = real_images.to(self.device)
+                        batch_size = real_images.size(0)
+                        
+                        # Generate fake images
+                        z = torch.randn(batch_size, generator.z_dim, device=self.device)
+                        fake_images = generator(z)
+                        
+                        # Discriminator outputs
+                        real_output = discriminator(real_images)
+                        fake_output = discriminator(fake_images)
+                        
+                        # Calculate losses
+                        d_loss = self._calculate_discriminator_loss(
+                            discriminator, real_output, fake_output, real_images, fake_images
+                        )
+                        g_loss = self._calculate_generator_loss(fake_output)
+                        
+                        total_g_loss += g_loss.item()
+                        total_d_loss += d_loss.item()
+                        real_scores.append(real_output.mean().item())
+                        fake_scores.append(fake_output.mean().item())
+                        total_batches += 1
+                
+                if total_batches == 0:
+                    return {
+                        'generator_loss': 0.0,
+                        'discriminator_loss': 0.0,
+                        'real_score': 0.5,
+                        'fake_score': 0.5,
+                        'accuracy': 0.5
+                    }
+                
+                return {
+                    'generator_loss': total_g_loss / total_batches,
+                    'discriminator_loss': total_d_loss / total_batches,
+                    'real_score': np.mean(real_scores),
+                    'fake_score': np.mean(fake_scores),
+                    'accuracy': self._calculate_accuracy(real_scores, fake_scores)
+                }
+            
+            def _calculate_accuracy(self, real_scores, fake_scores, threshold=0.5):
+            
+                if not real_scores or not fake_scores:
+                    return 0.5
+                
+                real_correct = sum(1 for score in real_scores if score > threshold)
+                fake_correct = sum(1 for score in fake_scores if score < threshold)
+                total = len(real_scores) + len(fake_scores)
+                
+                return (real_correct + fake_correct) / total if total > 0 else 0.5
+            
+            def _calculate_continual_metrics(self, all_task_performance: List[List[Dict]]) -> Dict[str, float]:
+               
+                
+                if not all_task_performance or not all_task_performance[-1]:
+                    return {
+                        'average_generator_loss': 0.0,
+                        'average_discriminator_loss': 0.0,
+                        'backward_transfer': 0.0,
+                        'forgetting': 0.0,
+                        'num_tasks': 0
+                    }
+                
+                final_performance = all_task_performance[-1]
+                
+                avg_g_loss = np.mean([task['generator_loss'] for task in final_performance])
+                avg_d_loss = np.mean([task['discriminator_loss'] for task in final_performance])
+                
+                backward_transfers = []
+                if len(all_task_performance) > 1:
+                    for task_idx in range(len(all_task_performance) - 1):
+                        initial_loss = all_task_performance[task_idx][task_idx]['generator_loss']
+                        final_loss = all_task_performance[-1][task_idx]['generator_loss']
+                        backward_transfer = initial_loss - final_loss
+                        backward_transfers.append(backward_transfer)
+                
+                avg_backward_transfer = np.mean(backward_transfers) if backward_transfers else 0.0
+                
+                forgetting_scores = []
+                for task_idx in range(len(all_task_performance) - 1):
+                    min_loss
