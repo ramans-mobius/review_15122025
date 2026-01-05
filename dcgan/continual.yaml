@@ -38,74 +38,34 @@ implementation:
         from torch.utils.data import Dataset, DataLoader
         from typing import Dict, List, Any
         
-        # Define helper classes for pickle compatibility (Same as CNN)
-        class LabeledDataset:
-            def __init__(self, dataset=None, label_mapping=None):
-                self.dataset = dataset or []
-                self.label_mapping = label_mapping or {}
+        # ============================================================================
+        # CONSISTENT CLASSES (Match Preprocess brick)
+        # ============================================================================
+        
+        class GANDataset(Dataset):
+           
+            def __init__(self, data_list, transform=None, image_size=64, channels=3):
+                self.data_list = data_list
+                self.transform = transform
+                self.image_size = image_size
+                self.channels = channels
+            
             def __len__(self):
-                try:
-                    if hasattr(self.dataset, '__len__'):
-                        return len(self.dataset)
-                    return 100
-                except:
-                    return 100
+                return len(self.data_list)
+            
             def __getitem__(self, idx):
-                try:
-                    if hasattr(self.dataset, '__getitem__'):
-                        item = self.dataset[idx]
-                        if isinstance(item, tuple) and len(item) == 2:
-                            data, label = item
-                            return data, label
-                        elif isinstance(item, dict):
-                            data = item.get('image_data')
-                            label = item.get('label', 0)
-                            return data, label
-                        else:
-                            return item, 0
-                except:
-                    pass
-                return torch.randn(3, 224, 224), 0
-
-        class SimpleDataset:
-            def __init__(self, data=None):
-                self.data = data or []
-            def __len__(self):
-                try:
-                    if hasattr(self.data, '__len__'):
-                        length = len(self.data)
-                        if length > 0:
-                            return length
-                except:
-                    pass
-                return 100
-            def __getitem__(self, idx):
-                try:
-                    if hasattr(self.data, '__getitem__'):
-                        item = self.data[idx]
-                        if isinstance(item, tuple) and len(item) == 2:
-                            return item
-                        elif isinstance(item, dict):
-                            data = item.get('image_data')
-                            label = item.get('label', 0)
-                            return data, label
-                        else:
-                            return item, 0
-                except:
-                    pass
-                return torch.randn(3, 224, 224), 0
-
-        class DataWrapper:
-            def __init__(self, data_dict=None):
-                if data_dict:
-                    self.__dict__.update(data_dict)
-
-        class DCGANDatasetWrapper:
-            def __init__(self, dataset=None):
-                self.dataset = dataset or []
-                self.train_loader = None
-                self.test_loader = None
-                self.num_classes = 1  # DCGAN is unsupervised
+                return self.data_list[idx]
+        
+        class GANDataWrapper:
+        
+            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
+                        transform_params=None):
+                self.dataset = dataset
+                self.model_type = model_type
+                self.image_size = image_size
+                self.channels = channels
+                self.transform_params = transform_params or {}
+                self.num_samples = len(dataset)
             
             def __len__(self):
                 return len(self.dataset)
@@ -113,26 +73,48 @@ implementation:
             def __getitem__(self, idx):
                 return self.dataset[idx]
         
+        class TasksWrapper:
+            
+            def __init__(self, tasks):
+                self.tasks = tasks
+                self.num_tasks = len(tasks)
+            
+            def __len__(self):
+                return len(self.tasks)
+            
+            def __getitem__(self, idx):
+                return self.tasks[idx]
+        
         # Safe unpickler for loading data
         class SafeUnpickler(pickle.Unpickler):
             def find_class(self, module, name):
                 try:
                     return super().find_class(module, name)
                 except:
-                    if name == 'LabeledDataset':
-                        return LabeledDataset
-                    elif name == 'DataWrapper':
-                        return DataWrapper
-                    elif name == 'SimpleDataset':
-                        return SimpleDataset
-                    elif name == 'DCGANDatasetWrapper':
-                        return DCGANDatasetWrapper
+                    if name == 'GANDataset':
+                        return GANDataset
+                    elif name == 'GANDataWrapper':
+                        return GANDataWrapper
+                    elif name == 'TasksWrapper':
+                        return TasksWrapper
+                    elif name == 'PreprocessMetadata':
+                        # Define this class for compatibility
+                        class PreprocessMetadata:
+                            def __init__(self, image_size=64, channels=3, model_type='dcgan',
+                                        mean=(0.5,), std=(0.5,), transform_params=None):
+                                self.image_size = image_size
+                                self.channels = channels
+                                self.model_type = model_type
+                                self.mean = mean
+                                self.std = std
+                                self.transform_params = transform_params or {}
+                        return PreprocessMetadata
                     else:
                         class FallbackClass:
                             def __init__(self, *args, **kwargs):
                                 pass
                         return FallbackClass
-
+        
         parser = argparse.ArgumentParser()
         parser.add_argument('--data_pickle', type=str, required=True, help='Input DCGAN data pickle path')
         parser.add_argument('--splitting_strategy', type=str, default='domain_split', help='Split strategy')
@@ -141,10 +123,10 @@ implementation:
         parser.add_argument('--task_descriptions', type=str, required=True, help='Output task descriptions')
         parser.add_argument('--config', type=str, required=True, help='Configuration JSON string')
         args = parser.parse_args()
-
+        
         print("Starting DCGAN Continual Tasks Generator")
         print(f"Strategy: {args.splitting_strategy}, Num tasks: {args.num_tasks}")
-
+        
         # Load data with safe unpickler
         try:
             with open(args.data_pickle, 'rb') as f:
@@ -156,18 +138,26 @@ implementation:
             # Extract dataset from wrapper
             if hasattr(data, 'dataset'):
                 dataset = data.dataset
+                image_size = data.image_size
+                channels = data.channels
+                print(f"Dataset: {len(dataset)} samples, {image_size}x{image_size}, {channels} channels")
             elif isinstance(data, dict) and 'dataset' in data:
                 dataset = data['dataset']
+                image_size = data.get('image_size', 64)
+                channels = data.get('channels', 3)
+                print(f"Dataset: {len(dataset)} samples (dict format)")
             else:
                 dataset = data
+                image_size = 64
+                channels = 3
+                print(f"Dataset: {len(dataset)} samples (raw format)")
                 
-            print(f"Dataset type: {type(dataset)}, Length: {len(dataset)}")
         except Exception as e:
             print(f"Error loading data: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
-
+        
         # Parse config
         try:
             config = json.loads(args.config)
@@ -175,15 +165,15 @@ implementation:
         except Exception as e:
             print(f"Error loading config: {e}")
             sys.exit(1)
-
+        
         # Get GAN config
         gan_config = config.get('gan_config', {})
-        image_size = gan_config.get('dataset', {}).get('resize_size', 32)
-        channels = gan_config.get('generator', {}).get('image_channels', 1)
+        image_size = gan_config.get('dataset', {}).get('resize_size', image_size)
+        channels = gan_config.get('generator', {}).get('image_channels', channels)
         
         print(f"Image size: {image_size}, Channels: {channels}")
-
-        # Create DCGAN dataset wrapper
+        
+        # Create DCGAN task dataset
         class DCGANTaskDataset(Dataset):
             def __init__(self, images, task_id=0, domain_factor=0.0, style='original'):
                 self.images = images
@@ -204,17 +194,14 @@ implementation:
                 return img
             
             def apply_gan_domain_shift(self, img, factor, style):
-              
                 img = img.clone()
                 
                 if style == 'noise':
-                    # Add different noise levels
                     noise_level = 0.1 + factor * 0.3
                     img = img + torch.randn_like(img) * noise_level
                     img = torch.clamp(img, -1, 1)
                 
                 elif style == 'blur':
-                    # Apply Gaussian blur (simulated)
                     from torch.nn.functional import avg_pool2d
                     kernel_size = int(3 + factor * 7)
                     if kernel_size % 2 == 0:
@@ -224,14 +211,12 @@ implementation:
                         img = avg_pool2d(img.unsqueeze(0), kernel_size=kernel_size, stride=1, padding=kernel_size//2).squeeze(0)
                 
                 elif style == 'contrast':
-                    # Adjust contrast for GANs
                     mean = img.mean()
                     contrast_factor = 1.0 + factor * 1.0
                     img = (img - mean) * contrast_factor + mean
                     img = torch.clamp(img, -1, 1)
                 
                 elif style == 'color_shift' and img.shape[0] == 3:
-                    # Color shift for RGB GANs
                     shift = torch.tensor([
                         factor * 0.4,   # Red
                         factor * 0.2,   # Green
@@ -241,7 +226,7 @@ implementation:
                     img = torch.clamp(img, -1, 1)
                 
                 return img
-
+        
         # Split into continual tasks
         tasks = []
         task_descriptions_list = []
@@ -273,7 +258,7 @@ implementation:
                     continue
                 
                 # Create domain shift
-                domain_factor = task_id * 0.25  # Increasing domain shift
+                domain_factor = task_id * 0.25
                 style = styles[task_id % len(styles)]
                 
                 # Create task dataset
@@ -307,13 +292,7 @@ implementation:
             print(f"Using class_split strategy (simulated for GANs)...")
             
             # For GANs, simulate classes with different image characteristics
-            class_types = [
-                'sharp',      # High frequency
-                'smooth',     # Low frequency  
-                'textured',   # Textured patterns
-                'simple',     # Simple shapes
-                'complex'     # Complex patterns
-            ]
+            class_types = ['sharp', 'smooth', 'textured', 'simple', 'complex']
             
             for task_id in range(args.num_tasks):
                 start_idx = task_id * task_size
@@ -396,22 +375,8 @@ implementation:
                 print(f"  Task {task_id+1}: {len(task_dataset)} samples, Temporal factor: {temporal_factor:.2f}")
         
         else:
-            print(f"❌ Unknown splitting strategy: {args.splitting_strategy}")
-            print(f"Using domain_split instead")
-            # Would need to re-run with domain_split, but for simplicity continue
+            print(f" Unknown splitting strategy: {args.splitting_strategy}")
             sys.exit(1)
-        
-        # Create wrapper for tasks (similar to CNN format)
-        class TasksWrapper:
-            def __init__(self, tasks):
-                self.tasks = tasks
-                self.num_tasks = len(tasks)
-            
-            def __len__(self):
-                return len(self.tasks)
-            
-            def __getitem__(self, idx):
-                return self.tasks[idx]
         
         tasks_wrapper = TasksWrapper(tasks)
         
@@ -419,7 +384,7 @@ implementation:
         os.makedirs(os.path.dirname(args.tasks_pickle) or ".", exist_ok=True)
         with open(args.tasks_pickle, "wb") as f:
             pickle.dump(tasks_wrapper, f)
-
+        
         # Save task descriptions
         os.makedirs(os.path.dirname(args.task_descriptions) or ".", exist_ok=True)
         with open(args.task_descriptions, "w") as f:
@@ -429,7 +394,7 @@ implementation:
                 'descriptions': task_descriptions_list,
                 'total_samples': sum(t['size'] for t in tasks)
             }, f, indent=2)
-
+        
         print(f"\\n Saved {len(tasks)} continual learning tasks to {args.tasks_pickle}")
         print(f" Task descriptions saved to {args.task_descriptions}")
         for i, task in enumerate(tasks):
