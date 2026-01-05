@@ -1,4 +1,4 @@
-name: Load Dataset
+name: Load Dataset v10
 description: Universal dataset loader supporting CDN URLs, PyTorch datasets, HuggingFace, and local files.
 inputs:
   - name: dataset_type
