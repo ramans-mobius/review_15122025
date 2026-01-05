@@ -1,4 +1,4 @@
-name: Train v2
+name: Train v10
 description: Trains DCGAN using preprocessed data
 inputs:
   - name: data_path
