@@ -1,313 +1,313 @@
-- name: Evaluate v2
-  description: Evaluates DCGAN model with consistent FF/CAFO handling
-  inputs:
-    - name: trained_model
-      type: Model
-    - name: data_path
-      type: Dataset
-    - name: config
-      type: String
-  outputs:
-    - name: metrics
-      type: Metrics
-    - name: metrics_json
-      type: String
+name: Evaluate v2
+description: Evaluates DCGAN model with consistent FF/CAFO handling
+inputs:
+  - name: trained_model
+    type: Model
+  - name: data_path
+    type: Dataset
+  - name: config
+    type: String
+outputs:
+  - name: metrics
+    type: Metrics
+  - name: metrics_json
+    type: String
 
-  implementation:
-    container:
-      image: nikhilv215/nesy-factory:v23
-      command:
-        - sh
-        - -c
-        - |
-          python3 -m pip install --quiet --upgrade pip setuptools wheel
-          exec "$0" "$@"
-        - python3
-        - -u
-        - -c
-        - |
-          import torch
-          import argparse, pickle, json, os, io, sys, traceback
-          import numpy as np
-          from torch.utils.data import DataLoader
-          
-          # Import from your DCGAN library
-          try:
-              from nesy_factory.GANs.dcgan import (
-                  create_dcgan,
-                  DcganMetrics,
-                  DCGANEvaluator
-              )
-              print("✅ Successfully imported DCGAN modules")
-          except ImportError as e:
-              print(f"❌ ERROR: nesyfactory not available: {e}")
-              sys.exit(1)
-          
-          # ===========================================
-          # CONSISTENT UNPICKLER CLASSES (Same as CNN/DCGAN Train)
-          # ===========================================
-          
-          class LabeledDataset:
-              def __init__(self, *args, **kwargs):
-                  obj = kwargs.get("dataset") if "dataset" in kwargs else args[0] if args else kwargs
-                  self.dataset = getattr(obj, "dataset", None) or getattr(obj, "data", None) or obj
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v23
+    command:
+      - sh
+      - -c
+      - |
+        python3 -m pip install --quiet --upgrade pip setuptools wheel
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import torch
+        import argparse, pickle, json, os, io, sys, traceback
+        import numpy as np
+        from torch.utils.data import DataLoader
+        
+        # Import from your DCGAN library
+        try:
+            from nesy_factory.GANs.dcgan import (
+                create_dcgan,
+                DcganMetrics,
+                DCGANEvaluator
+            )
+            print(" Successfully imported DCGAN modules")
+        except ImportError as e:
+            print(f" ERROR: nesyfactory not available: {e}")
+            sys.exit(1)
+        
+        # ===========================================
+        # CONSISTENT UNPICKLER CLASSES (Same as CNN/DCGAN Train)
+        # ===========================================
+        
+        class LabeledDataset:
+            def __init__(self, *args, **kwargs):
+                obj = kwargs.get("dataset") if "dataset" in kwargs else args[0] if args else kwargs
+                self.dataset = getattr(obj, "dataset", None) or getattr(obj, "data", None) or obj
 
-              def __len__(self):
-                  try:
-                      return len(self.dataset)
-                  except:
-                      return 100
+            def __len__(self):
+                try:
+                    return len(self.dataset)
+                except:
+                    return 100
 
-              def __getitem__(self, idx):
-                  try:
-                      item = self.dataset[idx]
-                      if isinstance(item, tuple) and len(item) == 2:
-                          return item
-                      if isinstance(item, dict):
-                          return item.get("image_data"), item.get("label", 0)
-                  except:
-                      pass
-                  return torch.randn(3,224,224), 0
-          
-          class CustomJSONDataset(LabeledDataset):
-              def __init__(self, *args, **kwargs):
-                  super().__init__(*args, **kwargs)
+            def __getitem__(self, idx):
+                try:
+                    item = self.dataset[idx]
+                    if isinstance(item, tuple) and len(item) == 2:
+                        return item
+                    if isinstance(item, dict):
+                        return item.get("image_data"), item.get("label", 0)
+                except:
+                    pass
+                return torch.randn(3,224,224), 0
+        
+        class CustomJSONDataset(LabeledDataset):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
 
-          class DataWrapper:
-              def __init__(self, d=None):
-                  if d:
-                      self.__dict__.update(d)
+        class DataWrapper:
+            def __init__(self, d=None):
+                if d:
+                    self.__dict__.update(d)
 
-          # Safe unpickler (Same as CNN)
-          class SafeUnpickler(pickle.Unpickler):
-              def find_class(self, module, name):
-                  if name == "LabeledDataset":
-                      return LabeledDataset
-                  if name == "CustomJSONDataset":
-                      return CustomJSONDataset
-                  if name == "DataWrapper":
-                      return DataWrapper
-                  return super().find_class(module, name)
+        # Safe unpickler (Same as CNN)
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if name == "LabeledDataset":
+                    return LabeledDataset
+                if name == "CustomJSONDataset":
+                    return CustomJSONDataset
+                if name == "DataWrapper":
+                    return DataWrapper
+                return super().find_class(module, name)
 
-          # ===========================================
-          # MAIN EVALUATION LOGIC
-          # ===========================================
-          
-          parser = argparse.ArgumentParser()
-          parser.add_argument("--trained_model", required=True)
-          parser.add_argument("--data_path", required=True)
-          parser.add_argument("--config", required=True)
-          parser.add_argument("--metrics", required=True)
-          parser.add_argument("--metrics_json", required=True)
-          args = parser.parse_args()
+        # ===========================================
+        # MAIN EVALUATION LOGIC
+        # ===========================================
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--trained_model", required=True)
+        parser.add_argument("--data_path", required=True)
+        parser.add_argument("--config", required=True)
+        parser.add_argument("--metrics", required=True)
+        parser.add_argument("--metrics_json", required=True)
+        args = parser.parse_args()
 
-          print("=== STARTING DCGAN EVALUATION ===")
+        print("=== STARTING DCGAN EVALUATION ===")
 
-          # Load dataset using SafeUnpickler
-          with open(args.data_path, "rb") as f:
-              processed = SafeUnpickler(io.BytesIO(f.read())).load()
+        # Load dataset using SafeUnpickler
+        with open(args.data_path, "rb") as f:
+            processed = SafeUnpickler(io.BytesIO(f.read())).load()
 
-          # Extract data from DCGAN data wrapper
-          if hasattr(processed, 'dataset'):
-              dataset = processed['dataset']
-              print(f"Dataset: {len(dataset)} samples")
-          else:
-              dataset = processed
-              print(f"Dataset: {len(dataset)} samples (fallback format)")
+        # Extract data from DCGAN data wrapper
+        if hasattr(processed, 'dataset'):
+            dataset = processed['dataset']
+            print(f"Dataset: {len(dataset)} samples")
+        else:
+            dataset = processed
+            print(f"Dataset: {len(dataset)} samples (fallback format)")
 
-          # Load config
-          cfg = json.loads(args.config)
-          model_cfg = cfg.get("model", {})
+        # Load config
+        cfg = json.loads(args.config)
+        model_cfg = cfg.get("model", {})
 
-          # ---------------------------
-          # Load checkpoint and determine model type
-          # ---------------------------
-          print("Loading trained model...")
-          checkpoint = torch.load(args.trained_model, map_location='cpu')
-          
-          if isinstance(checkpoint, dict):
-              model_config = checkpoint.get('config', {})
-              training_mode = checkpoint.get('training_mode', 'unknown')
-              
-              # Create DCGAN models
-              generator, discriminator, _ = create_dcgan(model_config)
-              
-              # Load state dicts
-              if 'generator_state_dict' in checkpoint:
-                  generator.load_state_dict(checkpoint['generator_state_dict'], strict=False)
-              if 'discriminator_state_dict' in checkpoint:
-                  discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
-                  
-              print(f"✅ Model loaded (Training mode: {training_mode})")
-          else:
-              print("❌ Invalid checkpoint format")
-              sys.exit(1)
+        # ---------------------------
+        # Load checkpoint and determine model type
+        # ---------------------------
+        print("Loading trained model...")
+        checkpoint = torch.load(args.trained_model, map_location='cpu')
+        
+        if isinstance(checkpoint, dict):
+            model_config = checkpoint.get('config', {})
+            training_mode = checkpoint.get('training_mode', 'unknown')
+            
+            # Create DCGAN models
+            generator, discriminator, _ = create_dcgan(model_config)
+            
+            # Load state dicts
+            if 'generator_state_dict' in checkpoint:
+                generator.load_state_dict(checkpoint['generator_state_dict'], strict=False)
+            if 'discriminator_state_dict' in checkpoint:
+                discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
+                
+            print(f" Model loaded (Training mode: {training_mode})")
+        else:
+            print(" Invalid checkpoint format")
+            sys.exit(1)
 
-          # Update model_config with user config
-          for key, value in model_cfg.items():
-              if key not in model_config:
-                  model_config[key] = value
-          
-          device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-          model_config['device'] = str(device)
-          
-          print(f"Model training mode: {training_mode}")
-          
-          # Check FF/CAFO flags
-          use_forward_forward = 'forward' in training_mode.lower() or 'ff' in training_mode.lower()
-          use_cafo = 'cafo' in training_mode.lower()
-          
-          # Set device
-          generator.to(device)
-          discriminator.to(device)
-          
-          # Mark as trained if FF/CAFO
-          if use_forward_forward:
-              if hasattr(discriminator, 'ff_module'):
-                  discriminator.ff_trained = True
-                  print(f"✅ FF model marked as trained")
-          
-          if use_cafo:
-              if hasattr(generator, 'cafo_module'):
-                  generator.cafo_trained = True
-              if hasattr(discriminator, 'cafo_module'):
-                  discriminator.cafo_trained = True
-              print(f"✅ CAFO model marked as trained")
-          
-          # Set to eval mode
-          generator.eval()
-          discriminator.eval()
-          
-          # ---------------------------
-          # Create data loader
-          # ---------------------------
-          batch_size = cfg.get('train', {}).get('batch_size', 32)
-          test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-          
-          # ---------------------------
-          # Evaluate
-          # ---------------------------
-          print(f"\\nEvaluating DCGAN on {len(dataset)} samples...")
-          
-          # Create evaluator
-          evaluator = DCGANEvaluator(model_config, device)
-          
-          # Evaluate using DCGANEvaluator
-          eval_metrics = evaluator.evaluate(
-              generator, discriminator, 
-              test_loader,
-              num_batches=min(5, len(dataset) // batch_size)
-          )
-          
-          # Additional manual metrics
-          all_preds, all_targets = [], []
-          total_g_loss = 0.0
-          total_d_loss = 0.0
-          total_batches = 0
-          
-          with torch.no_grad():
-              for batch_idx, batch in enumerate(test_loader):
-                  if batch_idx >= 10:  # Limit to 10 batches for speed
-                      break
-                      
-                  real_images = batch.to(device) if torch.is_tensor(batch) else batch[0].to(device)
-                  
-                  # Generate fake images
-                  z = torch.randn(real_images.size(0), generator.z_dim, device=device)
-                  fake_images = generator(z)
-                  
-                  # Discriminator outputs
-                  real_output = discriminator(real_images)
-                  fake_output = discriminator(fake_images)
-                  
-                  # Generator loss
-                  g_loss = generator.calculate_loss(fake_output)
-                  
-                  # Discriminator loss (handle WGAN-GP)
-                  if hasattr(discriminator.loss_module, 'use_wgan_gp') and discriminator.loss_module.use_wgan_gp:
-                      d_loss = discriminator.calculate_loss(real_output, fake_output, real_images, fake_images)
-                  else:
-                      d_loss = discriminator.calculate_loss(real_output, fake_output)
-                  
-                  total_g_loss += g_loss.item()
-                  total_d_loss += d_loss.item()
-                  total_batches += 1
-                  
-                  # Collect discriminator scores for accuracy
-                  real_preds = (real_output > 0).float()
-                  fake_preds = (fake_output < 0).float()
-                  
-                  all_preds.extend(real_preds.cpu().tolist())
-                  all_preds.extend(fake_preds.cpu().tolist())
-                  
-                  all_targets.extend([1] * len(real_preds))
-                  all_targets.extend([0] * len(fake_preds))
-          
-          # Calculate accuracy
-          try:
-              correct = sum(1 for p, t in zip(all_preds, all_targets) if abs(p - t) < 0.5)
-              total = len(all_targets)
-              accuracy = float(correct / total) if total > 0 else 0.0
-          except Exception as e:
-              print(f"Warning: accuracy calculation failed: {e}")
-              accuracy = 0.0
-          
-          # Calculate average losses
-          avg_g_loss = float(total_g_loss / max(1, total_batches))
-          avg_d_loss = float(total_d_loss / max(1, total_batches))
-          
-          # Combine metrics
-          metrics_output = {
-              "accuracy": float(accuracy),
-              "generator_loss": float(avg_g_loss),
-              "discriminator_loss": float(avg_d_loss),
-              "training_mode": training_mode,
-              "num_samples": int(len(all_targets)),
-              "evaluation_success": True
-          }
-          
-          # Add DCGANEvaluator metrics
-          for key, value in eval_metrics.items():
-              if isinstance(value, (int, float)):
-                  metrics_output[f"dcgan_{key}"] = float(value)
-          
-          print(f"\\nEvaluation Metrics:")
-          print(f"  Accuracy: {float(accuracy):.4f}")
-          print(f"  Generator Loss: {avg_g_loss:.4f}")
-          print(f"  Discriminator Loss: {avg_d_loss:.4f}")
-          print(f"  Training Mode: {training_mode}")
-          
-          # ---------------------------
-          # Save outputs
-          # ---------------------------
-          os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
-          os.makedirs(os.path.dirname(args.metrics_json), exist_ok=True)
+        # Update model_config with user config
+        for key, value in model_cfg.items():
+            if key not in model_config:
+                model_config[key] = value
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model_config['device'] = str(device)
+        
+        print(f"Model training mode: {training_mode}")
+        
+        # Check FF/CAFO flags
+        use_forward_forward = 'forward' in training_mode.lower() or 'ff' in training_mode.lower()
+        use_cafo = 'cafo' in training_mode.lower()
+        
+        # Set device
+        generator.to(device)
+        discriminator.to(device)
+        
+        # Mark as trained if FF/CAFO
+        if use_forward_forward:
+            if hasattr(discriminator, 'ff_module'):
+                discriminator.ff_trained = True
+                print(f" FF model marked as trained")
+        
+        if use_cafo:
+            if hasattr(generator, 'cafo_module'):
+                generator.cafo_trained = True
+            if hasattr(discriminator, 'cafo_module'):
+                discriminator.cafo_trained = True
+            print(f" CAFO model marked as trained")
+        
+        # Set to eval mode
+        generator.eval()
+        discriminator.eval()
+        
+        # ---------------------------
+        # Create data loader
+        # ---------------------------
+        batch_size = cfg.get('train', {}).get('batch_size', 32)
+        test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        
+        # ---------------------------
+        # Evaluate
+        # ---------------------------
+        print(f"\\nEvaluating DCGAN on {len(dataset)} samples...")
+        
+        # Create evaluator
+        evaluator = DCGANEvaluator(model_config, device)
+        
+        # Evaluate using DCGANEvaluator
+        eval_metrics = evaluator.evaluate(
+            generator, discriminator, 
+            test_loader,
+            num_batches=min(5, len(dataset) // batch_size)
+        )
+        
+        # Additional manual metrics
+        all_preds, all_targets = [], []
+        total_g_loss = 0.0
+        total_d_loss = 0.0
+        total_batches = 0
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(test_loader):
+                if batch_idx >= 10:  # Limit to 10 batches for speed
+                    break
+                    
+                real_images = batch.to(device) if torch.is_tensor(batch) else batch[0].to(device)
+                
+                # Generate fake images
+                z = torch.randn(real_images.size(0), generator.z_dim, device=device)
+                fake_images = generator(z)
+                
+                # Discriminator outputs
+                real_output = discriminator(real_images)
+                fake_output = discriminator(fake_images)
+                
+                # Generator loss
+                g_loss = generator.calculate_loss(fake_output)
+                
+                # Discriminator loss (handle WGAN-GP)
+                if hasattr(discriminator.loss_module, 'use_wgan_gp') and discriminator.loss_module.use_wgan_gp:
+                    d_loss = discriminator.calculate_loss(real_output, fake_output, real_images, fake_images)
+                else:
+                    d_loss = discriminator.calculate_loss(real_output, fake_output)
+                
+                total_g_loss += g_loss.item()
+                total_d_loss += d_loss.item()
+                total_batches += 1
+                
+                # Collect discriminator scores for accuracy
+                real_preds = (real_output > 0).float()
+                fake_preds = (fake_output < 0).float()
+                
+                all_preds.extend(real_preds.cpu().tolist())
+                all_preds.extend(fake_preds.cpu().tolist())
+                
+                all_targets.extend([1] * len(real_preds))
+                all_targets.extend([0] * len(fake_preds))
+        
+        # Calculate accuracy
+        try:
+            correct = sum(1 for p, t in zip(all_preds, all_targets) if abs(p - t) < 0.5)
+            total = len(all_targets)
+            accuracy = float(correct / total) if total > 0 else 0.0
+        except Exception as e:
+            print(f"Warning: accuracy calculation failed: {e}")
+            accuracy = 0.0
+        
+        # Calculate average losses
+        avg_g_loss = float(total_g_loss / max(1, total_batches))
+        avg_d_loss = float(total_d_loss / max(1, total_batches))
+        
+        # Combine metrics
+        metrics_output = {
+            "accuracy": float(accuracy),
+            "generator_loss": float(avg_g_loss),
+            "discriminator_loss": float(avg_d_loss),
+            "training_mode": training_mode,
+            "num_samples": int(len(all_targets)),
+            "evaluation_success": True
+        }
+        
+        # Add DCGANEvaluator metrics
+        for key, value in eval_metrics.items():
+            if isinstance(value, (int, float)):
+                metrics_output[f"dcgan_{key}"] = float(value)
+        
+        print(f"\\nEvaluation Metrics:")
+        print(f"  Accuracy: {float(accuracy):.4f}")
+        print(f"  Generator Loss: {avg_g_loss:.4f}")
+        print(f"  Discriminator Loss: {avg_d_loss:.4f}")
+        print(f"  Training Mode: {training_mode}")
+        
+        # ---------------------------
+        # Save outputs
+        # ---------------------------
+        os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
+        os.makedirs(os.path.dirname(args.metrics_json), exist_ok=True)
 
-          with open(args.metrics_json, "w") as f:
-              json.dump(metrics_output, f, indent=2)
+        with open(args.metrics_json, "w") as f:
+            json.dump(metrics_output, f, indent=2)
 
-          # KFP metrics format
-          with open(args.metrics, "w") as f:
-              f.write(f"accuracy: {float(accuracy)}\\n")
-              f.write(f"generator_loss: {float(avg_g_loss)}\\n")
-              f.write(f"discriminator_loss: {float(avg_d_loss)}\\n")
-              f.write(f"training_mode: {training_mode}\\n")
+        # KFP metrics format
+        with open(args.metrics, "w") as f:
+            f.write(f"accuracy: {float(accuracy)}\\n")
+            f.write(f"generator_loss: {float(avg_g_loss)}\\n")
+            f.write(f"discriminator_loss: {float(avg_d_loss)}\\n")
+            f.write(f"training_mode: {training_mode}\\n")
 
-          print("\\n=== EVALUATION COMPLETE ===")
-          print(f"Training mode: {training_mode}")
-          print(f"Accuracy: {float(accuracy):.4f}")
-          print(f"Generator Loss: {avg_g_loss:.4f}")
-          print(f"Discriminator Loss: {avg_d_loss:.4f}")
-          print(f"Number of samples: {len(all_targets)}")
-          
-    args:
-      - --trained_model
-      - {inputPath: trained_model}
-      - --data_path
-      - {inputPath: data_path}
-      - --config
-      - {inputValue: config}
-      - --metrics
-      - {outputPath: metrics}
-      - --metrics_json
-      - {outputPath: metrics_json}
+        print("\\n=== EVALUATION COMPLETE ===")
+        print(f"Training mode: {training_mode}")
+        print(f"Accuracy: {float(accuracy):.4f}")
+        print(f"Generator Loss: {avg_g_loss:.4f}")
+        print(f"Discriminator Loss: {avg_d_loss:.4f}")
+        print(f"Number of samples: {len(all_targets)}")
+        
+  args:
+    - --trained_model
+    - {inputPath: trained_model}
+    - --data_path
+    - {inputPath: data_path}
+    - --config
+    - {inputValue: config}
+    - --metrics
+    - {outputPath: metrics}
+    - --metrics_json
+    - {outputPath: metrics_json}
