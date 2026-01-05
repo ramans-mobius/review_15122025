@@ -1,4 +1,3 @@
-
 name: Train v2
 description: Trains DCGAN using nesyfactory with consistent FF/CAFO logging
 inputs:
