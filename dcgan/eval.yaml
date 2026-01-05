@@ -1,4 +1,4 @@
-name: Evaluate v2
+name: Evaluate v10
 description: Evaluates DCGAN model using preprocess metadata for consistent test data processing
 inputs:
   - name: trained_model
