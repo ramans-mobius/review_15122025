@@ -1,0 +1,601 @@
+name: Trigger Pipeline 
+description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
+inputs:
+  # CDN URLs from Upload Data To CDN brick
+  - name: train_data_url
+    type: String
+    description: "URL to uploaded train dataset"
+  - name: test_data_url
+    type: String
+    description: "URL to uploaded test dataset"
+  - name: dataset_info_url
+    type: String
+    description: "URL to uploaded dataset info"
+  - name: data_config_url
+    type: String
+    description: "URL to uploaded data config"
+  - name: processed_data_url
+    type: String
+    description: "URL to uploaded processed data"
+  - name: preprocess_metadata_url
+    type: String
+    description: "URL to uploaded preprocess metadata"
+  - name: gan_config_url
+    type: String
+    description: "URL to uploaded GAN config"
+  - name: upload_summary
+    type: String
+    description: "JSON summary of uploaded URLs"
+  
+  # Authentication
+  - name: access_token
+    type: String
+    description: "Bearer token for pipeline trigger authentication"
+  
+  # Pipeline configuration
+  - name: domain
+    type: String
+    description: "Domain for the pipeline trigger API"
+  - name: pipeline_id
+    type: String
+    description: "ID of the DCGAN pipeline to trigger"
+  - name: experiment_id
+    type: String
+    description: "ID of the Kubeflow experiment"
+  
+  # Pipeline parameters
+  - name: master_config
+    type: String
+    description: "Master configuration JSON for DCGAN"
+  - name: splitting_strategy
+    type: String
+    description: "Splitting strategy for continual learning tasks"
+  - name: num_tasks
+    type: Integer
+    description: "Number of continual learning tasks"
+  - name: load_from_cdn
+    type: String
+    description: "Flag to load model from CDN"
+  - name: cdn_url
+    type: String
+    description: "CDN URL for loading pre-trained model"
+  
+  # IAM authentication parameters
+  - name: userName
+    type: String
+    description: "Username for IAM authentication"
+  - name: password
+    type: String
+    description: "Password for IAM authentication"
+  - name: requesttype
+    type: String
+    description: "Request type for IAM authentication"
+  - name: productid
+    type: String
+    description: "Product ID for IAM authentication"
+  
+  # DQN/RLAF parameters
+  - name: dqn_experiment_id
+    type: String
+    description: "ID for DQN experiment"
+  - name: pipeline_domain
+    type: String
+    description: "Domain for pipeline operations"
+  - name: dqn_pipeline_id
+    type: String
+    description: "ID of DQN pipeline"
+  - name: schema_id
+    type: String
+    description: "Schema ID for metrics"
+  - name: model_id
+    type: String
+    description: "Model ID for tracking"
+
+outputs:
+  - name: trigger_response
+    type: String
+    description: "JSON response from pipeline trigger"
+  - name: run_id
+    type: String
+    description: "Pipeline run ID"
+  - name: trigger_status
+    type: String
+    description: "Trigger status summary"
+
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v23
+    command:
+      - sh
+      - -ec
+      - |
+        if ! command -v curl &> /dev/null; then
+            echo "curl could not be found, installing..."
+            apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        fi
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import subprocess
+        import json
+        import os
+        import urllib.parse
+        import time
+        
+        parser = argparse.ArgumentParser(description="Trigger DCGAN pipeline.")
+        
+        # CDN URLs from Upload Data To CDN
+        parser.add_argument('--train_data_url', type=str, required=True)
+        parser.add_argument('--test_data_url', type=str, required=True)
+        parser.add_argument('--dataset_info_url', type=str, required=True)
+        parser.add_argument('--data_config_url', type=str, required=True)
+        parser.add_argument('--processed_data_url', type=str, required=True)
+        parser.add_argument('--preprocess_metadata_url', type=str, required=True)
+        parser.add_argument('--gan_config_url', type=str, required=True)
+        parser.add_argument('--upload_summary', type=str, required=True)
+        
+        # Authentication
+        parser.add_argument('--access_token', type=str, required=True)
+        
+        # Pipeline configuration
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--pipeline_id', type=str, required=True)
+        parser.add_argument('--experiment_id', type=str, required=True)
+        
+        # Pipeline parameters
+        parser.add_argument('--master_config', type=str, required=True)
+        parser.add_argument('--splitting_strategy', type=str, required=True)
+        parser.add_argument('--num_tasks', type=int, required=True)
+        parser.add_argument('--load_from_cdn', type=str, required=True)
+        parser.add_argument('--cdn_url', type=str, required=True)
+        
+        # IAM authentication
+        parser.add_argument('--userName', type=str, required=True)
+        parser.add_argument('--password', type=str, required=True)
+        parser.add_argument('--requesttype', type=str, required=True)
+        parser.add_argument('--productid', type=str, required=True)
+        
+        # DQN/RLAF parameters
+        parser.add_argument('--dqn_experiment_id', type=str, required=True)
+        parser.add_argument('--pipeline_domain', type=str, required=True)
+        parser.add_argument('--dqn_pipeline_id', type=str, required=True)
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--model_id', type=str, required=True)
+        
+        # Outputs
+        parser.add_argument('--trigger_response', type=str, required=True)
+        parser.add_argument('--run_id', type=str, required=True)
+        parser.add_argument('--trigger_status', type=str, required=True)
+        
+        args = parser.parse_args()
+        
+        def fix_cdn_url(url):
+          
+            if not url:
+                return url
+            
+            print(f"Processing URL: {url}...")
+            
+            # Step 1: Decode any existing URL encoding
+            try:
+                url = urllib.parse.unquote(url)
+            except:
+                pass
+            
+            # Step 2: Handle special patterns
+            # Preserve $$ pattern by temporarily replacing
+            url = url.replace("$$", "__DOUBLE_DOLLAR_PLACEHOLDER__")
+            
+            # Step 3: Handle _ENC( pattern
+            if "_ENC(" in url:
+                print("Found _ENC( pattern - preserving")
+            elif "_ENC%28" in url:
+                url = url.replace("_ENC%28", "_ENC(")
+            
+            # Step 4: Remove any spaces
+            url = url.replace(" ", "")
+            
+            # Step 5: Now encode for JSON transmission
+            # First, handle special patterns we want to preserve
+            url = url.replace("_ENC(", "__ENC_PAREN_PLACEHOLDER__")
+            
+            # Encode the URL
+            if "://" in url:
+                parts = list(urllib.parse.urlsplit(url))
+                parts[2] = urllib.parse.quote(parts[2], safe="/")
+                if parts[3]:
+                    parts[3] = urllib.parse.quote(parts[3], safe="=&")
+                if parts[4]:
+                    parts[4] = urllib.parse.quote(parts[4], safe="")
+                encoded_url = urllib.parse.urlunsplit(parts)
+            else:
+                encoded_url = urllib.parse.quote(url, safe="/:?=&%")
+            
+            # Restore patterns
+            encoded_url = encoded_url.replace("__ENC_PAREN_PLACEHOLDER__", "_ENC%28")
+            encoded_url = encoded_url.replace("__DOUBLE_DOLLAR_PLACEHOLDER__", "%24%24")
+            
+            # Handle closing parenthesis for _ENC%28
+            if "_ENC%28" in encoded_url and ")" in encoded_url:
+                enc_pos = encoded_url.find("_ENC%28")
+                paren_pos = encoded_url.find(")", enc_pos)
+                if paren_pos != -1:
+                    encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
+            
+            print(f"Encoded URL: {encoded_url}...")
+            return encoded_url
+        
+        def load_upload_summary(summary_path):
+          
+            try:
+                with open(summary_path, 'r') as f:
+                    summary = json.load(f)
+                return summary
+            except Exception as e:
+                print(f"Warning: Could not load upload summary: {e}")
+                return {}
+        
+        print("=== DCGAN Pipeline Trigger ===")
+        print(f"Pipeline ID: {args.pipeline_id}")
+        print(f"Experiment ID: {args.experiment_id}")
+        print(f"Domain: {args.domain}")
+        
+        # Load upload summary
+        upload_summary = load_upload_summary(args.upload_summary)
+        
+        # Fix all CDN URLs
+        print("\\n=== Fixing CDN URLs ===")
+        fixed_urls = {}
+        
+        urls_to_fix = {
+            'train_data_url': args.train_data_url,
+            'test_data_url': args.test_data_url,
+            'dataset_info_url': args.dataset_info_url,
+            'data_config_url': args.data_config_url,
+            'processed_data_url': args.processed_data_url,
+            'preprocess_metadata_url': args.preprocess_metadata_url,
+            'gan_config_url': args.gan_config_url
+        }
+        
+        for key, url in urls_to_fix.items():
+            fixed_urls[key] = fix_cdn_url(url)
+        
+        # Read access token
+        with open(args.access_token, 'r') as f:
+            access_token = f.read().strip()
+        
+        # Build trigger URL
+        trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
+        
+        # Build payload with all pipeline parameters
+        payload = {
+            "pipelineType": "ML",
+            "containerResources": {},
+            "experimentId": args.experiment_id,
+            "enableCaching": True,
+            "parameters": {
+                # Master config
+                "master_config": args.master_config,
+                
+                # CDN URLs
+                "train_data_url": fixed_urls['train_data_url'],
+                "test_data_url": fixed_urls['test_data_url'],
+                "dataset_info_url": fixed_urls['dataset_info_url'],
+                "data_config_url": fixed_urls['data_config_url'],
+                "processed_data_url": fixed_urls['processed_data_url'],
+                "preprocess_metadata_url": fixed_urls['preprocess_metadata_url'],
+                "gan_config_url": fixed_urls['gan_config_url'],
+                "upload_summary_url": fix_cdn_url(args.upload_summary) if args.upload_summary else "",
+                
+                # Model loading parameters
+                "load_from_cdn": args.load_from_cdn,
+                "cdn_url": args.cdn_url,
+                
+                # Continual learning parameters
+                "splitting_strategy": args.splitting_strategy,
+                "num_tasks": str(args.num_tasks),
+                
+                # IAM authentication parameters
+                "userName": args.userName,
+                "password": args.password,
+                "productId": args.productid,
+                "requestType": args.requesttype,
+                "domain": args.domain,
+                
+                # DQN/RLAF parameters
+                "dqn_experiment_id": args.dqn_experiment_id,
+                "pipeline_domain": args.pipeline_domain,
+                "dqn_pipeline_id": args.dqn_pipeline_id,
+                "schema_id": args.schema_id,
+                "model_id": args.model_id
+            },
+            "version": 1
+        }
+        
+        # Add upload summary info to payload if available
+        if upload_summary:
+            payload['parameters']['upload_summary_info'] = {
+                'total_uploads': upload_summary.get('total_uploads', 0),
+                'total_size_mb': upload_summary.get('total_size_mb', 0)
+            }
+        
+        print(f"\\n=== Pipeline Payload Summary ===")
+        print(f"Parameters count: {len(payload['parameters'])}")
+        print(f"CDN URLs included: {len([k for k in payload['parameters'] if k.endswith('_url')])}")
+        
+        # Display URL previews
+        print("\\n=== URL Previews ===")
+        for key in ['train_data_url', 'processed_data_url', 'gan_config_url']:
+            if key in payload['parameters']:
+                url = payload['parameters'][key]
+                print(f"{key}: {url[:80]}...")
+        
+        print(f"\\n=== Complete Payload ===")
+        print(json.dumps(payload, indent=2)[:500] + "..." if len(json.dumps(payload)) > 500 else json.dumps(payload, indent=2))
+        
+        # Prepare curl command
+        headers = {
+            "accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        print(f"\\n=== Triggering Pipeline ===")
+        print(f"URL: {trigger_url}")
+        
+        # Create curl command
+        curl_command = [
+            "curl",
+            "--location", trigger_url,
+            "--header", f"accept: {headers['accept']}",
+            "--header", f"Authorization: {headers['Authorization']}",
+            "--header", f"Content-Type: {headers['Content-Type']}",
+            "--data", json.dumps(payload),
+            "--fail",
+            "--show-error",
+            "--connect-timeout", "30",
+            "--max-time", "120"
+        ]
+        
+        # Display curl command for debugging
+        print("\\n=== Curl Command (simplified) ===")
+        print(f"curl --location '{trigger_url}' \\")
+        print(f"  --header 'accept: application/json' \\")
+        print(f"  --header 'Authorization: Bearer ...' \\")
+        print(f"  --header 'Content-Type: application/json' \\")
+        print(f"  --data '{{...payload...}}'")
+        
+        # Save payload to file for manual use
+        os.makedirs('/tmp/pipeline_trigger', exist_ok=True)
+        payload_file = '/tmp/pipeline_trigger/dcgan_payload.json'
+        with open(payload_file, 'w') as f:
+            json.dump(payload, f, indent=2)
+        print(f"\\nPayload saved to: {payload_file}")
+        
+        # Trigger pipeline
+        print("\\n=== Executing Trigger ===")
+        max_retries = 3
+        retry_delay = 10
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"Attempt {attempt + 1}/{max_retries}")
+                
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                print("Trigger successful!")
+                print(f"Response status: {process.returncode}")
+                
+                # Parse response
+                try:
+                    response = json.loads(process.stdout)
+                    print(f"Response parsed successfully")
+                    
+                    # Extract run ID if available
+                    run_id = response.get('run_id', response.get('id', 'unknown'))
+                    
+                    # Save outputs
+                    os.makedirs(os.path.dirname(args.trigger_response) or '.', exist_ok=True)
+                    with open(args.trigger_response, 'w') as f:
+                        json.dump(response, f, indent=2)
+                    
+                    os.makedirs(os.path.dirname(args.run_id) or '.', exist_ok=True)
+                    with open(args.run_id, 'w') as f:
+                        f.write(str(run_id))
+                    
+                    # Create status summary
+                    status_summary = {
+                        'status': 'success',
+                        'run_id': run_id,
+                        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        'pipeline_id': args.pipeline_id,
+                        'experiment_id': args.experiment_id,
+                        'attempts': attempt + 1
+                    }
+                    
+                    os.makedirs(os.path.dirname(args.trigger_status) or '.', exist_ok=True)
+                    with open(args.trigger_status, 'w') as f:
+                        json.dump(status_summary, f, indent=2)
+                    
+                    print(f"\\n=== Trigger Summary ===")
+                    print(f"Status: SUCCESS")
+                    print(f"Run ID: {run_id}")
+                    print(f"Response saved to: {args.trigger_response}")
+                    print(f"Run ID saved to: {args.run_id}")
+                    print(f"Status saved to: {args.trigger_status}")
+                    
+                    break  # Success, exit retry loop
+                    
+                except json.JSONDecodeError:
+                    print(f"Warning: Response is not valid JSON")
+                    print(f"Raw response: {process.stdout[:200]}")
+                    
+                    # Save raw response
+                    with open(args.trigger_response, 'w') as f:
+                        f.write(process.stdout)
+                    
+                    # Generate a run ID
+                    run_id = f"run_{int(time.time())}"
+                    with open(args.run_id, 'w') as f:
+                        f.write(run_id)
+                    
+                    status_summary = {
+                        'status': 'partial_success',
+                        'run_id': run_id,
+                        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        'note': 'Response not valid JSON',
+                        'raw_response_preview': process.stdout[:200]
+                    }
+                    
+                    with open(args.trigger_status, 'w') as f:
+                        json.dump(status_summary, f, indent=2)
+                    
+                    break
+                
+            except subprocess.CalledProcessError as e:
+                print(f"Trigger attempt {attempt + 1} failed")
+                print(f"Exit code: {e.returncode}")
+                print(f"Error output: {e.stderr[:200]}")
+                print(f"Standard output: {e.stdout[:200]}")
+                
+                if attempt < max_retries - 1:
+                    print(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    print("Max retries reached")
+                    
+                    # Save error information
+                    error_info = {
+                        'status': 'failed',
+                        'error': 'Max retries exceeded',
+                        'last_exit_code': e.returncode,
+                        'last_stderr': e.stderr[:500],
+                        'last_stdout': e.stdout[:500],
+                        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        'attempts': attempt + 1
+                    }
+                    
+                    os.makedirs(os.path.dirname(args.trigger_response) or '.', exist_ok=True)
+                    with open(args.trigger_response, 'w') as f:
+                        json.dump(error_info, f, indent=2)
+                    
+                    os.makedirs(os.path.dirname(args.run_id) or '.', exist_ok=True)
+                    with open(args.run_id, 'w') as f:
+                        f.write("failed")
+                    
+                    os.makedirs(os.path.dirname(args.trigger_status) or '.', exist_ok=True)
+                    with open(args.trigger_status, 'w') as f:
+                        json.dump({'status': 'failed', 'error': 'Max retries exceeded'}, f, indent=2)
+                    
+                    raise Exception(f"Pipeline trigger failed after {max_retries} attempts")
+            
+            except Exception as e:
+                print(f"Unexpected error during trigger attempt {attempt + 1}: {e}")
+                
+                if attempt < max_retries - 1:
+                    print(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    print("Max retries reached")
+                    
+                    error_info = {
+                        'status': 'failed',
+                        'error': str(e),
+                        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        'attempts': attempt + 1
+                    }
+                    
+                    with open(args.trigger_response, 'w') as f:
+                        json.dump(error_info, f, indent=2)
+                    
+                    with open(args.run_id, 'w') as f:
+                        f.write("failed")
+                    
+                    with open(args.trigger_status, 'w') as f:
+                        json.dump({'status': 'failed', 'error': str(e)}, f, indent=2)
+                    
+                    raise
+        
+        print("\\n=== Trigger Process Complete ===")
+        
+    args:
+      # CDN URLs
+      - --train_data_url
+      - {inputValue: train_data_url}
+      - --test_data_url
+      - {inputValue: test_data_url}
+      - --dataset_info_url
+      - {inputValue: dataset_info_url}
+      - --data_config_url
+      - {inputValue: data_config_url}
+      - --processed_data_url
+      - {inputValue: processed_data_url}
+      - --preprocess_metadata_url
+      - {inputValue: preprocess_metadata_url}
+      - --gan_config_url
+      - {inputValue: gan_config_url}
+      - --upload_summary
+      - {inputPath: upload_summary}
+      
+      # Authentication
+      - --access_token
+      - {inputPath: access_token}
+      
+      # Pipeline configuration
+      - --domain
+      - {inputValue: domain}
+      - --pipeline_id
+      - {inputValue: pipeline_id}
+      - --experiment_id
+      - {inputValue: experiment_id}
+      
+      # Pipeline parameters
+      - --master_config
+      - {inputValue: master_config}
+      - --splitting_strategy
+      - {inputValue: splitting_strategy}
+      - --num_tasks
+      - {inputValue: num_tasks}
+      - --load_from_cdn
+      - {inputValue: load_from_cdn}
+      - --cdn_url
+      - {inputValue: cdn_url}
+      
+      # IAM authentication
+      - --userName
+      - {inputValue: userName}
+      - --password
+      - {inputValue: password}
+      - --requesttype
+      - {inputValue: requesttype}
+      - --productid
+      - {inputValue: productid}
+      
+      # DQN/RLAF parameters
+      - --dqn_experiment_id
+      - {inputValue: dqn_experiment_id}
+      - --pipeline_domain
+      - {inputValue: pipeline_domain}
+      - --dqn_pipeline_id
+      - {inputValue: dqn_pipeline_id}
+      - --schema_id
+      - {inputValue: schema_id}
+      - --model_id
+      - {inputValue: model_id}
+      
+      # Outputs
+      - --trigger_response
+      - {outputPath: trigger_response}
+      - --run_id
+      - {outputPath: run_id}
+      - --trigger_status
+      - {outputPath: trigger_status}
