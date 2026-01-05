@@ -1,15 +1,13 @@
-name: Evaluate v10
-description: Evaluates DCGAN model using preprocess metadata for consistent test data processing
+name: Evaluate 
+description: Evaluates DCGAN model using single master config
 inputs:
   - name: trained_model
     type: Model
   - name: test_data
     type: Dataset
-    description: "Raw test data from Load Dataset"
   - name: preprocess_metadata
     type: String
-    description: "Preprocessing metadata from Preprocess brick"
-  - name: config
+  - name: master_config
     type: String
 outputs:
   - name: metrics
@@ -24,7 +22,6 @@ implementation:
       - sh
       - -c
       - |
-        python3 -m pip install --quiet --upgrade pip setuptools wheel
         exec "$0" "$@"
       - python3
       - -u
@@ -38,7 +35,6 @@ implementation:
         from PIL import Image
         from torch.utils.data import DataLoader, Dataset
         
-        # Import from your DCGAN library
         try:
             from nesy_factory.GANs.dcgan import (
                 create_dcgan,
@@ -50,12 +46,53 @@ implementation:
             print(f" ERROR: nesyfactory not available: {e}")
             sys.exit(1)
         
-        # ============================================================================
-        # COMPATIBILITY CLASSES (Must match Preprocess brick)
-        # ============================================================================
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--trained_model", required=True)
+        parser.add_argument("--test_data", required=True)
+        parser.add_argument("--preprocess_metadata", required=True)
+        parser.add_argument("--master_config", required=True)
+        parser.add_argument("--metrics", required=True)
+        parser.add_argument("--metrics_json", required=True)
+        args = parser.parse_args()
         
+        print("=== STARTING DCGAN EVALUATION ===")
+        
+        # Parse master config
+        config = json.loads(args.master_config)
+        gan_cfg = config['gan']
+        
+        # Load raw test data
+        with open(args.test_data, "rb") as f:
+            test_data_raw = pickle.load(f)
+        
+        print(f"Raw test data samples: {len(test_data_raw)}")
+        
+        # Load preprocessing metadata
+        with open(args.preprocess_metadata, "rb") as f:
+            preprocess_meta = pickle.load(f)
+        
+        print(f"Preprocessing metadata loaded:")
+        print(f"  Image size: {preprocess_meta.image_size}")
+        print(f"  Channels: {preprocess_meta.channels}")
+        
+        # Create the same transform used for training
+        if preprocess_meta.channels == 1:
+            transform = transforms.Compose([
+                transforms.Resize(preprocess_meta.image_size),
+                transforms.CenterCrop(preprocess_meta.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
+            ])
+        else:
+            transform = transforms.Compose([
+                transforms.Resize(preprocess_meta.image_size),
+                transforms.CenterCrop(preprocess_meta.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
+            ])
+        
+        # Define GANDataset class (must match Preprocess brick)
         class GANDataset(Dataset):
-           
             def __init__(self, data_list, transform=None, image_size=64, channels=3):
                 self.data_list = data_list
                 self.transform = transform
@@ -84,64 +121,6 @@ implementation:
                     print(f"Error processing test image {idx}: {e}")
                     return torch.zeros(self.channels, self.image_size, self.image_size)
         
-        class PreprocessMetadata:
-          
-            def __init__(self, image_size=64, channels=3, model_type='dcgan',
-                        mean=(0.5,), std=(0.5,), transform_params=None):
-                self.image_size = image_size
-                self.channels = channels
-                self.model_type = model_type
-                self.mean = mean
-                self.std = std
-                self.transform_params = transform_params or {}
-        
-        # ============================================================================
-        # MAIN EVALUATION LOGIC
-        # ============================================================================
-        
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--trained_model", required=True)
-        parser.add_argument("--test_data", required=True)
-        parser.add_argument("--preprocess_metadata", required=True)
-        parser.add_argument("--config", required=True)
-        parser.add_argument("--metrics", required=True)
-        parser.add_argument("--metrics_json", required=True)
-        args = parser.parse_args()
-        
-        print("=== STARTING DCGAN EVALUATION ===")
-        
-        # Load raw test data
-        with open(args.test_data, "rb") as f:
-            test_data_raw = pickle.load(f)
-        
-        print(f"Raw test data samples: {len(test_data_raw)}")
-        
-        # Load preprocessing metadata
-        with open(args.preprocess_metadata, "rb") as f:
-            preprocess_meta = pickle.load(f)
-        
-        print(f"Preprocessing metadata loaded:")
-        print(f"  Image size: {preprocess_meta.image_size}")
-        print(f"  Channels: {preprocess_meta.channels}")
-        print(f"  Mean: {preprocess_meta.mean}")
-        print(f"  Std: {preprocess_meta.std}")
-        
-        # Create the same transform used for training
-        if preprocess_meta.channels == 1:
-            transform = transforms.Compose([
-                transforms.Resize(preprocess_meta.image_size),
-                transforms.CenterCrop(preprocess_meta.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
-            ])
-        else:
-            transform = transforms.Compose([
-                transforms.Resize(preprocess_meta.image_size),
-                transforms.CenterCrop(preprocess_meta.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
-            ])
-        
         # Create preprocessed test dataset
         test_dataset = GANDataset(
             test_data_raw,
@@ -152,12 +131,19 @@ implementation:
         
         print(f"Preprocessed test dataset: {len(test_dataset)} samples")
         
-        # Load model and configuration
+        # Load model
         checkpoint = torch.load(args.trained_model, map_location='cpu')
         
         if isinstance(checkpoint, dict):
             model_config = checkpoint.get('config', {})
             training_mode = checkpoint.get('training_mode', 'unknown')
+            
+            # Merge with master config
+            model_config.update({
+                'generator': gan_cfg['generator'],
+                'discriminator': gan_cfg['discriminator'],
+                'train': gan_cfg['training']
+            })
             
             # Create DCGAN models
             generator, discriminator, full_config = create_dcgan(model_config)
@@ -173,14 +159,7 @@ implementation:
             print(" Invalid checkpoint format")
             sys.exit(1)
         
-        # Update model_config with user config
-        cfg = json.loads(args.config)
-        for key, value in cfg.items():
-            if key not in model_config:
-                model_config[key] = value
-        
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model_config['device'] = str(device)
         
         # Set device
         generator.to(device)
@@ -191,14 +170,14 @@ implementation:
         discriminator.eval()
         
         # Create data loader
-        batch_size = cfg.get('train', {}).get('batch_size', 32)
+        batch_size = gan_cfg['training'].get('batch_size', 32)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         
         # Evaluate
         print(f"\\nEvaluating DCGAN on {len(test_dataset)} test samples...")
         
         # Create evaluator
-        evaluator = DCGANEvaluator(model_config, device)
+        evaluator = DCGANEvaluator(full_config, device)
         
         # Evaluate using DCGANEvaluator
         eval_metrics = evaluator.evaluate(
@@ -215,7 +194,7 @@ implementation:
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(test_loader):
-                if batch_idx >= 10:  # Limit to 10 batches for speed
+                if batch_idx >= 10:
                     break
                     
                 real_images = batch
@@ -232,17 +211,14 @@ implementation:
                 # Generator loss
                 g_loss = generator.calculate_loss(fake_output)
                 
-                # Discriminator loss (handle WGAN-GP)
-                if hasattr(discriminator.loss_module, 'use_wgan_gp') and discriminator.loss_module.use_wgan_gp:
-                    d_loss = discriminator.calculate_loss(real_output, fake_output, real_images, fake_images)
-                else:
-                    d_loss = discriminator.calculate_loss(real_output, fake_output)
+                # Discriminator loss
+                d_loss = discriminator.calculate_loss(real_output, fake_output)
                 
                 total_g_loss += g_loss.item()
                 total_d_loss += d_loss.item()
                 total_batches += 1
                 
-                # Collect discriminator scores for accuracy
+                # Collect discriminator scores
                 real_preds = (real_output > 0).float()
                 fake_preds = (fake_output < 0).float()
                 
@@ -284,8 +260,6 @@ implementation:
         print(f"  Accuracy: {float(accuracy):.4f}")
         print(f"  Generator Loss: {avg_g_loss:.4f}")
         print(f"  Discriminator Loss: {avg_d_loss:.4f}")
-        print(f"  Training Mode: {training_mode}")
-        print(f"  Test samples evaluated: {len(all_targets)}")
         
         # Save outputs
         os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
@@ -300,7 +274,6 @@ implementation:
             f.write(f"generator_loss: {float(avg_g_loss)}\\n")
             f.write(f"discriminator_loss: {float(avg_d_loss)}\\n")
             f.write(f"training_mode: {training_mode}\\n")
-            f.write(f"num_samples: {len(all_targets)}\\n")
         
         print("\\n=== EVALUATION COMPLETE ===")
         
@@ -311,8 +284,8 @@ implementation:
       - {inputPath: test_data}
       - --preprocess_metadata
       - {inputPath: preprocess_metadata}
-      - --config
-      - {inputValue: config}
+      - --master_config
+      - {inputValue: master_config}
       - --metrics
       - {outputPath: metrics}
       - --metrics_json
