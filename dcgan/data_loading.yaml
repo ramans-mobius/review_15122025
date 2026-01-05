@@ -24,10 +24,13 @@ inputs:
 outputs:
   - name: train_data
     type: Dataset
+    description: "Raw training data (base64 images)"
   - name: test_data
     type: Dataset
+    description: "Raw test data (base64 images)"
   - name: dataset_info
     type: DatasetInfo
+    description: "Dataset metadata and statistics"
   - name: data_config
     type: String
     description: "Data configuration for next steps"
@@ -39,32 +42,6 @@ implementation:
       - sh
       - -c
       - |
-        set -e  # Exit on any error
-        
-        echo "Updating package lists..."
-        apt-get update
-        
-        echo "Installing system dependencies for torchvision..."
-        apt-get install -y libjpeg-dev zlib1g-dev libpng-dev
-        
-        echo "Checking Python environment..."
-        python --version
-        pip --version
-        
-        echo "Installing torchvision..."
-        # Try multiple installation methods
-        pip install torchvision==0.15.2 --no-cache-dir || \
-        pip install torchvision --no-cache-dir || \
-        { echo "Torchvision installation failed, trying with --index-url..." && \
-          pip install torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cpu --no-cache-dir; }
-        
-        echo "Installing requests if needed..."
-        pip install requests --no-cache-dir
-        
-        echo "Verifying installations..."
-        python -c "import torchvision; print(f'Torchvision version: {torchvision.__version__}')"
-        python -c "import requests; print('Requests installed successfully')"
-        
         echo "Starting dataset loader..."
         exec "$0" "$@"
       - python3
@@ -89,7 +66,6 @@ implementation:
         from pathlib import Path
         import shutil
         from collections import Counter
-        import importlib
         
         # Enable loading of truncated images
         ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -263,7 +239,7 @@ implementation:
             
             return dataset
         
-        # Load PyTorch vision dataset
+        # Load PyTorch vision dataset with BOTH train and test splits
         def load_torchvision_dataset(dataset_name, config, download_path='./data'):
             print(f'Loading PyTorch dataset: {dataset_name}')
             print(f'Download path: {download_path}')
@@ -292,42 +268,36 @@ implementation:
                     'mnist': {
                         'class': datasets.MNIST,
                         'root': os.path.join(download_path, 'mnist'),
-                        'train': True,
                         'download': True,
                         'transform': transform
                     },
                     'fashionmnist': {
                         'class': datasets.FashionMNIST,
                         'root': os.path.join(download_path, 'fashion-mnist'),
-                        'train': True,
                         'download': True,
                         'transform': transform
                     },
                     'cifar10': {
                         'class': datasets.CIFAR10,
                         'root': os.path.join(download_path, 'cifar10'),
-                        'train': True,
                         'download': True,
                         'transform': transform
                     },
                     'cifar100': {
                         'class': datasets.CIFAR100,
                         'root': os.path.join(download_path, 'cifar100'),
-                        'train': True,
                         'download': True,
                         'transform': transform
                     },
                     'celeba': {
                         'class': datasets.CelebA,
                         'root': os.path.join(download_path, 'celeba'),
-                        'split': 'train',
                         'download': True,
                         'transform': transform
                     },
                     'stl10': {
                         'class': datasets.STL10,
                         'root': os.path.join(download_path, 'stl10'),
-                        'split': 'train',
                         'download': True,
                         'transform': transform
                     }
@@ -336,114 +306,196 @@ implementation:
                 if dataset_name not in dataset_configs:
                     print(f'Unsupported torchvision dataset: {dataset_name}')
                     print(f'Supported datasets: {list(dataset_configs.keys())}')
-                    return []
+                    return [], []
                 
                 # Load dataset
                 ds_config = dataset_configs[dataset_name]
                 print(f'Loading from: {ds_config["root"]}')
                 
+                # LOAD BOTH TRAIN AND TEST SPLITS
+                train_dataset = None
+                test_dataset = None
+                
                 try:
-                    if 'split' in ds_config:
+                    if dataset_name == 'celeba':
+                        # CelebA has splits parameter
                         train_dataset = ds_config['class'](
                             root=ds_config['root'],
-                            split=ds_config['split'],
+                            split='train',
                             download=ds_config['download'],
+                            transform=ds_config['transform']
+                        )
+                        test_dataset = ds_config['class'](
+                            root=ds_config['root'],
+                            split='test',
+                            download=False,
+                            transform=ds_config['transform']
+                        )
+                    elif dataset_name == 'stl10':
+                        # STL10 has splits parameter
+                        train_dataset = ds_config['class'](
+                            root=ds_config['root'],
+                            split='train',
+                            download=ds_config['download'],
+                            transform=ds_config['transform']
+                        )
+                        test_dataset = ds_config['class'](
+                            root=ds_config['root'],
+                            split='test',
+                            download=False,
                             transform=ds_config['transform']
                         )
                     else:
+                        # Standard datasets with train/test splits (MNIST, CIFAR, etc.)
                         train_dataset = ds_config['class'](
                             root=ds_config['root'],
-                            train=ds_config['train'],
+                            train=True,
                             download=ds_config['download'],
                             transform=ds_config['transform']
                         )
+                        test_dataset = ds_config['class'](
+                            root=ds_config['root'],
+                            train=False,
+                            download=False,
+                            transform=ds_config['transform']
+                        )
+                    
+                    print(f'✓ Loaded {len(train_dataset)} training samples')
+                    print(f'✓ Loaded {len(test_dataset)} test samples')
+                    
                 except Exception as e:
                     print(f'Failed to load dataset: {e}')
                     print('Trying without download...')
                     try:
-                        if 'split' in ds_config:
+                        if dataset_name == 'celeba':
                             train_dataset = ds_config['class'](
                                 root=ds_config['root'],
-                                split=ds_config['split'],
+                                split='train',
+                                download=False,
+                                transform=ds_config['transform']
+                            )
+                            test_dataset = ds_config['class'](
+                                root=ds_config['root'],
+                                split='test',
+                                download=False,
+                                transform=ds_config['transform']
+                            )
+                        elif dataset_name == 'stl10':
+                            train_dataset = ds_config['class'](
+                                root=ds_config['root'],
+                                split='train',
+                                download=False,
+                                transform=ds_config['transform']
+                            )
+                            test_dataset = ds_config['class'](
+                                root=ds_config['root'],
+                                split='test',
                                 download=False,
                                 transform=ds_config['transform']
                             )
                         else:
                             train_dataset = ds_config['class'](
                                 root=ds_config['root'],
-                                train=ds_config['train'],
+                                train=True,
                                 download=False,
                                 transform=ds_config['transform']
                             )
+                            test_dataset = ds_config['class'](
+                                root=ds_config['root'],
+                                train=False,
+                                download=False,
+                                transform=ds_config['transform']
+                            )
+                        
+                        print(f'✓ Loaded {len(train_dataset)} training samples (without download)')
+                        print(f'✓ Loaded {len(test_dataset)} test samples (without download)')
+                        
                     except Exception as e2:
                         print(f'Failed even without download: {e2}')
-                        return []
+                        return [], []
                 
                 # Convert to our format
-                dataset = []
-                sample_limit = config.get('max_samples', len(train_dataset))
-                
-                print(f'Converting {min(sample_limit, len(train_dataset))} samples to base64 format...')
-                
-                for idx in range(min(sample_limit, len(train_dataset))):
-                    try:
-                        img, label = train_dataset[idx]
-                        
-                        # Convert tensor to PIL Image, then to bytes
-                        if isinstance(img, torch.Tensor):
-                            # Convert to PIL Image
-                            if img.shape[0] == 1:  # Grayscale
-                                img_np = img.squeeze(0).numpy()
-                                # Denormalize: [-1, 1] -> [0, 1] -> [0, 255]
-                                img_np = ((img_np * 0.5 + 0.5) * 255).clip(0, 255).astype(np.uint8)
-                                img_pil = Image.fromarray(img_np, mode='L')
-                            else:  # RGB or other channels
-                                # Permute to HWC format
-                                if len(img.shape) == 3:
-                                    img_np = img.permute(1, 2, 0).numpy()
-                                else:
-                                    img_np = img.numpy()
-                                # Denormalize
-                                img_np = ((img_np * 0.5 + 0.5) * 255).clip(0, 255).astype(np.uint8)
-                                if img_np.shape[2] == 3:
-                                    img_pil = Image.fromarray(img_np, mode='RGB')
-                                elif img_np.shape[2] == 1:
-                                    img_pil = Image.fromarray(img_np[:,:,0], mode='L')
-                                else:
-                                    # Handle other channel counts
-                                    continue
-                        else:
-                            # Already PIL Image
-                            img_pil = img
-                        
-                        # Convert to bytes
-                        img_bytes = io.BytesIO()
-                        img_pil.save(img_bytes, format='PNG')
-                        base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
-                        
-                        dataset.append({
-                            'image_data': base64_data,
-                            'label': str(label),
-                            'dataset': dataset_name,
-                            'index': idx,
-                            'original_shape': list(img.shape) if isinstance(img, torch.Tensor) else 'pil'
-                        })
-                        
-                        if idx % 1000 == 0 and idx > 0:
-                            print(f'  Processed {idx} samples...')
+                def convert_dataset_to_base64(dataset, dataset_name, split_name, sample_limit=None):
+                    converted_data = []
+                    
+                    if sample_limit is None:
+                        sample_limit = len(dataset)
+                    
+                    print(f'Converting {min(sample_limit, len(dataset))} {split_name} samples to base64 format...')
+                    
+                    for idx in range(min(sample_limit, len(dataset))):
+                        try:
+                            img, label = dataset[idx]
                             
-                    except Exception as e:
-                        print(f'Failed to process sample {idx}: {e}')
-                        continue
+                            # Convert tensor to PIL Image, then to bytes
+                            if isinstance(img, torch.Tensor):
+                                # Convert to PIL Image
+                                if img.shape[0] == 1:  # Grayscale
+                                    img_np = img.squeeze(0).numpy()
+                                    # Denormalize: [-1, 1] -> [0, 1] -> [0, 255]
+                                    img_np = ((img_np * 0.5 + 0.5) * 255).clip(0, 255).astype(np.uint8)
+                                    img_pil = Image.fromarray(img_np, mode='L')
+                                else:  # RGB or other channels
+                                    # Permute to HWC format
+                                    if len(img.shape) == 3:
+                                        img_np = img.permute(1, 2, 0).numpy()
+                                    else:
+                                        img_np = img.numpy()
+                                    # Denormalize
+                                    img_np = ((img_np * 0.5 + 0.5) * 255).clip(0, 255).astype(np.uint8)
+                                    if img_np.shape[2] == 3:
+                                        img_pil = Image.fromarray(img_np, mode='RGB')
+                                    elif img_np.shape[2] == 1:
+                                        img_pil = Image.fromarray(img_np[:,:,0], mode='L')
+                                    else:
+                                        continue
+                            else:
+                                # Already PIL Image
+                                img_pil = img
+                            
+                            # Convert to bytes
+                            img_bytes = io.BytesIO()
+                            img_pil.save(img_bytes, format='PNG')
+                            base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
+                            
+                            converted_data.append({
+                                'image_data': base64_data,
+                                'label': str(label),
+                                'dataset': dataset_name,
+                                'split': split_name,
+                                'index': idx,
+                                'original_shape': list(img.shape) if isinstance(img, torch.Tensor) else 'pil'
+                            })
+                            
+                            if idx % 1000 == 0 and idx > 0:
+                                print(f'  Processed {idx} {split_name} samples...')
+                                
+                        except Exception as e:
+                            print(f'Failed to process sample {idx}: {e}')
+                            continue
+                    
+                    print(f'Successfully converted {len(converted_data)} {split_name} samples')
+                    return converted_data
                 
-                print(f'Successfully converted {len(dataset)} samples')
-                return dataset
+                # Convert both splits
+                max_samples = config.get('max_samples')
+                train_data = convert_dataset_to_base64(
+                    train_dataset, dataset_name, 'train', 
+                    max_samples if max_samples else None
+                )
+                
+                test_data = convert_dataset_to_base64(
+                    test_dataset, dataset_name, 'test',
+                    max_samples if max_samples else None
+                )
+                
+                return train_data, test_data
                 
             except Exception as e:
                 print(f'Failed to load torchvision dataset: {e}')
                 import traceback
                 traceback.print_exc()
-                return []
+                return [], []
         
         # Load HuggingFace dataset
         def load_huggingface_dataset(dataset_name, config):
@@ -461,22 +513,28 @@ implementation:
                 # Load dataset
                 hf_dataset = load_dataset(repo_id)
                 
-                # Determine split
-                split = config.get('split', 'train')
-                if split not in hf_dataset:
-                    split = 'train'
+                # Get train and test splits
+                train_split = config.get('split', 'train')
+                test_split = config.get('test_split', 'test')
                 
-                dataset = []
-                data_subset = hf_dataset[split]
-                sample_limit = config.get('max_samples', len(data_subset))
+                if train_split not in hf_dataset:
+                    train_split = 'train'
+                if test_split not in hf_dataset:
+                    test_split = 'test' if 'test' in hf_dataset else 'validation'
                 
-                # Convert samples
-                for idx, sample in enumerate(data_subset):
-                    if idx >= sample_limit:
+                train_data = []
+                test_data = []
+                sample_limit = config.get('max_samples')
+                
+                # Convert train split
+                train_subset = hf_dataset[train_split]
+                train_limit = sample_limit if sample_limit else len(train_subset)
+                
+                for idx, sample in enumerate(train_subset):
+                    if idx >= train_limit:
                         break
                         
                     try:
-                        # Handle different HuggingFace dataset formats
                         if 'image' in sample:
                             img = sample['image']
                             if hasattr(img, 'save'):
@@ -488,77 +546,144 @@ implementation:
                         else:
                             continue
                         
-                        # Get label
                         label = str(sample.get('label', sample.get('labels', idx)))
                         
-                        dataset.append({
+                        train_data.append({
                             'image_data': base64_data,
                             'label': label,
                             'dataset': dataset_name,
-                            'split': split,
+                            'split': train_split,
                             'index': idx
                         })
                         
                     except Exception as e:
-                        print(f'Failed to process sample {idx}: {e}')
+                        print(f'Failed to process train sample {idx}: {e}')
                         continue
                 
-                return dataset
+                # Convert test split
+                test_subset = hf_dataset[test_split]
+                test_limit = sample_limit if sample_limit else len(test_subset)
+                
+                for idx, sample in enumerate(test_subset):
+                    if idx >= test_limit:
+                        break
+                        
+                    try:
+                        if 'image' in sample:
+                            img = sample['image']
+                            if hasattr(img, 'save'):
+                                img_bytes = io.BytesIO()
+                                img.save(img_bytes, format='PNG')
+                                base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
+                            else:
+                                continue
+                        else:
+                            continue
+                        
+                        label = str(sample.get('label', sample.get('labels', idx)))
+                        
+                        test_data.append({
+                            'image_data': base64_data,
+                            'label': label,
+                            'dataset': dataset_name,
+                            'split': test_split,
+                            'index': idx
+                        })
+                        
+                    except Exception as e:
+                        print(f'Failed to process test sample {idx}: {e}')
+                        continue
+                
+                return train_data, test_data
                 
             except Exception as e:
                 print(f'Failed to load HuggingFace dataset: {e}')
-                return []
+                return [], []
         
         # Main loading logic
-        loaded_dataset = []
+        loaded_train_data = []
+        loaded_test_data = []
         
         print(f'\\nProcessing dataset type: {args.dataset_type}')
         
         if args.dataset_type == 'cdn_url' or args.dataset_type == 'custom_url':
             print('Processing URL/CDN dataset...')
-            # Download from URL
             with tempfile.TemporaryDirectory() as temp_dir:
                 archive_path = download_from_url(args.dataset_path, temp_dir)
                 if archive_path:
                     extract_dir = os.path.join(temp_dir, 'extracted')
                     extracted_path = extract_archive(archive_path, extract_dir)
                     if extracted_path:
-                        loaded_dataset = load_images_from_dir(extracted_path, config.get('max_samples'))
+                        all_data = load_images_from_dir(extracted_path, config.get('max_samples'))
+                        if all_data:
+                            if len(all_data) > 1:
+                                train_size = int(args.train_split * len(all_data))
+                                test_size = len(all_data) - train_size
+                                
+                                if train_size > 0 and test_size > 0:
+                                    train_indices, test_indices = random_split(
+                                        range(len(all_data)), 
+                                        [train_size, test_size],
+                                        generator=torch.Generator().manual_seed(args.shuffle_seed)
+                                    )
+                                    
+                                    loaded_train_data = [all_data[i] for i in train_indices]
+                                    loaded_test_data = [all_data[i] for i in test_indices]
+                                    print(f'Split: {len(loaded_train_data)} train, {len(loaded_test_data)} test samples')
+                                else:
+                                    print('Warning: Dataset too small for splitting')
+                                    loaded_train_data = all_data
+                                    loaded_test_data = []
                 else:
                     print('Failed to download from URL')
         
         elif args.dataset_type == 'local_dir':
             print('Processing local directory dataset...')
-            # Load from local directory
-            loaded_dataset = load_images_from_dir(args.dataset_path, config.get('max_samples'))
+            all_data = load_images_from_dir(args.dataset_path, config.get('max_samples'))
+            if all_data:
+                if len(all_data) > 1:
+                    train_size = int(args.train_split * len(all_data))
+                    test_size = len(all_data) - train_size
+                    
+                    if train_size > 0 and test_size > 0:
+                        train_indices, test_indices = random_split(
+                            range(len(all_data)), 
+                            [train_size, test_size],
+                            generator=torch.Generator().manual_seed(args.shuffle_seed)
+                        )
+                        
+                        loaded_train_data = [all_data[i] for i in train_indices]
+                        loaded_test_data = [all_data[i] for i in test_indices]
+                        print(f'Split: {len(loaded_train_data)} train, {len(loaded_test_data)} test samples')
+                    else:
+                        print('Warning: Dataset too small for splitting')
+                        loaded_train_data = all_data
+                        loaded_test_data = []
         
         elif args.dataset_type == 'torchvision':
             print('Processing torchvision dataset...')
-            # Load PyTorch dataset
-            # Use the dataset_path (or default './data' if none)
             download_path = args.dataset_path if args.dataset_path.lower() not in ['none', 'null', 'nil', ''] else './data'
-            loaded_dataset = load_torchvision_dataset(args.dataset_name, config, download_path)
+            loaded_train_data, loaded_test_data = load_torchvision_dataset(
+                args.dataset_name, config, download_path
+            )
         
         elif args.dataset_type == 'huggingface':
             print('Processing HuggingFace dataset...')
-            # Load HuggingFace dataset
-            loaded_dataset = load_huggingface_dataset(args.dataset_name, config)
+            loaded_train_data, loaded_test_data = load_huggingface_dataset(args.dataset_name, config)
         
         else:
             print(f'Unknown dataset type: {args.dataset_type}')
-            loaded_dataset = []
         
         # Check if we got data
-        if not loaded_dataset:
-            print('No data loaded. Creating dummy dataset for testing.')
-            # Create dummy dataset with single sample
-            dummy_image = np.ones((64, 64, 3), dtype=np.uint8) * 255  # White image
+        if not loaded_train_data:
+            print('No train data loaded. Creating dummy dataset for testing.')
+            dummy_image = np.ones((64, 64, 3), dtype=np.uint8) * 255
             dummy_pil = Image.fromarray(dummy_image, mode='RGB')
             img_bytes = io.BytesIO()
             dummy_pil.save(img_bytes, format='PNG')
             base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
             
-            loaded_dataset = [{
+            loaded_train_data = [{
                 'image_data': base64_data,
                 'label': 'dummy',
                 'dataset': 'dummy',
@@ -566,18 +691,33 @@ implementation:
                 'warning': 'no_real_data'
             }]
         
-        print(f'\\nSuccessfully loaded {len(loaded_dataset)} samples')
+        if not loaded_test_data and loaded_train_data:
+            print('No test data loaded. Using train data for test.')
+            loaded_test_data = loaded_train_data.copy()
+        
+        print(f'\\nSuccessfully loaded {len(loaded_train_data)} train samples, {len(loaded_test_data)} test samples')
         
         # Create dataset info
-        labels = [item.get('label', 'unknown') for item in loaded_dataset]
-        unique_labels = sorted(list(set(labels)))
-        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
-        label_distribution = Counter(labels)
+        train_labels = [item.get('label', 'unknown') for item in loaded_train_data]
+        test_labels = [item.get('label', 'unknown') for item in loaded_test_data]
+        all_labels = train_labels + test_labels
         
-        dataset_info = {
-            'total_samples': len(loaded_dataset),
+        unique_labels = sorted(list(set(all_labels)))
+        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
+        train_label_distribution = Counter(train_labels)
+        test_label_distribution = Counter(test_labels)
+        
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+        
+        dataset_info = DatasetInfoWrapper({
+            'total_samples': len(loaded_train_data) + len(loaded_test_data),
+            'train_samples': len(loaded_train_data),
+            'test_samples': len(loaded_test_data),
             'classes': unique_labels,
-            'class_distribution': dict(label_distribution),
+            'train_class_distribution': dict(train_label_distribution),
+            'test_class_distribution': dict(test_label_distribution),
             'label_to_idx': label_to_idx,
             'output_dim': len(unique_labels),
             'train_split_ratio': args.train_split,
@@ -585,51 +725,30 @@ implementation:
             'dataset_type': args.dataset_type,
             'dataset_name': args.dataset_name,
             'original_path': args.dataset_path,
-            'loaded_samples': len(loaded_dataset),
             'image_size': config.get('image_size', 64),
             'channels': config.get('channels', 1),
-            'dataset_format': 'base64_images'
-        }
+            'dataset_format': 'base64_images',
+            'requires_preprocessing': True
+        })
         
-        print(f'Dataset Info: {len(loaded_dataset)} samples, {len(unique_labels)} classes')
-        print(f'Image size: {dataset_info["image_size"]}x{dataset_info["image_size"]}')
-        print(f'Channels: {dataset_info["channels"]}')
-        
-        # Split data
-        if len(loaded_dataset) > 1:
-            train_size = int(args.train_split * len(loaded_dataset))
-            test_size = len(loaded_dataset) - train_size
-            
-            if train_size > 0 and test_size > 0:
-                # Use torch random_split for consistent splitting
-                train_indices, test_indices = random_split(
-                    range(len(loaded_dataset)), 
-                    [train_size, test_size],
-                    generator=torch.Generator().manual_seed(args.shuffle_seed)
-                )
-                
-                train_data = [loaded_dataset[i] for i in train_indices]
-                test_data = [loaded_dataset[i] for i in test_indices]
-                print(f'Split: {len(train_data)} train, {len(test_data)} test samples')
-            else:
-                print('Warning: Dataset too small for splitting. Using all data for train.')
-                train_data = loaded_dataset
-                test_data = []
-        else:
-            print('Warning: Only 1 sample. Using it for both train and test.')
-            train_data = loaded_dataset
-            test_data = loaded_dataset.copy()
+        print(f'\\nDataset Info:')
+        print(f'  Train samples: {len(loaded_train_data)}')
+        print(f'  Test samples: {len(loaded_test_data)}')
+        print(f'  Total samples: {len(loaded_train_data) + len(loaded_test_data)}')
+        print(f'  Classes: {len(unique_labels)}')
+        print(f'  Image size: {dataset_info.image_size}x{dataset_info.image_size}')
+        print(f'  Channels: {dataset_info.channels}')
         
         # Save outputs
         os.makedirs(os.path.dirname(args.train_data) or '.', exist_ok=True)
         with open(args.train_data, 'wb') as f:
-            pickle.dump(train_data, f)
-        print(f'Saved train data to: {args.train_data} ({len(train_data)} samples)')
+            pickle.dump(loaded_train_data, f)
+        print(f'Saved train data to: {args.train_data} ({len(loaded_train_data)} samples)')
         
         os.makedirs(os.path.dirname(args.test_data) or '.', exist_ok=True)
         with open(args.test_data, 'wb') as f:
-            pickle.dump(test_data, f)
-        print(f'Saved test data to: {args.test_data} ({len(test_data)} samples)')
+            pickle.dump(loaded_test_data, f)
+        print(f'Saved test data to: {args.test_data} ({len(loaded_test_data)} samples)')
         
         os.makedirs(os.path.dirname(args.dataset_info) or '.', exist_ok=True)
         with open(args.dataset_info, 'wb') as f:
@@ -643,13 +762,13 @@ implementation:
             'num_classes': len(unique_labels),
             'image_size': config.get('image_size', 64),
             'channels': config.get('channels', 1),
-            'requires_preprocessing': False,  # Already preprocessed
+            'requires_preprocessing': True,
             'has_labels': len(unique_labels) > 1,
-            'sample_count': len(loaded_dataset),
-            'train_samples': len(train_data),
-            'test_samples': len(test_data),
+            'train_samples': len(loaded_train_data),
+            'test_samples': len(loaded_test_data),
+            'total_samples': len(loaded_train_data) + len(loaded_test_data),
             'dataset_format': 'base64_images',
-            'normalized': True,  # Already normalized to [-1, 1]
+            'normalized': False,
             'output_dim': len(unique_labels),
             'gan_compatible': True,
             'config_source': 'load_dataset_brick'
@@ -660,17 +779,28 @@ implementation:
             json.dump(data_config, f, indent=2)
         print(f'Saved data config to: {args.data_config}')
         
-        print('\\nDataset loading complete!')
+        print('\\n' + '='*50)
+        print('DATASET LOADING COMPLETE!')
         print('='*50)
         print('SUMMARY:')
-        print(f'  Total samples: {len(loaded_dataset)}')
-        print(f'  Train samples: {len(train_data)}')
-        print(f'  Test samples: {len(test_data)}')
-        print(f'  Classes: {unique_labels}')
+        print(f'  Train samples: {len(loaded_train_data)}')
+        print(f'  Test samples: {len(loaded_test_data)}')
+        print(f'  Total samples: {len(loaded_train_data) + len(loaded_test_data)}')
         print(f'  Image size: {data_config["image_size"]}x{data_config["image_size"]}')
         print(f'  Channels: {data_config["channels"]}')
+        
+        # Special message for MNIST
+        if args.dataset_name.lower() == 'mnist':
+            print('\\nNOTE: For MNIST:')
+            print('  - Expected: 60,000 training samples')
+            print('  - Expected: 10,000 test samples')
+            print('  - Expected total: 70,000 samples')
+            if len(loaded_train_data) == 60000 and len(loaded_test_data) == 10000:
+                print('  ✓ Correctly loaded MNIST dataset splits!')
+            else:
+                print(f'   Actual: Train={len(loaded_train_data)}, Test={len(loaded_test_data)}')
+        
         print('='*50)
-        print('Dataset is ready for GAN training!')
 
     args:
       - --dataset_type
