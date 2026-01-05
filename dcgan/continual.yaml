@@ -1,4 +1,4 @@
-name: Continual Tasks Generator v10
+name: Continual Tasks Generator 
 description: Creates continual learning tasks for DCGAN with consistent format
 inputs:
   - name: data_pickle
@@ -399,16 +399,16 @@ implementation:
         print(f" Task descriptions saved to {args.task_descriptions}")
         for i, task in enumerate(tasks):
             print(f"Task {i}: {task['description']}")
-  args:
-    - --data_pickle
-    - {inputPath: data_pickle}
-    - --splitting_strategy
-    - {inputValue: splitting_strategy}
-    - --num_tasks
-    - {inputValue: num_tasks}
-    - --config
-    - {inputValue: config}
-    - --tasks_pickle
-    - {outputPath: tasks_pickle}
-    - --task_descriptions
-    - {outputPath: task_descriptions}
+    args:
+      - --data_pickle
+      - {inputPath: data_pickle}
+      - --splitting_strategy
+      - {inputValue: splitting_strategy}
+      - --num_tasks
+      - {inputValue: num_tasks}
+      - --config
+      - {inputValue: config}
+      - --tasks_pickle
+      - {outputPath: tasks_pickle}
+      - --task_descriptions
+      - {outputPath: task_descriptions}
