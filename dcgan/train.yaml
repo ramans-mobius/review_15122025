@@ -1,0 +1,296 @@
+name: Train DCGAN
+  description: Trains DCGAN using your config with all 3 algorithms
+  inputs:
+    - name: data_path
+      type: Dataset
+    - name: config
+      type: String
+      description: "Configuration in your DEFAULT_CONFIG format"
+    - name: model_input
+      type: Model
+    - name: log_interval
+      type: Integer
+      default: "1"
+      description: "Log interval for block training"
+  outputs:
+    - name: trained_model
+      type: Model
+    - name: training_history
+      type: String
+    - name: sample_images
+      type: Dataset
+
+  implementation:
+    container:
+      image: nikhilv215/nesy-factory:v23
+      command:
+        - sh
+        - -c
+        - |
+          echo "Training DCGAN with your config..."
+          exec "$0" "$@"
+        - python3
+        - -u
+        - -c
+        - |
+          import torch
+          import argparse
+          import pickle
+          import json
+          import os
+          import sys
+          import numpy as np
+          from torch.utils.data import DataLoader
+          import matplotlib.pyplot as plt
+          import io
+          import base64
+          from PIL import Image
+          import time
+          
+          # Import from your DCGAN library
+          try:
+              from nesy_factory.GANs.dcgan import (
+                  create_dcgan,
+                  OptimizerFactory,
+                  TrainerFactory,
+                  ForwardForwardTrainer,
+                  CAFOTrainer,
+                  BackpropTrainer
+              )
+              print(" Successfully imported DCGAN modules")
+          except ImportError as e:
+              print(f" ERROR: Failed to import DCGAN modules: {e}")
+              sys.exit(1)
+          
+          parser = argparse.ArgumentParser()
+          parser.add_argument('--data_path', type=str, required=True)
+          parser.add_argument('--config', type=str, required=True)
+          parser.add_argument('--model_input', type=str, required=True)
+          parser.add_argument('--log_interval', type=int, default=1)
+          parser.add_argument('--trained_model', type=str, required=True)
+          parser.add_argument('--training_history', type=str, required=True)
+          parser.add_argument('--sample_images', type=str, required=True)
+          args = parser.parse_args()
+          
+          # Load user config (your format)
+          user_config = json.loads(args.config)
+          
+          # Extract training parameters
+          algorithm = user_config['train']['algorithm']
+          epochs = user_config['train']['epochs']
+          batch_size = user_config['train']['batch_size']
+          
+          print(f"\\n{'='*80}")
+          print(f" DCGAN TRAINING STARTING")
+          print(f"{'='*80}")
+          print(f"Algorithm: {algorithm.upper()}")
+          print(f"Epochs: {epochs}")
+          print(f"Batch Size: {batch_size}")
+          print(f"Log Interval: {args.log_interval}")
+          print(f"{'='*80}")
+          
+          # Load processed data
+          with open(args.data_path, 'rb') as f:
+              data_wrapper = pickle.load(f)
+          
+          dataset = data_wrapper['dataset']
+          print(f"Dataset loaded: {len(dataset)} samples")
+          
+          # Create data loader
+          train_loader = DataLoader(
+              dataset,
+              batch_size=batch_size,
+              shuffle=True,
+              drop_last=True
+          )
+          
+          # Load model
+          print(f"\\n Loading model from: {args.model_input}")
+          checkpoint = torch.load(args.model_input, map_location='cpu')
+          
+          if isinstance(checkpoint, dict) and 'config' in checkpoint:
+              model_config = checkpoint['config']
+              generator, discriminator, _ = create_dcgan(model_config)
+              
+              # Load state dicts
+              generator.load_state_dict(checkpoint['generator_state_dict'])
+              discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+              print(" Models loaded from checkpoint")
+          else:
+              print(" Invalid checkpoint format")
+              sys.exit(1)
+          
+          # Set device from config
+          device_str = user_config['system']['device']
+          if device_str == 'cuda' and not torch.cuda.is_available():
+              device_str = 'cpu'
+              print(" CUDA requested but not available, using CPU")
+          
+          device = torch.device(device_str)
+          print(f"Device: {device}")
+          generator.to(device)
+          discriminator.to(device)
+          
+          # Create optimizers using your config
+          optimizer_g = OptimizerFactory.create_optimizer(generator, model_config, 'generator')
+          optimizer_d = OptimizerFactory.create_optimizer(discriminator, model_config, 'discriminator')
+          
+          print(f"\\n Training Setup:")
+          print(f"  Generator LR: {user_config['generator']['learning_rate']}")
+          print(f"  Discriminator LR: {user_config['discriminator']['learning_rate']}")
+          print(f"  Generator Optimizer: {user_config['generator']['optimizer']['type']}")
+          print(f"  Discriminator Optimizer: {user_config['discriminator']['optimizer']['type']}")
+          
+          # Select trainer based on algorithm
+          if algorithm == 'forward_forward':
+              trainer = ForwardForwardTrainer(model_config, device)
+              print(f"\\n FORWARD-FORWARD TRAINING")
+              print(f"  FF epochs per block: {user_config['discriminator']['ff_epochs_per_block']}")
+              print(f"  FF theta: {user_config['discriminator'].get('ff_theta', 2.0)}")
+              
+          elif algorithm == 'cafo':
+              trainer = CAFOTrainer(model_config, device)
+              print(f"\\n CAFO TRAINING")
+              print(f"  Generator CAFO epochs: {user_config['generator']['cafo_epochs_per_block']}")
+              print(f"  Discriminator CAFO epochs: {user_config['discriminator']['cafo_epochs_per_block']}")
+              
+          else:  # backprop
+              trainer = BackpropTrainer(model_config, device)
+              print(f"\\n BACKPROPAGATION TRAINING")
+              print(f"  n_critic: {user_config['discriminator'].get('n_critic', 1)}")
+              print(f"  Label smoothing: {user_config['discriminator'].get('label_smoothing', 0.0)}")
+          
+          # Training history
+          history = {
+              'algorithm': algorithm,
+              'epochs': epochs,
+              'batch_size': batch_size,
+              'g_loss': [],
+              'd_loss': [],
+              'real_score': [],
+              'fake_score': [],
+              'block_training': {}
+          }
+          
+          print(f"\\n{'='*80}")
+          print(f" MAIN TRAINING PHASE")
+          print(f"{'='*80}")
+          
+          # Training loop
+          for epoch in range(epochs):
+              print(f"\\n Epoch {epoch+1}/{epochs}")
+              start_time = time.time()
+              
+              # Train one epoch
+              metrics = trainer.train_epoch(
+                  generator, discriminator, train_loader,
+                  optimizer_g, optimizer_d, epoch
+              )
+              
+              epoch_time = time.time() - start_time
+              
+              # Record history
+              history['g_loss'].append(metrics['g_loss'])
+              history['d_loss'].append(metrics['d_loss'])
+              history['real_score'].append(metrics['real_score'])
+              history['fake_score'].append(metrics['fake_score'])
+              
+              # Log epoch results
+              print(f"  Generator Loss: {metrics['g_loss']:.4f}")
+              print(f"  Discriminator Loss: {metrics['d_loss']:.4f}")
+              print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
+              print(f"  Time: {epoch_time:.2f}s")
+              
+              # Generate samples at intervals
+              eval_interval = user_config['eval'].get('eval_interval', 2)
+              if (epoch + 1) % eval_interval == 0 or epoch == epochs - 1:
+                  generator.eval()
+                  with torch.no_grad():
+                      sample_size = user_config['eval'].get('sample_size', 16)
+                      z = torch.randn(sample_size, generator.z_dim, device=device)
+                      samples = generator(z).cpu()
+                  print(f"  Generated {len(samples)} samples")
+          
+          print(f"\\n{'='*80}")
+          print(f" TRAINING COMPLETED")
+          print(f"{'='*80}")
+          
+          # Generate final samples
+          generator.eval()
+          with torch.no_grad():
+              sample_size = user_config['eval'].get('sample_size', 16)
+              z = torch.randn(sample_size, generator.z_dim, device=device)
+              samples = generator(z).cpu()
+          
+          # Save sample images
+          sample_data = []
+          for i, sample in enumerate(samples):
+              # Convert tensor to PIL Image
+              if sample.shape[0] == 1:  # Grayscale
+                  img_np = sample.squeeze(0).numpy()
+                  img_np = ((img_np * 0.5 + 0.5) * 255).clip(0, 255).astype(np.uint8)
+                  img = Image.fromarray(img_np, mode='L')
+              else:  # RGB
+                  img_np = sample.permute(1, 2, 0).numpy()
+                  img_np = ((img_np * 0.5 + 0.5) * 255).clip(0, 255).astype(np.uint8)
+                  img = Image.fromarray(img_np, mode='RGB')
+              
+              # Convert to base64
+              img_bytes = io.BytesIO()
+              img.save(img_bytes, format='PNG')
+              base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
+              
+              sample_data.append({
+                  'image_data': base64_data,
+                  'sample_id': i,
+                  'epoch': epochs,
+                  'algorithm': algorithm
+              })
+          
+          # Update checkpoint with trained weights
+          checkpoint['generator_state_dict'] = generator.state_dict()
+          checkpoint['discriminator_state_dict'] = discriminator.state_dict()
+          checkpoint['training_history'] = history
+          checkpoint['final_epoch'] = epochs
+          checkpoint['training_algorithm'] = algorithm
+          checkpoint['user_config'] = user_config
+          
+          os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
+          torch.save(checkpoint, args.trained_model)
+          
+          # Save training history
+          os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
+          with open(args.training_history, 'w') as f:
+              json.dump(history, f, indent=2)
+          
+          # Save sample images
+          os.makedirs(os.path.dirname(args.sample_images), exist_ok=True)
+          with open(args.sample_images, 'wb') as f:
+              pickle.dump(sample_data, f)
+          
+          print(f"\\n FINAL RESULTS:")
+          print(f"  Algorithm: {algorithm.upper()}")
+          print(f"  Final G Loss: {history['g_loss'][-1]:.4f}")
+          print(f"  Final D Loss: {history['d_loss'][-1]:.4f}")
+          print(f"  D(real): {history['real_score'][-1]:.4f}")
+          print(f"  D(fake): {history['fake_score'][-1]:.4f}")
+          print(f"\\n Outputs saved:")
+          print(f"  Model: {args.trained_model}")
+          print(f"  History: {args.training_history}")
+          print(f"  Samples: {args.sample_images}")
+
+    args:
+      - --data_path
+      - {inputPath: data_path}
+      - --config
+      - {inputValue: config}
+      - --model_input
+      - {inputPath: model_input}
+      - --log_interval
+      - {inputValue: log_interval}
+      - --trained_model
+      - {outputPath: trained_model}
+      - --training_history
+      - {outputPath: training_history}
+      - --sample_images
+      - {outputPath: sample_images}
