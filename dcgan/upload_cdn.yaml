@@ -1,4 +1,4 @@
-name: Upload Data To CDN v6
+name: Upload Data To CDN v8
 description: Uploads dataset outputs (from Load Dataset and Preprocess) to CDN for reuse
 inputs:
   # From Load Dataset brick
