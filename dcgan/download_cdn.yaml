@@ -55,7 +55,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v42
+    image: deepak0147/nessy-facotry:0.0.8
     command:
       - sh
       - -ec
