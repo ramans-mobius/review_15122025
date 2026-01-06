@@ -1,4 +1,4 @@
-name: Trigger Pipeline v3
+name: Trigger Pipeline v4
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -397,7 +397,7 @@ implementation:
             f.write("  --show-error \\\\\n")
             f.write("  --connect-timeout 30 \\\\\n")
             f.write("  --max-time 120 \\\\\n")
-            f.write("  --verbose\n")
+            f.write("  --verbose\\n")
         print(f"Curl command saved to: {curl_cmd_file}")
         
         print("\\n" + "=" * 100)
