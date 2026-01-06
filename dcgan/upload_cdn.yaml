@@ -1,4 +1,4 @@
-name: Upload Data To CDN v8
+name: Upload Data To CDN v9
 description: Uploads dataset outputs (from Load Dataset and Preprocess) to CDN for reuse
 inputs:
   # From Load Dataset brick
@@ -176,7 +176,7 @@ implementation:
                 #     print(f"     Fixed $$ pattern in URL")
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"     Uploaded: {full_url[:100]}...")
+                print(f"     Uploaded: {full_url}...")
                 
                 # Save URL to output file
                 output_dir = os.path.dirname(output_cdn_url_path)
@@ -334,7 +334,7 @@ implementation:
         
         print(f"\\n Summary saved to: {args.upload_summary}")
         if summary_result:
-            print(f" Summary CDN URL: {summary_result['url'][:100]}...")
+            print(f" Summary CDN URL: {summary_result['url']}...")
         
         # Verify all outputs were created
         output_files = [
