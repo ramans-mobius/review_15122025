@@ -1,4 +1,4 @@
-name: Upload Data To CDN
+name: Upload Data To CDN v2
 description: Uploads dataset outputs (from Load Dataset and Preprocess) to CDN for reuse
 inputs:
   # From Load Dataset brick
@@ -172,7 +172,7 @@ implementation:
                     print(f"     Fixed $$ pattern in URL")
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"     Uploaded: {full_url[:100]}...")
+                print(f"     Uploaded: {full_url}...")
                 
                 # Save URL to output file
                 output_dir = os.path.dirname(output_cdn_url_path)
