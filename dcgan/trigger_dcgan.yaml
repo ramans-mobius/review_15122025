@@ -20,9 +20,6 @@ inputs:
   - name: preprocess_metadata_url
     type: String
     description: "URL to uploaded preprocess metadata"
-  - name: gan_config_url
-    type: String
-    description: "URL to uploaded GAN config"
   - name: upload_summary
     type: String
     description: "JSON summary of uploaded URLs"
@@ -134,7 +131,6 @@ implementation:
         parser.add_argument('--data_config_url', type=str, required=True)
         parser.add_argument('--processed_data_url', type=str, required=True)
         parser.add_argument('--preprocess_metadata_url', type=str, required=True)
-        parser.add_argument('--gan_config_url', type=str, required=True)
         parser.add_argument('--upload_summary', type=str, required=True)
         
         # Authentication
@@ -173,11 +169,8 @@ implementation:
         args = parser.parse_args()
         
         def fix_cdn_url(url):
-          
             if not url:
                 return url
-            
-            print(f"Processing URL: {url}...")
             
             # Step 1: Decode any existing URL encoding
             try:
@@ -186,7 +179,6 @@ implementation:
                 pass
             
             # Step 2: Handle special patterns
-            # Preserve $$ pattern by temporarily replacing
             url = url.replace("$$", "__DOUBLE_DOLLAR_PLACEHOLDER__")
             
             # Step 3: Handle _ENC( pattern
@@ -199,7 +191,6 @@ implementation:
             url = url.replace(" ", "")
             
             # Step 5: Now encode for JSON transmission
-            # First, handle special patterns we want to preserve
             url = url.replace("_ENC(", "__ENC_PAREN_PLACEHOLDER__")
             
             # Encode the URL
@@ -225,11 +216,9 @@ implementation:
                 if paren_pos != -1:
                     encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
             
-            print(f"Encoded URL: {encoded_url}...")
             return encoded_url
         
         def load_upload_summary(summary_path):
-          
             try:
                 with open(summary_path, 'r') as f:
                     summary = json.load(f)
@@ -256,8 +245,7 @@ implementation:
             'dataset_info_url': args.dataset_info_url,
             'data_config_url': args.data_config_url,
             'processed_data_url': args.processed_data_url,
-            'preprocess_metadata_url': args.preprocess_metadata_url,
-            'gan_config_url': args.gan_config_url
+            'preprocess_metadata_url': args.preprocess_metadata_url
         }
         
         for key, url in urls_to_fix.items():
@@ -287,7 +275,6 @@ implementation:
                 "data_config_url": fixed_urls['data_config_url'],
                 "processed_data_url": fixed_urls['processed_data_url'],
                 "preprocess_metadata_url": fixed_urls['preprocess_metadata_url'],
-                "gan_config_url": fixed_urls['gan_config_url'],
                 "upload_summary_url": fix_cdn_url(args.upload_summary) if args.upload_summary else "",
                 
                 # Model loading parameters
@@ -326,23 +313,7 @@ implementation:
         print(f"Parameters count: {len(payload['parameters'])}")
         print(f"CDN URLs included: {len([k for k in payload['parameters'] if k.endswith('_url')])}")
         
-        # Display URL previews
-        print("\\n=== URL Previews ===")
-        for key in ['train_data_url', 'processed_data_url', 'gan_config_url']:
-            if key in payload['parameters']:
-                url = payload['parameters'][key]
-                print(f"{key}: {url[:80]}...")
-        
-        print(f"\\n=== Complete Payload ===")
-        print(json.dumps(payload, indent=2)[:500] + "..." if len(json.dumps(payload)) > 500 else json.dumps(payload, indent=2))
-        
-        # Prepare curl command
-        headers = {
-            "accept": "application/json",
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        }
-        
+        # Trigger pipeline
         print(f"\\n=== Triggering Pipeline ===")
         print(f"URL: {trigger_url}")
         
@@ -350,23 +321,15 @@ implementation:
         curl_command = [
             "curl",
             "--location", trigger_url,
-            "--header", f"accept: {headers['accept']}",
-            "--header", f"Authorization: {headers['Authorization']}",
-            "--header", f"Content-Type: {headers['Content-Type']}",
+            "--header", f"accept: application/json",
+            "--header", f"Authorization: Bearer {access_token}",
+            "--header", f"Content-Type: application/json",
             "--data", json.dumps(payload),
             "--fail",
             "--show-error",
             "--connect-timeout", "30",
             "--max-time", "120"
         ]
-        
-        # Display curl command for debugging
-        print("\\n=== Curl Command (simplified) ===")
-        print(f"curl --location '{trigger_url}' \\")
-        print(f"  --header 'accept: application/json' \\")
-        print(f"  --header 'Authorization: Bearer ...' \\")
-        print(f"  --header 'Content-Type: application/json' \\")
-        print(f"  --data '{{...payload...}}'")
         
         # Save payload to file for manual use
         os.makedirs('/tmp/pipeline_trigger', exist_ok=True)
@@ -375,8 +338,7 @@ implementation:
             json.dump(payload, f, indent=2)
         print(f"\\nPayload saved to: {payload_file}")
         
-        # Trigger pipeline
-        print("\\n=== Executing Trigger ===")
+        # Trigger pipeline with retry logic
         max_retries = 3
         retry_delay = 10
         
@@ -392,14 +354,10 @@ implementation:
                 )
                 
                 print("Trigger successful!")
-                print(f"Response status: {process.returncode}")
                 
                 # Parse response
                 try:
                     response = json.loads(process.stdout)
-                    print(f"Response parsed successfully")
-                    
-                    # Extract run ID if available
                     run_id = response.get('run_id', response.get('id', 'unknown'))
                     
                     # Save outputs
@@ -428,15 +386,11 @@ implementation:
                     print(f"\\n=== Trigger Summary ===")
                     print(f"Status: SUCCESS")
                     print(f"Run ID: {run_id}")
-                    print(f"Response saved to: {args.trigger_response}")
-                    print(f"Run ID saved to: {args.run_id}")
-                    print(f"Status saved to: {args.trigger_status}")
                     
                     break  # Success, exit retry loop
                     
                 except json.JSONDecodeError:
                     print(f"Warning: Response is not valid JSON")
-                    print(f"Raw response: {process.stdout[:200]}")
                     
                     # Save raw response
                     with open(args.trigger_response, 'w') as f:
@@ -451,8 +405,7 @@ implementation:
                         'status': 'partial_success',
                         'run_id': run_id,
                         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                        'note': 'Response not valid JSON',
-                        'raw_response_preview': process.stdout[:200]
+                        'note': 'Response not valid JSON'
                     }
                     
                     with open(args.trigger_status, 'w') as f:
@@ -463,13 +416,12 @@ implementation:
             except subprocess.CalledProcessError as e:
                 print(f"Trigger attempt {attempt + 1} failed")
                 print(f"Exit code: {e.returncode}")
-                print(f"Error output: {e.stderr[:200]}")
-                print(f"Standard output: {e.stdout[:200]}")
+                print(f"Error: {e.stderr[:200]}")
                 
                 if attempt < max_retries - 1:
                     print(f"Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay *= 2
                 else:
                     print("Max retries reached")
                     
@@ -478,8 +430,6 @@ implementation:
                         'status': 'failed',
                         'error': 'Max retries exceeded',
                         'last_exit_code': e.returncode,
-                        'last_stderr': e.stderr[:500],
-                        'last_stdout': e.stdout[:500],
                         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                         'attempts': attempt + 1
                     }
@@ -541,8 +491,6 @@ implementation:
       - {inputValue: processed_data_url}
       - --preprocess_metadata_url
       - {inputValue: preprocess_metadata_url}
-      - --gan_config_url
-      - {inputValue: gan_config_url}
       - --upload_summary
       - {inputPath: upload_summary}
       
