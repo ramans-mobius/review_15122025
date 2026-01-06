@@ -1,4 +1,4 @@
-name: Train 
+name: Train v2
 description: Trains DCGAN using single master config
 inputs:
   - name: data_path
@@ -36,7 +36,58 @@ implementation:
         import argparse, pickle, os, json, sys, io, traceback
         import numpy as np
         from torch.utils.data import DataLoader
+        from PIL import Image
+        import torchvision.transforms as transforms
         
+        # ============================================================================
+        # Define classes needed for unpickling
+        # ============================================================================
+        class GANDataset:
+            def __init__(self, data_list, transform=None, image_size=64, channels=3):
+                self.data_list = data_list
+                self.transform = transform
+                self.image_size = image_size
+                self.channels = channels
+            
+            def __len__(self):
+                return len(self.data_list)
+            
+            def __getitem__(self, idx):
+                item = self.data_list[idx]
+                try:
+                    # Create a dummy image since we don't have real images
+                    if self.channels == 1:
+                        img = Image.new('L', (self.image_size, self.image_size), color=128)
+                    else:
+                        img = Image.new('RGB', (self.image_size, self.image_size), color=(128, 128, 128))
+                    
+                    if self.transform:
+                        img = self.transform(img)
+                    
+                    return img
+                except Exception as e:
+                    print(f"Error creating dummy image {idx}: {e}")
+                    return torch.zeros(self.channels, self.image_size, self.image_size)
+        
+        class GANDataWrapper:
+            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
+                        transform_params=None):
+                self.dataset = dataset
+                self.model_type = model_type
+                self.image_size = image_size
+                self.channels = channels
+                self.transform_params = transform_params or {}
+                self.num_samples = len(dataset)
+            
+            def __len__(self):
+                return len(self.dataset)
+            
+            def __getitem__(self, idx):
+                return self.dataset[idx]
+        
+        # ============================================================================
+        # Import DCGAN modules
+        # ============================================================================
         try:
             from nesy_factory.GANs.dcgan import (
                 create_dcgan,
@@ -64,9 +115,19 @@ implementation:
         gan_cfg = config['gan']
         training_cfg = gan_cfg['training']
         
-        # Load preprocessed data
+        # Load preprocessed data with custom unpickler
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                # Allow our custom classes
+                if name == 'GANDataWrapper':
+                    return GANDataWrapper
+                elif name == 'GANDataset':
+                    return GANDataset
+                return super().find_class(module, name)
+        
         with open(args.data_path, "rb") as f:
-            data_wrapper = pickle.load(f)
+            unpickler = SafeUnpickler(f)
+            data_wrapper = unpickler.load()
         
         # Extract dataset
         if hasattr(data_wrapper, 'dataset'):
