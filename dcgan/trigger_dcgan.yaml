@@ -1,4 +1,4 @@
-name: Trigger Pipeline v8
+name: Trigger Pipeline v9
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -20,9 +20,9 @@ inputs:
   - name: preprocess_metadata_url
     type: String
     description: "URL to uploaded preprocess metadata"
-  - name: upload_summary
+  - name: upload_summary_url
     type: String
-    description: "JSON summary of uploaded URLs"
+    description: "CDN URL for the upload summary JSON file"
   
   # Authentication
   - name: access_token
@@ -134,7 +134,7 @@ implementation:
         parser.add_argument('--data_config_url', type=str, required=True)
         parser.add_argument('--processed_data_url', type=str, required=True)
         parser.add_argument('--preprocess_metadata_url', type=str, required=True)
-        parser.add_argument('--upload_summary', type=str, required=True)
+        parser.add_argument('--upload_summary_url', type=str, required=True, help='CDN URL for upload summary JSON')
         
         # Authentication
         parser.add_argument('--access_token', type=str, required=True)
@@ -231,15 +231,6 @@ implementation:
             print(f"Encoded URL: {encoded_url[:100]}...")
             return encoded_url
         
-        def load_upload_summary(summary_path):
-            try:
-                with open(summary_path, 'r') as f:
-                    summary = json.load(f)
-                return summary
-            except Exception as e:
-                print(f"Warning: Could not load upload summary: {e}")
-                return {}
-        
         print("=" * 100)
         print("DCGAN PIPELINE TRIGGER")
         print("=" * 100)
@@ -249,23 +240,6 @@ implementation:
         print(f"IAM Domain: {args.iam_domain}")
         print(f"DQN Pipeline Domain: {args.pipeline_domain}")
         print(f"DQN Pipeline ID: {args.dqn_pipeline_id}")
-        
-        # Load upload summary to get CDN URL
-        upload_summary = load_upload_summary(args.upload_summary)
-        
-        # Get upload_summary_cdn_url from the upload_summary JSON
-        upload_summary_cdn_url = ""
-        if upload_summary:
-            # Check for CDN URL in upload_summary
-            upload_summary_cdn_url = upload_summary.get('upload_summary_cdn_url', '')
-            if not upload_summary_cdn_url:
-                # Try to find any CDN URL in the summary
-                for key, value in upload_summary.items():
-                    if isinstance(value, str) and 'cdn' in key.lower() and 'url' in key.lower():
-                        upload_summary_cdn_url = value
-                        break
-        
-        print(f"\\nUpload summary CDN URL: {upload_summary_cdn_url}")
         
         # Fix all CDN URLs
         print("\\n" + "=" * 100)
@@ -279,21 +253,13 @@ implementation:
             'dataset_info_url': args.dataset_info_url,
             'data_config_url': args.data_config_url,
             'processed_data_url': args.processed_data_url,
-            'preprocess_metadata_url': args.preprocess_metadata_url
+            'preprocess_metadata_url': args.preprocess_metadata_url,
+            'upload_summary_url': args.upload_summary_url  # Now this is a CDN URL
         }
         
         for key, url in urls_to_fix.items():
             print(f"\\n{key}:")
             fixed_urls[key] = fix_cdn_url(url)
-        
-        # Fix upload_summary URL if it's a CDN URL
-        if upload_summary_cdn_url:
-            print(f"\\nupload_summary (CDN URL):")
-            fixed_upload_summary_url = fix_cdn_url(upload_summary_cdn_url)
-        else:
-            # If no CDN URL found, use the local file path (for backward compatibility)
-            print(f"\\nupload_summary (local file, not CDN URL): {args.upload_summary}")
-            fixed_upload_summary_url = args.upload_summary
         
         # Read access token
         with open(args.access_token, 'r') as f:
@@ -314,14 +280,14 @@ implementation:
                 # Master config
                 "master_config": args.master_config,
                 
-                # CDN URLs
+                # CDN URLs - ALL URLs ARE NOW CDN URLs
                 "train_data_url": fixed_urls['train_data_url'],
                 "test_data_url": fixed_urls['test_data_url'],
                 "dataset_info_url": fixed_urls['dataset_info_url'],
                 "data_config_url": fixed_urls['data_config_url'],
                 "processed_data_url": fixed_urls['processed_data_url'],
                 "preprocess_metadata_url": fixed_urls['preprocess_metadata_url'],
-                "upload_summary_url": fixed_upload_summary_url,
+                "upload_summary_url": fixed_urls['upload_summary_url'],  # Now a CDN URL
                 
                 # Model loading parameters
                 "load_from_cdn": args.load_from_cdn,
@@ -347,14 +313,6 @@ implementation:
             },
             "version": 1
         }
-        
-        # Add upload summary info to payload if available
-        if upload_summary:
-            payload['parameters']['upload_summary_info'] = {
-                'total_uploads': upload_summary.get('total_uploads', 0),
-                'total_size_mb': upload_summary.get('total_size_mb', 0),
-                'upload_summary_cdn_url': upload_summary_cdn_url
-            }
         
         print("\\n=== FULL PAYLOAD DETAILS ===")
         print("=" * 80)
@@ -624,8 +582,8 @@ implementation:
       - {inputValue: processed_data_url}
       - --preprocess_metadata_url
       - {inputValue: preprocess_metadata_url}
-      - --upload_summary
-      - {inputPath: upload_summary}
+      - --upload_summary_url
+      - {inputValue: upload_summary_url}
       
       # Authentication
       - --access_token
