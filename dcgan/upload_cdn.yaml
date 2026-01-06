@@ -1,4 +1,4 @@
-name: Upload Data To CDN v3
+name: Upload Data To CDN v4
 description: Uploads dataset outputs (from Load Dataset and Preprocess) to CDN for reuse
 inputs:
   # From Load Dataset brick
@@ -170,10 +170,12 @@ implementation:
                     print(f"    Error: No cdnUrl in response")
                     return None
                 
-                # Fix $$ pattern if present
-                if "$$" in relative_cdn_url:
-                    relative_cdn_url = relative_cdn_url.replace("$$", "$$$")
-                    print(f"     Fixed $$ pattern in URL")
+                # FIXED: Do NOT modify the $$ pattern here
+                # The CDN returns the correct URL, we should not change it
+                # The $$ pattern will be handled by the trigger brick
+                # if "$$" in relative_cdn_url:
+                #     relative_cdn_url = relative_cdn_url.replace("$$", "$$$")
+                #     print(f"     Fixed $$ pattern in URL")
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
                 print(f"     Uploaded: {full_url[:100]}...")
@@ -354,7 +356,7 @@ implementation:
       - --train_data
       - {inputPath: train_data}
       - --test_data
-      - {inputPath: test_data}
+      - {inputValue: test_data}
       - --dataset_info
       - {inputPath: dataset_info}
       - --data_config
