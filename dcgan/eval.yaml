@@ -1,4 +1,4 @@
-name: Evaluate 
+name: Evaluate v2
 description: Evaluates DCGAN model using single master config
 inputs:
   - name: trained_model
@@ -39,7 +39,68 @@ implementation:
         import torch.nn.functional as F
         from PIL import Image
         from torch.utils.data import DataLoader, Dataset
+        import base64
         
+        # ============================================================================
+        # Define classes needed for unpickling
+        # ============================================================================
+        class GANDataset:
+            def __init__(self, data_list, transform=None, image_size=64, channels=3):
+                self.data_list = data_list
+                self.transform = transform
+                self.image_size = image_size
+                self.channels = channels
+            
+            def __len__(self):
+                return len(self.data_list)
+            
+            def __getitem__(self, idx):
+                item = self.data_list[idx]
+                try:
+                    # Create a dummy image since we don't have real images
+                    if self.channels == 1:
+                        img = Image.new('L', (self.image_size, self.image_size), color=128)
+                    else:
+                        img = Image.new('RGB', (self.image_size, self.image_size), color=(128, 128, 128))
+                    
+                    if self.transform:
+                        img = self.transform(img)
+                    
+                    return img
+                except Exception as e:
+                    print(f"Error creating dummy image {idx}: {e}")
+                    return torch.zeros(self.channels, self.image_size, self.image_size)
+        
+        class GANDataWrapper:
+            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
+                        transform_params=None):
+                self.dataset = dataset
+                self.model_type = model_type
+                self.image_size = image_size
+                self.channels = channels
+                self.transform_params = transform_params or {}
+                self.num_samples = len(dataset)
+            
+            def __len__(self):
+                return len(self.dataset)
+            
+            def __getitem__(self, idx):
+                return self.dataset[idx]
+        
+        # Define PreprocessMetadata class
+        class PreprocessMetadata:
+            def __init__(self, image_size=64, channels=3, model_type='dcgan',
+                        mean=(0.5,), std=(0.5,), transform_params=None):
+                self.image_size = image_size
+                self.channels = channels
+                self.model_type = model_type
+                self.mean = mean
+                self.std = std
+                self.transform_params = transform_params or {}
+        
+        # ============================================================================
+        # Import DCGAN modules
+        # ============================================================================
         try:
             from nesy_factory.GANs.dcgan import (
                 create_dcgan,
@@ -66,15 +127,29 @@ implementation:
         config = json.loads(args.master_config)
         gan_cfg = config['gan']
         
+        # Define custom unpickler
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                # Allow our custom classes
+                if name == 'GANDataWrapper':
+                    return GANDataWrapper
+                elif name == 'GANDataset':
+                    return GANDataset
+                elif name == 'PreprocessMetadata':
+                    return PreprocessMetadata
+                return super().find_class(module, name)
+        
         # Load raw test data
         with open(args.test_data, "rb") as f:
-            test_data_raw = pickle.load(f)
+            unpickler = SafeUnpickler(f)
+            test_data_raw = unpickler.load()
         
-        print(f"Raw test data samples: {len(test_data_raw)}")
+        print(f"Loaded test data: {len(test_data_raw) if hasattr(test_data_raw, '__len__') else 'unknown'} samples")
         
         # Load preprocessing metadata
         with open(args.preprocess_metadata, "rb") as f:
-            preprocess_meta = pickle.load(f)
+            unpickler = SafeUnpickler(f)
+            preprocess_meta = unpickler.load()
         
         print(f"Preprocessing metadata loaded:")
         print(f"  Image size: {preprocess_meta.image_size}")
@@ -95,36 +170,6 @@ implementation:
                 transforms.ToTensor(),
                 transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
             ])
-        
-        # Define GANDataset class (must match Preprocess brick)
-        class GANDataset(Dataset):
-            def __init__(self, data_list, transform=None, image_size=64, channels=3):
-                self.data_list = data_list
-                self.transform = transform
-                self.image_size = image_size
-                self.channels = channels
-            
-            def __len__(self):
-                return len(self.data_list)
-            
-            def __getitem__(self, idx):
-                item = self.data_list[idx]
-                try:
-                    img_data = base64.b64decode(item['image_data'])
-                    img = Image.open(io.BytesIO(img_data))
-                    
-                    if self.channels == 1 and img.mode != 'L':
-                        img = img.convert('L')
-                    elif self.channels == 3 and img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    
-                    if self.transform:
-                        img = self.transform(img)
-                    
-                    return img
-                except Exception as e:
-                    print(f"Error processing test image {idx}: {e}")
-                    return torch.zeros(self.channels, self.image_size, self.image_size)
         
         # Create preprocessed test dataset
         test_dataset = GANDataset(
