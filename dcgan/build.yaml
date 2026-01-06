@@ -23,6 +23,11 @@ implementation:
       - sh
       - -c
       - |
+        echo "Checking for torchvision..."
+        python3 -c "import torchvision; print(f'torchvision version: {torchvision.__version__}')" 2>/dev/null || {
+          echo "torchvision not found, installing 0.17.0..."
+          pip install torchvision==0.17.0 pillow
+        }
         echo "Building DCGAN Model with master config..."
         exec "$0" "$@"
       - python3
