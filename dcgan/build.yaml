@@ -1,4 +1,4 @@
-name: Build Model v2
+name: Build Model v3
 description: Builds DCGAN model using single master config
 inputs:
   - name: master_config
@@ -136,6 +136,15 @@ implementation:
             print(f"Building new DCGAN model with master config...")
             
             try:
+                # Set algorithm-specific flags based on training.algorithm
+                algorithm = gan_cfg['training']['algorithm']
+                use_ff = (algorithm == 'forward_forward')
+                use_cafo = (algorithm == 'cafo')
+                
+                print(f"  Training Algorithm: {algorithm}")
+                print(f"  use_forward_forward: {use_ff}")
+                print(f"  use_cafo: {use_cafo}")
+                
                 # Convert master config to DCGAN library format
                 dcgan_config = {
                     'dataset': {
@@ -157,9 +166,9 @@ implementation:
                         'paddings': [0] * (len(gan_cfg['generator']['hidden_dims']) + 1),
                         'output_paddings': [0] * (len(gan_cfg['generator']['hidden_dims']) + 1),
                         
-                        # FF/CAFO settings
-                        'use_forward_forward': gan_cfg['generator'].get('use_forward_forward', False),
-                        'use_cafo': gan_cfg['generator'].get('use_cafo', False),
+                        # FF/CAFO settings - set based on algorithm
+                        'use_forward_forward': use_ff,
+                        'use_cafo': use_cafo,
                         'ff_epochs_per_block': gan_cfg['generator'].get('ff_epochs_per_block', 2),
                         'cafo_epochs_per_block': gan_cfg['generator'].get('cafo_epochs_per_block', 2)
                     },
@@ -172,7 +181,7 @@ implementation:
                         'learning_rate': gan_cfg['discriminator']['learning_rate'],
                         'loss_type': gan_cfg['discriminator']['loss_type'],
                         'dropout': gan_cfg['discriminator'].get('dropout', 0.3),
-                        'label_smoothing': 0.0,
+                        'label_smoothing': gan_cfg['discriminator'].get('label_smoothing', 0.0),
                         'n_critic': 1,
                         
                         # Layer configurations
@@ -181,25 +190,13 @@ implementation:
                         'paddings': [1] * (len(gan_cfg['discriminator']['hidden_dims']) - 1) + [0],
                         'output_dim': 1,
                         
-                        # FF/CAFO settings
-                        'use_forward_forward': gan_cfg['discriminator'].get('use_forward_forward', False),
-                        'use_cafo': gan_cfg['discriminator'].get('use_cafo', False),
+                        # FF/CAFO settings - set based on algorithm
+                        'use_forward_forward': use_ff,
+                        'use_cafo': use_cafo,
                         'ff_epochs_per_block': gan_cfg['discriminator'].get('ff_epochs_per_block', 2),
                         'cafo_epochs_per_block': gan_cfg['discriminator'].get('cafo_epochs_per_block', 2)
                     }
                 }
-                
-                # Set algorithm-specific flags
-                algorithm = gan_cfg['training']['algorithm']
-                if algorithm == 'forward_forward':
-                    dcgan_config['discriminator']['use_forward_forward'] = True
-                    print(f"   Forward-Forward enabled for discriminator")
-                elif algorithm == 'cafo':
-                    dcgan_config['generator']['use_cafo'] = True
-                    dcgan_config['discriminator']['use_cafo'] = True
-                    print(f"   CAFO enabled for both generator and discriminator")
-                else:
-                    print(f"   Standard Backpropagation")
                 
                 print(f"\\n  DCGAN CONFIG SUMMARY:")
                 print(f"  Image Size: {dcgan_config['dataset']['resize_size']}x{dcgan_config['dataset']['resize_size']}")
