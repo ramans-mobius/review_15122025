@@ -1,4 +1,4 @@
-name: Trigger Pipeline v5
+name: Trigger Pipeline v6
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -218,7 +218,7 @@ implementation:
                 if paren_pos != -1:
                     encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
             
-            print(f"Encoded URL: {encoded_url}...")
+            print(f"Encoded URL: {encoded_url[:100]}...")
             return encoded_url
         
         def load_upload_summary(summary_path):
@@ -333,7 +333,7 @@ implementation:
         print(f"\\n=== PAYLOAD PARAMETER DETAILS ===")
         for key, value in payload['parameters'].items():
             if isinstance(value, str) and len(value) > 100:
-                print(f"{key}: {value}... (length: {len(value)} chars)")
+                print(f"{key}: {value[:100]}... (length: {len(value)} chars)")
             else:
                 print(f"{key}: {value}")
         
@@ -356,22 +356,17 @@ implementation:
         print("FULL CURL COMMAND")
         print("=" * 100)
         
-        # Print curl command line by line - Using simple print statements without concatenation
+        # Print curl command using simple format
         print("")
-        print("curl --location '" + trigger_url + "' \\\\")
-        print("  --header 'accept: application/json' \\\\")
-        print("  --header 'Authorization: Bearer " + access_token[:20] + "...' \\\\")
-        print("  --header 'Content-Type: application/json' \\\\")
-        # Escape single quotes in payload for display
-        payload_str = json.dumps(payload)
-        if "'" in payload_str[:200]:
-            print("  --data '" + payload_str[:200].replace("'", "'\\''") + "...' \\\\")
-        else:
-            print("  --data '" + payload_str[:200] + "...' \\\\")
-        print("  --fail \\\\")
-        print("  --show-error \\\\")
-        print("  --connect-timeout 30 \\\\")
-        print("  --max-time 120 \\\\")
+        print("curl --location '" + trigger_url + "' " + "\\\\")
+        print("  --header 'accept: application/json' " + "\\\\")
+        print("  --header 'Authorization: Bearer " + access_token[:20] + "...' " + "\\\\")
+        print("  --header 'Content-Type: application/json' " + "\\\\")
+        print("  --data '" + json.dumps(payload)[:200].replace("'", "'\\''") + "...' " + "\\\\")
+        print("  --fail " + "\\\\")
+        print("  --show-error " + "\\\\")
+        print("  --connect-timeout 30 " + "\\\\")
+        print("  --max-time 120 " + "\\\\")
         print("  --verbose")
         
         # Also print the actual curl command array
@@ -385,19 +380,19 @@ implementation:
             json.dump(payload, f, indent=2)
         print(f"\\nPayload saved to: {payload_file}")
         
-        # Save curl command to file - SIMPLIFIED to avoid syntax errors
+        # Save curl command to file - SIMPLIFIED WITHOUT NEWLINE OPERATORS
         curl_cmd_file = '/tmp/pipeline_trigger/curl_command.sh'
         with open(curl_cmd_file, 'w') as f:
-            f.write('curl --location "' + trigger_url.replace('"', '\\"') + '" \\\\\\n')
-            f.write("  --header 'accept: application/json' \\\\\\n")
-            f.write("  --header 'Authorization: Bearer " + access_token + "' \\\\\\n")
-            f.write("  --header 'Content-Type: application/json' \\\\\\n")
-            f.write("  --data '" + json.dumps(payload).replace("'", "'\"'\"'") + "' \\\\\\n")
-            f.write("  --fail \\\\\\n")
-            f.write("  --show-error \\\\\\n")
-            f.write("  --connect-timeout 30 \\\\\\n")
-            f.write("  --max-time 120 \\\\\\n")
-            f.write("  --verbose\\n")
+            f.write('curl --location "' + trigger_url + '" \\\\\\n')
+            f.write('  --header "accept: application/json" \\\\\\n')
+            f.write('  --header "Authorization: Bearer ' + access_token + '" \\\\\\n')
+            f.write('  --header "Content-Type: application/json" \\\\\\n')
+            f.write('  --data \'' + json.dumps(payload).replace("'", "'\"'\"'") + '\' \\\\\\n')
+            f.write('  --fail \\\\\\n')
+            f.write('  --show-error \\\\\\n')
+            f.write('  --connect-timeout 30 \\\\\\n')
+            f.write('  --max-time 120 \\\\\\n')
+            f.write('  --verbose\\n')
         print(f"Curl command saved to: {curl_cmd_file}")
         
         print("\\n" + "=" * 100)
