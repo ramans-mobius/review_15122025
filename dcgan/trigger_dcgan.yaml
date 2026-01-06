@@ -1,4 +1,4 @@
-name: Trigger Pipeline v6
+name: Trigger Pipeline v7
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -319,25 +319,55 @@ implementation:
                 'total_size_mb': upload_summary.get('total_size_mb', 0)
             }
         
-        print("\\n" + "=" * 100)
-        print("FULL PAYLOAD DETAILS")
-        print("=" * 100)
-        
-        print(f"\\n=== PAYLOAD SUMMARY ===")
-        print(f"Total parameters: {len(payload['parameters'])}")
-        print(f"CDN URLs: {len([k for k in payload['parameters'] if k.endswith('_url')])}")
-        
-        print(f"\\n=== COMPLETE PAYLOAD (JSON) ===")
+        print("\\n=== FULL PAYLOAD DETAILS ===")
+        print("=" * 80)
+        print("\\nFULL PAYLOAD JSON:")
+        print("=" * 80)
         print(json.dumps(payload, indent=2))
+        print("=" * 80)
         
-        print(f"\\n=== PAYLOAD PARAMETER DETAILS ===")
-        for key, value in payload['parameters'].items():
-            if isinstance(value, str) and len(value) > 100:
-                print(f"{key}: {value[:100]}... (length: {len(value)} chars)")
-            else:
-                print(f"{key}: {value}")
+        print(f"\\nTriggering DCGAN pipeline at: {trigger_url}")
+        print(f"DCGAN Pipeline ID: {args.pipeline_id}")
+        print(f"Experiment ID: {args.experiment_id}")
         
-        # Create curl command
+        print(f"\\n=== FINAL PARAMETERS ===")
+        for key in fixed_urls:
+            print(f"{key} (first 100 chars): {fixed_urls[key][:100]}...")
+        
+        # Print the full curl command - FOLLOWING CNN BRICK FORMAT
+        print("\\n=== FULL CURL COMMAND ===")
+        print("=" * 80)
+        print()
+        print("curl -X POST \\\\")
+        print(f"  '{trigger_url}' \\\\")
+        print("  -H 'accept: application/json' \\\\")
+        print(f"  -H 'Authorization: Bearer {access_token}' \\\\")
+        print("  -H 'Content-Type: application/json' \\\\")
+        print(f"  -d '{json.dumps(payload)}'")
+        print("=" * 80)
+        print()
+        
+        # Save payload to file for manual use
+        os.makedirs('/tmp/pipeline_trigger', exist_ok=True)
+        payload_file = '/tmp/pipeline_trigger/dcgan_payload.json'
+        with open(payload_file, 'w') as f:
+            json.dump(payload, f, indent=2)
+        print(f"\\nPayload saved to {payload_file} for manual use")
+        
+        # Manual trigger instructions - FOLLOWING CNN BRICK FORMAT
+        print("\\n=== MANUAL TRIGGER INSTRUCTIONS ===")
+        print("=" * 80)
+        print("1. Copy the curl command above")
+        print("2. Or use the saved payload file:")
+        print(f"   curl -X POST '{trigger_url}' \\\\")
+        print("     -H 'accept: application/json' \\\\")
+        print(f"     -H 'Authorization: Bearer YOUR_TOKEN_HERE' \\\\")
+        print("     -H 'Content-Type: application/json' \\\\")
+        print("     -d @/tmp/pipeline_trigger/dcgan_payload.json")
+        print("=" * 80)
+        print()
+        
+        # Create curl command array - SIMPLE FORMAT LIKE CNN BRICK
         curl_command = [
             "curl",
             "--location", trigger_url,
@@ -352,62 +382,15 @@ implementation:
             "--verbose"
         ]
         
-        print("\\n" + "=" * 100)
-        print("FULL CURL COMMAND")
-        print("=" * 100)
-        
-        # Print curl command using simple format
-        print("")
-        print("curl --location '" + trigger_url + "' " + "\\\\")
-        print("  --header 'accept: application/json' " + "\\\\")
-        print("  --header 'Authorization: Bearer " + access_token[:20] + "...' " + "\\\\")
-        print("  --header 'Content-Type: application/json' " + "\\\\")
-        print("  --data '" + json.dumps(payload)[:200].replace("'", "'\\''") + "...' " + "\\\\")
-        print("  --fail " + "\\\\")
-        print("  --show-error " + "\\\\")
-        print("  --connect-timeout 30 " + "\\\\")
-        print("  --max-time 120 " + "\\\\")
-        print("  --verbose")
-        
-        # Also print the actual curl command array
-        print(f"\\n=== Python subprocess command array ===")
-        print(f"curl_command = {curl_command}")
-        
-        # Save payload to file for manual use
-        os.makedirs('/tmp/pipeline_trigger', exist_ok=True)
-        payload_file = '/tmp/pipeline_trigger/dcgan_payload.json'
-        with open(payload_file, 'w') as f:
-            json.dump(payload, f, indent=2)
-        print(f"\\nPayload saved to: {payload_file}")
-        
-        # Save curl command to file - SIMPLIFIED WITHOUT NEWLINE OPERATORS
-        curl_cmd_file = '/tmp/pipeline_trigger/curl_command.sh'
-        with open(curl_cmd_file, 'w') as f:
-            f.write('curl --location "' + trigger_url + '" \\\\\\n')
-            f.write('  --header "accept: application/json" \\\\\\n')
-            f.write('  --header "Authorization: Bearer ' + access_token + '" \\\\\\n')
-            f.write('  --header "Content-Type: application/json" \\\\\\n')
-            f.write('  --data \'' + json.dumps(payload).replace("'", "'\"'\"'") + '\' \\\\\\n')
-            f.write('  --fail \\\\\\n')
-            f.write('  --show-error \\\\\\n')
-            f.write('  --connect-timeout 30 \\\\\\n')
-            f.write('  --max-time 120 \\\\\\n')
-            f.write('  --verbose\\n')
-        print(f"Curl command saved to: {curl_cmd_file}")
-        
-        print("\\n" + "=" * 100)
-        print("EXECUTING TRIGGER")
-        print("=" * 100)
-        
         # Trigger pipeline with retry logic
-        max_retries = 3
-        retry_delay = 10
+        max_retries = 5
+        retry_delay = 60
         
         for attempt in range(max_retries):
             try:
                 print(f"\\n=== Attempt {attempt + 1}/{max_retries} ===")
-                
                 print(f"Executing curl command...")
+                
                 process = subprocess.run(
                     curl_command,
                     capture_output=True,
@@ -417,8 +400,7 @@ implementation:
                 
                 print("✓ Trigger successful!")
                 print(f"Exit code: {process.returncode}")
-                
-                print(f"\\n=== Raw Response ===")
+                print("\\n=== Raw Response ===")
                 print(process.stdout)
                 
                 # Parse response
@@ -426,9 +408,8 @@ implementation:
                     response = json.loads(process.stdout)
                     run_id = response.get('run_id', response.get('id', 'unknown'))
                     
-                    print(f"\\n=== Parsed Response ===")
+                    print("\\n=== Parsed Response ===")
                     print(json.dumps(response, indent=2))
-                    
                     print(f"\\n=== Extracted Run ID: {run_id} ===")
                     
                     # Save outputs
@@ -465,7 +446,7 @@ implementation:
                     break  # Success, exit retry loop
                     
                 except json.JSONDecodeError as e:
-                    print(f" Warning: Response is not valid JSON: {e}")
+                    print(f"Warning: Response is not valid JSON: {e}")
                     print(f"Raw response (first 500 chars): {process.stdout[:500]}")
                     
                     # Save raw response
@@ -503,11 +484,11 @@ implementation:
                 print(f"Standard output: {e.stdout}")
                 
                 if attempt < max_retries - 1:
-                    print(f"\\n Retrying in {retry_delay} seconds...")
+                    print(f"\\nRetrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                 else:
-                    print("\\n Max retries reached")
+                    print("\\nMax retries reached")
                     
                     # Save error information
                     error_info = {
@@ -542,15 +523,15 @@ implementation:
                     raise Exception(f"Pipeline trigger failed after {max_retries} attempts")
             
             except Exception as e:
-                print(f"\\n Unexpected error during trigger attempt {attempt + 1}: {e}")
+                print(f"\\nUnexpected error during trigger attempt {attempt + 1}: {e}")
                 import traceback
                 traceback.print_exc()
                 
                 if attempt < max_retries - 1:
-                    print(f"\\n Retrying in {retry_delay} seconds...")
+                    print(f"\\nRetrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                 else:
-                    print("\\n Max retries reached")
+                    print("\\nMax retries reached")
                     
                     error_info = {
                         'status': 'failed',
@@ -575,7 +556,7 @@ implementation:
                     
                     raise
         
-        print(f"\\n Trigger process finished")
+        print(f"\\nTrigger process finished")
         
     args:
       # CDN URLs
