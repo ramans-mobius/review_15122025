@@ -1,4 +1,4 @@
-name: Trigger Pipeline v4
+name: Trigger Pipeline v5
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -388,15 +388,15 @@ implementation:
         # Save curl command to file - SIMPLIFIED to avoid syntax errors
         curl_cmd_file = '/tmp/pipeline_trigger/curl_command.sh'
         with open(curl_cmd_file, 'w') as f:
-            f.write('curl --location "' + trigger_url.replace('"', '\\"') + '" \\\\\n')
-            f.write("  --header 'accept: application/json' \\\\\n")
-            f.write("  --header 'Authorization: Bearer " + access_token + "' \\\\\n")
-            f.write("  --header 'Content-Type: application/json' \\\\\n")
-            f.write("  --data '" + json.dumps(payload).replace("'", "'\"'\"'") + "' \\\\\n")
-            f.write("  --fail \\\\\n")
-            f.write("  --show-error \\\\\n")
-            f.write("  --connect-timeout 30 \\\\\n")
-            f.write("  --max-time 120 \\\\\n")
+            f.write('curl --location "' + trigger_url.replace('"', '\\"') + '" \\\\\\n')
+            f.write("  --header 'accept: application/json' \\\\\\n")
+            f.write("  --header 'Authorization: Bearer " + access_token + "' \\\\\\n")
+            f.write("  --header 'Content-Type: application/json' \\\\\\n")
+            f.write("  --data '" + json.dumps(payload).replace("'", "'\"'\"'") + "' \\\\\\n")
+            f.write("  --fail \\\\\\n")
+            f.write("  --show-error \\\\\\n")
+            f.write("  --connect-timeout 30 \\\\\\n")
+            f.write("  --max-time 120 \\\\\\n")
             f.write("  --verbose\\n")
         print(f"Curl command saved to: {curl_cmd_file}")
         
