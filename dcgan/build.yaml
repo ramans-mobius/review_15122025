@@ -1,4 +1,4 @@
-name: Build Model 
+name: Build Model v2
 description: Builds DCGAN model using single master config
 inputs:
   - name: master_config
@@ -42,12 +42,31 @@ implementation:
         import tempfile
         import urllib.request
         
+        # Import the module dynamically to handle any import issues
+        print("Importing nesy_factory.GANs.dcgan...")
+        
         try:
+            # First try to import directly
             from nesy_factory.GANs.dcgan import create_dcgan, DEFAULT_DCGAN_CONFIG
-            print(" Successfully imported nesy_factory.GANs.dcgan")
-        except ImportError as e:
-            print(f" ERROR: Failed to import nesy_factory.GANs.dcgan: {e}")
-            sys.exit(1)
+            print(" Successfully imported create_dcgan directly")
+        except ImportError:
+            # If direct import fails, import the module and get the function
+            print(" Direct import failed, trying module import...")
+            try:
+                import nesy_factory.GANs.dcgan as dcgan_module
+                
+                # Get create_dcgan from the module
+                if hasattr(dcgan_module, 'create_dcgan'):
+                    create_dcgan = dcgan_module.create_dcgan
+                    DEFAULT_DCGAN_CONFIG = dcgan_module.DEFAULT_DCGAN_CONFIG
+                    print(" Successfully imported from module")
+                else:
+                    print(f" create_dcgan not found in module")
+                    print(f"Available attributes: {[attr for attr in dir(dcgan_module) if not attr.startswith('_')][:20]}...")
+                    sys.exit(1)
+            except Exception as e:
+                print(f" Failed to import nesy_factory.GANs.dcgan: {e}")
+                sys.exit(1)
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--master_config', type=str, required=True)
@@ -132,7 +151,7 @@ implementation:
                         'learning_rate': gan_cfg['generator']['learning_rate'],
                         'loss_type': gan_cfg['generator']['loss_type'],
                         
-                        # Default layer configurations
+                        # Layer configurations
                         'kernel_sizes': [4] * (len(gan_cfg['generator']['hidden_dims']) + 1),
                         'strides': [1] + [2] * len(gan_cfg['generator']['hidden_dims']),
                         'paddings': [0] * (len(gan_cfg['generator']['hidden_dims']) + 1),
@@ -156,7 +175,7 @@ implementation:
                         'label_smoothing': 0.0,
                         'n_critic': 1,
                         
-                        # Default layer configurations
+                        # Layer configurations
                         'kernel_sizes': [4] * len(gan_cfg['discriminator']['hidden_dims']),
                         'strides': [2] * (len(gan_cfg['discriminator']['hidden_dims']) - 1) + [1],
                         'paddings': [1] * (len(gan_cfg['discriminator']['hidden_dims']) - 1) + [0],
@@ -189,7 +208,7 @@ implementation:
                 print(f"  Generator layers: {len(dcgan_config['generator']['hidden_dims'])}")
                 print(f"  Discriminator layers: {len(dcgan_config['discriminator']['hidden_dims'])}")
                 
-                # Create DCGAN models
+                # Create DCGAN models using the imported function
                 generator, discriminator, full_config = create_dcgan(dcgan_config)
                 
                 print(f"\\n MODELS CREATED:")
