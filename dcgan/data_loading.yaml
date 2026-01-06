@@ -1,4 +1,4 @@
-name: Load Dataset v5
+name: Load Dataset v6
 description: Universal dataset loader with single master config
 inputs:
   - name: master_config
@@ -31,12 +31,6 @@ implementation:
         import os
         import json
         import pickle
-        import base64
-        import io
-        import numpy as np
-        from PIL import Image, ImageFile
-        
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--master_config', type=str, required=True)
@@ -47,163 +41,134 @@ implementation:
         args = parser.parse_args()
         
         print('=' * 80)
-        print('Universal Dataset Loader Starting...')
+        print('Load Dataset v5 - Minimal Version')
         print('=' * 80)
         
         # ============================================================================
-        # DEBUG: Print exactly what we're receiving
+        # Parse the config
         # ============================================================================
-        print('\\n=== DEBUG: RAW MASTER_CONFIG RECEIVED ===')
-        print(f'Type: {type(args.master_config)}')
-        print(f'Length: {len(args.master_config)} chars')
-        
-        # Print first 500 characters
-        print('\\n--- Config ---')
-        print(args.master_config)
-        
-        
-        # Show repr to see escape characters
-        print('\\n--- Python repr() view (shows escape chars) ---')
-        print(repr(args.master_config))
-        
-        # Show raw bytes/hex for first 100 chars
-        print('\\n--- Raw bytes (hex) for first 100 chars ---')
-        raw_bytes = args.master_config[:100].encode('utf-8')
-        print(' '.join(f'{b:02x}' for b in raw_bytes))
-        
-        # ============================================================================
-        # Try to parse the config (simple attempt only)
-        # ============================================================================
-        print('\\n=== SIMPLE PARSE ATTEMPT ===')
-        
+        print('\\nParsing master config...')
         try:
             config = json.loads(args.master_config)
-            print('✓ Direct JSON parse SUCCEEDED!')
-            print(f'\\nParsed config keys: {list(config.keys())}')
+            print('✓ Config parsed successfully')
+            print(f'Config keys: {list(config.keys())}')
         except json.JSONDecodeError as e:
-            print(f'✗ Direct JSON parse FAILED: {e}')
-            print(f'Error position: char {e.pos}')
-            
-            # Show error context
-            start = max(0, e.pos - 50)
-            end = min(len(args.master_config), e.pos + 50)
-            context = args.master_config[start:end]
-            print(f'Error context: ...{context}...')
-            
-            # Mark error position
-            marker_pos = min(50, e.pos - start)
-            marker = ' ' * marker_pos + '^'
-            print(f'Error position:  {marker}')
+            print(f'✗ JSON parsing error: {e}')
+            print('Using empty config')
+            config = {}
+        
+        # Get dataset config
+        dataset_cfg = config.get('dataset', {})
+        image_size = dataset_cfg.get('image_size', 64)
+        channels = dataset_cfg.get('channels', 1)
+        max_samples = dataset_cfg.get('max_samples', 10)
+        dataset_name = dataset_cfg.get('name', 'mnist')
+        dataset_type = dataset_cfg.get('type', 'torchvision')
+        
+        print(f'\\nDataset parameters:')
+        print(f'  Name: {dataset_name}')
+        print(f'  Type: {dataset_type}')
+        print(f'  Image size: {image_size}')
+        print(f'  Channels: {channels}')
+        print(f'  Max samples: {max_samples}')
         
         # ============================================================================
-        # Create simple test data regardless of parsing
+        # Create minimal dataset info
         # ============================================================================
-        print('\\n=== CREATING TEST DATASET ===')
-        
-        # Use default values for testing
-        image_size = 64
-        channels = 1
-        train_samples = 10
-        test_samples = 5
-        
-        # Create dummy image
-        dummy_image = np.ones((image_size, image_size, channels), dtype=np.uint8) * 128
-        dummy_pil = Image.fromarray(dummy_image, mode='RGB' if channels == 3 else 'L')
-        img_bytes = io.BytesIO()
-        dummy_pil.save(img_bytes, format='PNG')
-        base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
-        
-        # Create train and test data
-        loaded_train_data = []
-        loaded_test_data = []
-        
-        for i in range(train_samples):
-            loaded_train_data.append({
-                'image_data': base64_data,
-                'label': str(i % 10),
-                'dataset': 'test_dataset',
-                'index': i,
-                'note': 'test_sample'
-            })
-        
-        for i in range(test_samples):
-            loaded_test_data.append({
-                'image_data': base64_data,
-                'label': str(i % 10),
-                'dataset': 'test_dataset',
-                'index': i,
-                'note': 'test_sample'
-            })
-        
-        print(f'Created {len(loaded_train_data)} train samples')
-        print(f'Created {len(loaded_test_data)} test samples')
-        
-        # ============================================================================
-        # Create dataset info
-        # ============================================================================
-        print('\\n=== CREATING DATASET INFO ===')
+        print('\\nCreating dataset info...')
         
         class DatasetInfoWrapper:
             def __init__(self, info_dict):
                 self.__dict__.update(info_dict)
         
         dataset_info = DatasetInfoWrapper({
-            'total_samples': len(loaded_train_data) + len(loaded_test_data),
-            'train_samples': len(loaded_train_data),
-            'test_samples': len(loaded_test_data),
+            'total_samples': 15,
+            'train_samples': 10,
+            'test_samples': 5,
             'image_size': image_size,
             'channels': channels,
-            'dataset_type': 'test',
-            'dataset_name': 'test_dataset',
-            'requires_preprocessing': True
+            'dataset_type': dataset_type,
+            'dataset_name': dataset_name,
+            'requires_preprocessing': True,
+            'note': 'minimal_test_dataset'
         })
+        
+        # ============================================================================
+        # Create simple train/test data (just metadata, no actual images)
+        # ============================================================================
+        print('\\nCreating train/test data...')
+        
+        train_data = []
+        test_data = []
+        
+        # Create simple data entries
+        for i in range(10):
+            train_data.append({
+                'image_id': f'train_{i}',
+                'label': str(i % 10),
+                'dataset': dataset_name,
+                'image_size': image_size,
+                'channels': channels,
+                'note': 'placeholder_for_real_image'
+            })
+        
+        for i in range(5):
+            test_data.append({
+                'image_id': f'test_{i}',
+                'label': str(i % 10),
+                'dataset': dataset_name,
+                'image_size': image_size,
+                'channels': channels,
+                'note': 'placeholder_for_real_image'
+            })
+        
+        print(f'Created {len(train_data)} train entries')
+        print(f'Created {len(test_data)} test entries')
+        
+        # ============================================================================
+        # Create data config
+        # ============================================================================
+        print('\\nCreating data config...')
+        
+        data_config = {
+            'dataset': dataset_cfg,
+            'loaded_samples': {
+                'train': len(train_data),
+                'test': len(test_data),
+                'total': len(train_data) + len(test_data)
+            },
+            'requires_preprocessing': True,
+            'config_source': 'master_config',
+            'config_keys': list(config.keys())
+        }
         
         # ============================================================================
         # Save outputs
         # ============================================================================
-        print('\\n=== SAVING OUTPUTS ===')
+        print('\\nSaving outputs...')
         
         # Create output directories
-        output_files = [
-            args.train_data,
-            args.test_data,
-            args.dataset_info,
-            args.data_config
-        ]
-        
-        for file_path in output_files:
+        for file_path in [args.train_data, args.test_data, args.dataset_info, args.data_config]:
             dir_path = os.path.dirname(file_path)
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
         
         # Save train data
         with open(args.train_data, 'wb') as f:
-            pickle.dump(loaded_train_data, f)
-        print(f'✓ Train data saved: {args.train_data} ({len(loaded_train_data)} samples)')
+            pickle.dump(train_data, f)
+        print(f'✓ Train data saved: {args.train_data}')
         
         # Save test data
         with open(args.test_data, 'wb') as f:
-            pickle.dump(loaded_test_data, f)
-        print(f'✓ Test data saved: {args.test_data} ({len(loaded_test_data)} samples)')
+            pickle.dump(test_data, f)
+        print(f'✓ Test data saved: {args.test_data}')
         
         # Save dataset info
         with open(args.dataset_info, 'wb') as f:
             pickle.dump(dataset_info, f)
         print(f'✓ Dataset info saved: {args.dataset_info}')
         
-        # Create and save data config
-        data_config = {
-            'test_mode': True,
-            'created_samples': {
-                'train': len(loaded_train_data),
-                'test': len(loaded_test_data),
-                'total': len(loaded_train_data) + len(loaded_test_data)
-            },
-            'requires_preprocessing': True,
-            'original_config_length': len(args.master_config),
-            'original_config_preview': args.master_config[:200]
-        }
-        
+        # Save data config
         with open(args.data_config, 'w') as f:
             json.dump(data_config, f, indent=2)
         print(f'✓ Data config saved: {args.data_config}')
@@ -212,14 +177,14 @@ implementation:
         # Final summary
         # ============================================================================
         print('\\n' + '=' * 80)
-        print('DATASET LOADER COMPLETE!')
+        print('LOAD DATASET COMPLETE!')
         print('=' * 80)
-        print('Created test dataset with:')
-        print(f'  - {len(loaded_train_data)} train samples')
-        print(f'  - {len(loaded_test_data)} test samples')
-        print(f'  - Image size: {image_size}x{image_size}')
-        print(f'  - Channels: {channels}')
-        print('\\nAll outputs saved successfully!')
+        print(f'Output files created:')
+        print(f'  1. Train data: {args.train_data}')
+        print(f'  2. Test data: {args.test_data}')
+        print(f'  3. Dataset info: {args.dataset_info}')
+        print(f'  4. Data config: {args.data_config}')
+        print('\\nReady for preprocessing!')
         
     args:
       - --master_config
