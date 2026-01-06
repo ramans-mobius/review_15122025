@@ -1,4 +1,4 @@
-name: Trigger Pipeline v7
+name: Trigger Pipeline v8
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -32,7 +32,7 @@ inputs:
   # Pipeline configuration
   - name: domain
     type: String
-    description: "Domain for the pipeline trigger API"
+    description: "Domain for the DCGAN pipeline trigger API"
   - name: pipeline_id
     type: String
     description: "ID of the DCGAN pipeline to trigger"
@@ -70,6 +70,9 @@ inputs:
   - name: productid
     type: String
     description: "Product ID for IAM authentication"
+  - name: iam_domain
+    type: String
+    description: "Domain for IAM authentication (may be different from pipeline trigger domain)"
   
   # DQN/RLAF parameters
   - name: dqn_experiment_id
@@ -77,7 +80,7 @@ inputs:
     description: "ID for DQN experiment"
   - name: pipeline_domain
     type: String
-    description: "Domain for pipeline operations"
+    description: "Domain for DQN pipeline operations (different from DCGAN trigger domain)"
   - name: dqn_pipeline_id
     type: String
     description: "ID of DQN pipeline"
@@ -136,9 +139,9 @@ implementation:
         # Authentication
         parser.add_argument('--access_token', type=str, required=True)
         
-        # Pipeline configuration
-        parser.add_argument('--domain', type=str, required=True)
-        parser.add_argument('--pipeline_id', type=str, required=True)
+        # Pipeline configuration - DCGAN PIPELINE DOMAIN
+        parser.add_argument('--domain', type=str, required=True, help='Domain for DCGAN pipeline trigger')
+        parser.add_argument('--pipeline_id', type=str, required=True, help='ID of the DCGAN pipeline to trigger')
         parser.add_argument('--experiment_id', type=str, required=True)
         
         # Pipeline parameters
@@ -153,10 +156,11 @@ implementation:
         parser.add_argument('--password', type=str, required=True)
         parser.add_argument('--requesttype', type=str, required=True)
         parser.add_argument('--productid', type=str, required=True)
+        parser.add_argument('--iam_domain', type=str, required=True, help='Domain for IAM authentication')
         
         # DQN/RLAF parameters
         parser.add_argument('--dqn_experiment_id', type=str, required=True)
-        parser.add_argument('--pipeline_domain', type=str, required=True)
+        parser.add_argument('--pipeline_domain', type=str, required=True, help='Domain for DQN pipeline (different from DCGAN trigger domain)')
         parser.add_argument('--dqn_pipeline_id', type=str, required=True)
         parser.add_argument('--schema_id', type=str, required=True)
         parser.add_argument('--model_id', type=str, required=True)
@@ -180,7 +184,13 @@ implementation:
             except:
                 pass
             
-            # Step 2: Handle special patterns
+            # FIX: Check if we already have encoded dollar signs
+            # If url contains %24%24, it's already encoded, don't double encode
+            if "%24%24" in url:
+                print("URL already contains encoded double dollar (%24%24) - skipping re-encoding")
+                return url
+            
+            # Step 2: Handle special patterns - replace $$ with placeholder
             url = url.replace("$$", "__DOUBLE_DOLLAR_PLACEHOLDER__")
             
             # Step 3: Handle _ENC( pattern
@@ -207,7 +217,7 @@ implementation:
             else:
                 encoded_url = urllib.parse.quote(url, safe="/:?=&%")
             
-            # Restore patterns
+            # Restore patterns - FIXED: Use single %24%24, not double
             encoded_url = encoded_url.replace("__ENC_PAREN_PLACEHOLDER__", "_ENC%28")
             encoded_url = encoded_url.replace("__DOUBLE_DOLLAR_PLACEHOLDER__", "%24%24")
             
@@ -233,12 +243,29 @@ implementation:
         print("=" * 100)
         print("DCGAN PIPELINE TRIGGER")
         print("=" * 100)
-        print(f"Pipeline ID: {args.pipeline_id}")
+        print(f"DCGAN Pipeline ID: {args.pipeline_id}")
         print(f"Experiment ID: {args.experiment_id}")
-        print(f"Domain: {args.domain}")
+        print(f"DCGAN Trigger Domain: {args.domain}")
+        print(f"IAM Domain: {args.iam_domain}")
+        print(f"DQN Pipeline Domain: {args.pipeline_domain}")
+        print(f"DQN Pipeline ID: {args.dqn_pipeline_id}")
         
-        # Load upload summary
+        # Load upload summary to get CDN URL
         upload_summary = load_upload_summary(args.upload_summary)
+        
+        # Get upload_summary_cdn_url from the upload_summary JSON
+        upload_summary_cdn_url = ""
+        if upload_summary:
+            # Check for CDN URL in upload_summary
+            upload_summary_cdn_url = upload_summary.get('upload_summary_cdn_url', '')
+            if not upload_summary_cdn_url:
+                # Try to find any CDN URL in the summary
+                for key, value in upload_summary.items():
+                    if isinstance(value, str) and 'cdn' in key.lower() and 'url' in key.lower():
+                        upload_summary_cdn_url = value
+                        break
+        
+        print(f"\\nUpload summary CDN URL: {upload_summary_cdn_url}")
         
         # Fix all CDN URLs
         print("\\n" + "=" * 100)
@@ -259,14 +286,23 @@ implementation:
             print(f"\\n{key}:")
             fixed_urls[key] = fix_cdn_url(url)
         
+        # Fix upload_summary URL if it's a CDN URL
+        if upload_summary_cdn_url:
+            print(f"\\nupload_summary (CDN URL):")
+            fixed_upload_summary_url = fix_cdn_url(upload_summary_cdn_url)
+        else:
+            # If no CDN URL found, use the local file path (for backward compatibility)
+            print(f"\\nupload_summary (local file, not CDN URL): {args.upload_summary}")
+            fixed_upload_summary_url = args.upload_summary
+        
         # Read access token
         with open(args.access_token, 'r') as f:
             access_token = f.read().strip()
         print(f"\\nAccess token loaded (first 20 chars): {access_token[:20]}...")
         
-        # Build trigger URL
+        # Build trigger URL - USING DCGAN PIPELINE DOMAIN
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
-        print(f"\\nTrigger URL: {trigger_url}")
+        print(f"\\nDCGAN Trigger URL: {trigger_url}")
         
         # Build payload with all pipeline parameters
         payload = {
@@ -285,7 +321,7 @@ implementation:
                 "data_config_url": fixed_urls['data_config_url'],
                 "processed_data_url": fixed_urls['processed_data_url'],
                 "preprocess_metadata_url": fixed_urls['preprocess_metadata_url'],
-                "upload_summary_url": fix_cdn_url(args.upload_summary) if args.upload_summary else "",
+                "upload_summary_url": fixed_upload_summary_url,
                 
                 # Model loading parameters
                 "load_from_cdn": args.load_from_cdn,
@@ -295,16 +331,16 @@ implementation:
                 "splitting_strategy": args.splitting_strategy,
                 "num_tasks": str(args.num_tasks),
                 
-                # IAM authentication parameters
+                # IAM authentication parameters - USING IAM DOMAIN
                 "userName": args.userName,
                 "password": args.password,
                 "productId": args.productid,
                 "requestType": args.requesttype,
-                "domain": args.domain,
+                "domain": args.iam_domain,  # IAM domain for authentication
                 
-                # DQN/RLAF parameters
+                # DQN/RLAF parameters - USING DQN PIPELINE DOMAIN
                 "dqn_experiment_id": args.dqn_experiment_id,
-                "pipeline_domain": args.pipeline_domain,
+                "pipeline_domain": args.pipeline_domain,  # DQN pipeline domain
                 "dqn_pipeline_id": args.dqn_pipeline_id,
                 "schema_id": args.schema_id,
                 "model_id": args.model_id
@@ -316,7 +352,8 @@ implementation:
         if upload_summary:
             payload['parameters']['upload_summary_info'] = {
                 'total_uploads': upload_summary.get('total_uploads', 0),
-                'total_size_mb': upload_summary.get('total_size_mb', 0)
+                'total_size_mb': upload_summary.get('total_size_mb', 0),
+                'upload_summary_cdn_url': upload_summary_cdn_url
             }
         
         print("\\n=== FULL PAYLOAD DETAILS ===")
@@ -329,6 +366,9 @@ implementation:
         print(f"\\nTriggering DCGAN pipeline at: {trigger_url}")
         print(f"DCGAN Pipeline ID: {args.pipeline_id}")
         print(f"Experiment ID: {args.experiment_id}")
+        print(f"DCGAN Trigger Domain: {args.domain}")
+        print(f"IAM Domain (passed as parameter): {args.iam_domain}")
+        print(f"DQN Pipeline Domain (passed as parameter): {args.pipeline_domain}")
         
         print(f"\\n=== FINAL PARAMETERS ===")
         for key in fixed_urls:
@@ -343,7 +383,13 @@ implementation:
         print("  -H 'accept: application/json' \\\\")
         print(f"  -H 'Authorization: Bearer {access_token}' \\\\")
         print("  -H 'Content-Type: application/json' \\\\")
-        print(f"  -d '{json.dumps(payload)}'")
+        
+        # Truncate payload for display if too long
+        payload_str = json.dumps(payload)
+        if len(payload_str) > 500:
+            print(f"  -d '{payload_str[:500]}...'")
+        else:
+            print(f"  -d '{payload_str}'")
         print("=" * 80)
         print()
         
@@ -430,6 +476,9 @@ implementation:
                         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                         'pipeline_id': args.pipeline_id,
                         'experiment_id': args.experiment_id,
+                        'dcgan_trigger_domain': args.domain,
+                        'iam_domain': args.iam_domain,
+                        'dqn_domain': args.pipeline_domain,
                         'attempts': attempt + 1,
                         'trigger_url': trigger_url
                     }
@@ -499,7 +548,10 @@ implementation:
                         'last_stdout': e.stdout[:500],
                         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                         'attempts': attempt + 1,
-                        'trigger_url': trigger_url
+                        'trigger_url': trigger_url,
+                        'dcgan_trigger_domain': args.domain,
+                        'iam_domain': args.iam_domain,
+                        'dqn_domain': args.pipeline_domain
                     }
                     
                     os.makedirs(os.path.dirname(args.trigger_response) or '.', exist_ok=True)
@@ -608,6 +660,8 @@ implementation:
       - {inputValue: requesttype}
       - --productid
       - {inputValue: productid}
+      - --iam_domain
+      - {inputValue: iam_domain}
       
       # DQN/RLAF parameters
       - --dqn_experiment_id
