@@ -1,4 +1,4 @@
-name: Load Dataset v2
+name: Load Dataset v3
 description: Universal dataset loader with single master config
 inputs:
   - name: master_config
@@ -174,7 +174,7 @@ implementation:
         
         # Define dataset loading functions
         def load_torchvision_dataset(name, params, download_path):
-            """Load dataset from torchvision"""
+         
             try:
                 import torchvision
                 import torchvision.transforms as transforms
@@ -274,7 +274,7 @@ implementation:
                 return [], []
         
         def load_huggingface_dataset(name, params):
-            """Load dataset from HuggingFace"""
+            
             try:
                 from datasets import load_dataset
                 
