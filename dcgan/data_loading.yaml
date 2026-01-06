@@ -1,4 +1,4 @@
-name: Load Dataset v4
+name: Load Dataset v5
 description: Universal dataset loader with single master config
 inputs:
   - name: master_config
@@ -66,182 +66,45 @@ implementation:
         print('\\n--- Python repr() view (shows escape chars) ---')
         print(repr(args.master_config))
         
-        # Count specific characters
-        print('\\n--- Character counts ---')
-        print(f'Double quotes ("): {args.master_config.count(\"\")}')
-        print(f'Backslashes (\\\\): {args.master_config.count(\"\\\\\")}')
-        print(f'Opening braces ({{): {args.master_config.count(\"{\")}')
-        print(f'Closing braces (}}): {args.master_config.count(\"}\")}')
-        
-        # Save raw config to file for inspection
-        raw_config_file = '/tmp/raw_master_config.txt'
-        with open(raw_config_file, 'w') as f:
-            f.write(args.master_config)
-        print(f'\\nRaw config saved to: {raw_config_file}')
+        # Show raw bytes/hex for first 100 chars
+        print('\\n--- Raw bytes (hex) for first 100 chars ---')
+        raw_bytes = args.master_config[:100].encode('utf-8')
+        print(' '.join(f'{b:02x}' for b in raw_bytes))
         
         # ============================================================================
-        # Try to parse the config
+        # Try to parse the config (simple attempt only)
         # ============================================================================
-        print('\\n=== ATTEMPTING TO PARSE CONFIG ===')
+        print('\\n=== SIMPLE PARSE ATTEMPT ===')
         
-        config = None
-        parse_attempts = []
-        
-        # Attempt 1: Direct JSON parse
-        print('\\n1. Attempting direct JSON parse...')
         try:
             config = json.loads(args.master_config)
-            parse_attempts.append(('Direct parse', 'SUCCESS'))
-            print('✓ Direct parse succeeded!')
+            print('✓ Direct JSON parse SUCCEEDED!')
+            print(f'\\nParsed config keys: {list(config.keys())}')
         except json.JSONDecodeError as e:
-            parse_attempts.append(('Direct parse', f'FAILED: {e}'))
-            print(f'✗ Direct parse failed: {e}')
-            print(f'  Error position: char {e.pos}')
-            print(f'  Context: ...{args.master_config[max(0, e.pos-50):e.pos+50]}...')
-        
-        # Attempt 2: If direct parse fails, try fixing common issues
-        if config is None:
-            print('\\n2. Attempting to fix and parse...')
-            master_config_str = args.master_config
+            print(f'✗ Direct JSON parse FAILED: {e}')
+            print(f'Error position: char {e.pos}')
             
-            print(f'  Before fixes: First 100 chars: {master_config_str[:100]}')
+            # Show error context
+            start = max(0, e.pos - 50)
+            end = min(len(args.master_config), e.pos + 50)
+            context = args.master_config[start:end]
+            print(f'Error context: ...{context}...')
             
-            # Remove outer quotes if present
-            if master_config_str.startswith('"') and master_config_str.endswith('"'):
-                master_config_str = master_config_str[1:-1]
-                print('  Removed outer quotes')
-            
-            # Fix escaped quotes
-            if '\\"' in master_config_str:
-                master_config_str = master_config_str.replace('\\"', '"')
-                print('  Fixed escaped quotes (\\" -> ")')
-            
-            if '\\\\"' in master_config_str:
-                master_config_str = master_config_str.replace('\\\\"', '"')
-                print('  Fixed double-escaped quotes (\\\\" -> ")')
-            
-            # Fix escaped backslashes
-            if '\\\\' in master_config_str:
-                master_config_str = master_config_str.replace('\\\\', '\\')
-                print('  Fixed escaped backslashes (\\\\ -> \\)')
-            
-            print(f'  After fixes: First 100 chars: {master_config_str[:100]}')
-            
-            try:
-                config = json.loads(master_config_str)
-                parse_attempts.append(('Fixed parse', 'SUCCESS'))
-                print('✓ Fixed parse succeeded!')
-            except json.JSONDecodeError as e:
-                parse_attempts.append(('Fixed parse', f'FAILED: {e}'))
-                print(f'✗ Fixed parse failed: {e}')
-        
-        # Attempt 3: If still failing, try eval (carefully)
-        if config is None:
-            print('\\n3. Attempting eval (with safety checks)...')
-            try:
-                # Remove any potentially dangerous content
-                safe_str = args.master_config
-                if '__' in safe_str or 'import' in safe_str or 'exec' in safe_str:
-                    print('  Skipping eval - potentially unsafe content')
-                else:
-                    config = eval(safe_str)
-                    parse_attempts.append(('eval', 'SUCCESS'))
-                    print('✓ Eval succeeded!')
-            except Exception as e:
-                parse_attempts.append(('eval', f'FAILED: {e}'))
-                print(f'✗ Eval failed: {e}')
-        
-        # Attempt 4: Use default config if all else fails
-        if config is None:
-            print('\\n4. All parsing attempts failed. Using default config...')
-            config = {
-                'dataset': {
-                    'type': 'torchvision',
-                    'name': 'mnist',
-                    'path': './data',
-                    'image_size': 64,
-                    'channels': 1,
-                    'max_samples': 1000,
-                    'train_split': 0.8,
-                    'shuffle_seed': 42
-                },
-                'gan': {
-                    'type': 'dcgan',
-                    'model_type': 'dcgan',
-                    'z_dim': 100,
-                    'generator': {
-                        'hidden_dims': [256, 128, 64],
-                        'learning_rate': 0.0002,
-                        'loss_type': 'bce_with_logits',
-                        'use_forward_forward': False,
-                        'use_cafo': False
-                    },
-                    'discriminator': {
-                        'hidden_dims': [64, 128, 256],
-                        'learning_rate': 0.0004,
-                        'loss_type': 'bce_with_logits',
-                        'dropout': 0.3,
-                        'use_forward_forward': False,
-                        'use_cafo': False
-                    },
-                    'training': {
-                        'algorithm': 'backprop',
-                        'batch_size': 64,
-                        'epochs': 10,
-                        'epochs_per_task': 5
-                    }
-                }
-            }
-            parse_attempts.append(('Default config', 'USED'))
-            print('✓ Using default MNIST config')
+            # Mark error position
+            marker_pos = min(50, e.pos - start)
+            marker = ' ' * marker_pos + '^'
+            print(f'Error position:  {marker}')
         
         # ============================================================================
-        # Print parsing results
+        # Create simple test data regardless of parsing
         # ============================================================================
-        print('\\n=== PARSING RESULTS ===')
-        for attempt, result in parse_attempts:
-            print(f'{attempt}: {result}')
+        print('\\n=== CREATING TEST DATASET ===')
         
-        print('\\n=== FINAL CONFIG STRUCTURE ===')
-        print(json.dumps(config, indent=2)[:500] + '...' if len(json.dumps(config)) > 500 else json.dumps(config, indent=2))
-        
-        # ============================================================================
-        # Extract parameters from config
-        # ============================================================================
-        dataset_cfg = config.get('dataset', {})
-        
-        # Extract dataset parameters with defaults
-        dataset_type = dataset_cfg.get('type', 'torchvision')
-        dataset_name = dataset_cfg.get('name', 'mnist')
-        dataset_path = dataset_cfg.get('path', './data')
-        image_size = dataset_cfg.get('image_size', 64)
-        channels = dataset_cfg.get('channels', 1)
-        max_samples = dataset_cfg.get('max_samples')
-        train_split = dataset_cfg.get('train_split', 0.8)
-        shuffle_seed = dataset_cfg.get('shuffle_seed', 42)
-        
-        print('\\n=== EXTRACTED PARAMETERS ===')
-        print(f'Dataset Type: {dataset_type}')
-        print(f'Dataset Name: {dataset_name}')
-        print(f'Dataset Path: {dataset_path}')
-        print(f'Image Size: {image_size}')
-        print(f'Channels: {channels}')
-        print(f'Max Samples: {max_samples}')
-        print(f'Train Split: {train_split}')
-        print(f'Shuffle Seed: {shuffle_seed}')
-        
-        # Handle "none" path for torchvision
-        if dataset_path.lower() in ['none', 'null', 'nil', ''] and dataset_type == 'torchvision':
-            dataset_path = './data'
-            print(f'\\nSetting default download path for torchvision: {dataset_path}')
-        
-        # ============================================================================
-        # Load dataset (simplified for now - just create dummy data)
-        # ============================================================================
-        print('\\n=== LOADING/CREATING DATASET ===')
-        
-        # For now, create simple dummy data to test the pipeline
-        print('Creating test dataset...')
+        # Use default values for testing
+        image_size = 64
+        channels = 1
+        train_samples = 10
+        test_samples = 5
         
         # Create dummy image
         dummy_image = np.ones((image_size, image_size, channels), dtype=np.uint8) * 128
@@ -251,17 +114,14 @@ implementation:
         base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
         
         # Create train and test data
-        train_samples = min(max_samples or 10, 10)
-        test_samples = min(max_samples or 5, 5)
-        
         loaded_train_data = []
         loaded_test_data = []
         
         for i in range(train_samples):
             loaded_train_data.append({
                 'image_data': base64_data,
-                'label': str(i % 10),  # Digits 0-9 for MNIST-like
-                'dataset': dataset_name,
+                'label': str(i % 10),
+                'dataset': 'test_dataset',
                 'index': i,
                 'note': 'test_sample'
             })
@@ -270,7 +130,7 @@ implementation:
             loaded_test_data.append({
                 'image_data': base64_data,
                 'label': str(i % 10),
-                'dataset': dataset_name,
+                'dataset': 'test_dataset',
                 'index': i,
                 'note': 'test_sample'
             })
@@ -293,10 +153,9 @@ implementation:
             'test_samples': len(loaded_test_data),
             'image_size': image_size,
             'channels': channels,
-            'dataset_type': dataset_type,
-            'dataset_name': dataset_name,
-            'requires_preprocessing': True,
-            'parsing_notes': parse_attempts
+            'dataset_type': 'test',
+            'dataset_name': 'test_dataset',
+            'requires_preprocessing': True
         })
         
         # ============================================================================
@@ -334,16 +193,15 @@ implementation:
         
         # Create and save data config
         data_config = {
-            'dataset': dataset_cfg,
-            'loaded_samples': {
+            'test_mode': True,
+            'created_samples': {
                 'train': len(loaded_train_data),
                 'test': len(loaded_test_data),
                 'total': len(loaded_train_data) + len(loaded_test_data)
             },
             'requires_preprocessing': True,
-            'master_config_parsed': config is not None,
-            'parsing_summary': parse_attempts,
-            'original_config_preview': args.master_config[:200] if args.master_config else 'empty'
+            'original_config_length': len(args.master_config),
+            'original_config_preview': args.master_config[:200]
         }
         
         with open(args.data_config, 'w') as f:
@@ -356,13 +214,11 @@ implementation:
         print('\\n' + '=' * 80)
         print('DATASET LOADER COMPLETE!')
         print('=' * 80)
-        print(f'Summary:')
-        print(f'  - Train samples: {len(loaded_train_data)}')
-        print(f'  - Test samples: {len(loaded_test_data)}')
+        print('Created test dataset with:')
+        print(f'  - {len(loaded_train_data)} train samples')
+        print(f'  - {len(loaded_test_data)} test samples')
         print(f'  - Image size: {image_size}x{image_size}')
         print(f'  - Channels: {channels}')
-        print(f'  - Dataset type: {dataset_type}')
-        print(f'  - Dataset name: {dataset_name}')
         print('\\nAll outputs saved successfully!')
         
     args:
