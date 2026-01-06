@@ -1,4 +1,4 @@
-name: Preprocess
+name: Preprocess v2
 description: Preprocesses train dataset with single master config
 inputs:
   - name: train_data
@@ -56,6 +56,13 @@ implementation:
         print("=" * 80)
         
         # ============================================================================
+        # Define DatasetInfoWrapper class (must match Load Dataset brick)
+        # ============================================================================
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+        
+        # ============================================================================
         # Parse master config with error handling
         # ============================================================================
         print("\\nParsing master config...")
@@ -80,20 +87,51 @@ implementation:
         dataset_cfg = config.get('dataset', {})
         gan_cfg = config.get('gan', {})
         
+        # ============================================================================
         # Load input data
+        # ============================================================================
         print("\\nLoading input data...")
+        
+        # Define a safe unpickler
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if name == 'DatasetInfoWrapper':
+                    return DatasetInfoWrapper
+                return super().find_class(module, name)
+        
+        # Load train data
         with open(args.train_data, 'rb') as f:
-            train_data = pickle.load(f)
+            train_data = SafeUnpickler(f).load()
         print(f"✓ Loaded train data: {len(train_data)} samples")
         
+        # Load dataset info
         with open(args.dataset_info, 'rb') as f:
-            dataset_info = pickle.load(f)
+            dataset_info = SafeUnpickler(f).load()
         print(f"✓ Loaded dataset info")
         
+        # Check if dataset_info has the expected attributes
+        if hasattr(dataset_info, '__dict__'):
+            print(f"Dataset info attributes: {list(dataset_info.__dict__.keys())}")
+            if hasattr(dataset_info, 'image_size'):
+                print(f"  Image size from dataset info: {dataset_info.image_size}")
+            if hasattr(dataset_info, 'channels'):
+                print(f"  Channels from dataset info: {dataset_info.channels}")
+        
+        # ============================================================================
         # Get parameters
+        # ============================================================================
+        # Try to get from dataset_info first, then config
+        if hasattr(dataset_info, 'image_size'):
+            image_size = dataset_info.image_size
+        else:
+            image_size = gan_cfg.get('image_size', dataset_cfg.get('image_size', 64))
+        
+        if hasattr(dataset_info, 'channels'):
+            channels = dataset_info.channels
+        else:
+            channels = gan_cfg.get('channels', dataset_cfg.get('channels', 1))
+        
         model_type = gan_cfg.get('model_type', 'dcgan')
-        image_size = gan_cfg.get('image_size', dataset_cfg.get('image_size', 64))
-        channels = gan_cfg.get('channels', dataset_cfg.get('channels', 1))
         
         print(f"\\nProcessing parameters:")
         print(f"  Model type: {model_type}")
@@ -101,7 +139,7 @@ implementation:
         print(f"  Channels: {channels}")
         
         # ============================================================================
-        # Define classes
+        # Define GAN-specific classes
         # ============================================================================
         class GANDataset:
             def __init__(self, data_list, transform=None, image_size=64, channels=3):
