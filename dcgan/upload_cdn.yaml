@@ -1,4 +1,4 @@
-name: Upload Data To CDN v4
+name: Upload Data To CDN v5
 description: Uploads dataset outputs (from Load Dataset and Preprocess) to CDN for reuse
 inputs:
   # From Load Dataset brick
@@ -61,9 +61,6 @@ outputs:
   - name: upload_summary
     type: String
     description: "JSON summary of all uploaded URLs and file info"
-  - name: upload_summary_url
-    type: String
-    description: "CDN URL for the upload summary JSON file"
 
 implementation:
   container:
@@ -115,7 +112,6 @@ implementation:
         parser.add_argument('--processed_data_url', type=str, required=True, help='Output path for processed data URL')
         parser.add_argument('--preprocess_metadata_url', type=str, required=True, help='Output path for preprocess metadata URL')
         parser.add_argument('--upload_summary', type=str, required=True, help='Output path for upload summary')
-        parser.add_argument('--upload_summary_url', type=str, required=True, help='Output path for upload summary CDN URL')
         
         args = parser.parse_args()
         
@@ -128,7 +124,7 @@ implementation:
         print(f"=== DCGAN Data Upload to CDN ===")
         print(f"Upload domain: {args.domain}")
         print(f"Download prefix: {args.get_cdn}")
-        print(f"Files to upload: 7 (6 data files + 1 summary)")
+        print(f"Files to upload: 6")
         
         def upload_file_to_cdn(file_path, output_cdn_url_path, description, file_type="pkl"):
             
@@ -170,15 +166,14 @@ implementation:
                     print(f"    Error: No cdnUrl in response")
                     return None
                 
-                # FIXED: Do NOT modify the $$ pattern here
-                # The CDN returns the correct URL, we should not change it
-                # The $$ pattern will be handled by the trigger brick
-                # if "$$" in relative_cdn_url:
-                #     relative_cdn_url = relative_cdn_url.replace("$$", "$$$")
-                #     print(f"     Fixed $$ pattern in URL")
+                
+                # Fix $$ pattern if present
+                #if "$$" in relative_cdn_url:
+                #    relative_cdn_url = relative_cdn_url.replace("$$", "$$$")
+                #    print(f"     Fixed $$ pattern in URL")
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"     Uploaded: {full_url[:100]}...")
+                print(f"     Uploaded: {full_url}...")
                 
                 # Save URL to output file
                 output_dir = os.path.dirname(output_cdn_url_path)
@@ -280,7 +275,7 @@ implementation:
             results.append(metadata_result)
             upload_results['preprocess_metadata'] = metadata_result
         
-        # Create summary JSON file
+        # Create summary
         print(f"\\n Creating upload summary...")
         
         total_size = sum(r['size_bytes'] for r in results if r)
@@ -300,34 +295,13 @@ implementation:
             }
         }
         
-        # Save summary to local file first
+        # Save summary
         os.makedirs(os.path.dirname(args.upload_summary) or '.', exist_ok=True)
         with open(args.upload_summary, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        print(f"   Summary created locally: {args.upload_summary}")
-        
-        # 7. Upload the summary JSON file to CDN
-        print(f"\\n Uploading summary to CDN...")
-        summary_result = upload_file_to_cdn(
-            args.upload_summary,
-            args.upload_summary_url,
-            "Upload summary JSON",
-            "summary"
-        )
-        
-        if summary_result:
-            results.append(summary_result)
-            upload_results['upload_summary'] = summary_result
-            # Update the summary to include its own CDN URL
-            summary['upload_summary_cdn_url'] = summary_result['url']
-            
-            # Save updated summary with CDN URL
-            with open(args.upload_summary, 'w') as f:
-                json.dump(summary, f, indent=2)
-        
         print(f"\\n Upload Complete!")
-        print(f"   Successful uploads: {len(results)}/7")
+        print(f"   Successful uploads: {successful_uploads}/6")
         print(f"   Total size: {total_size:,} bytes ({total_size/(1024*1024):.2f} MB)")
         print(f"\\n Uploaded files:")
         for i, result in enumerate(results, 1):
@@ -335,14 +309,12 @@ implementation:
                 print(f"   {i}. {result['description']}: {result['size_bytes']:,} bytes")
         
         print(f"\\n Summary saved to: {args.upload_summary}")
-        if summary_result:
-            print(f" Summary CDN URL: {summary_result['url'][:100]}...")
         
         # Verify all outputs were created
         output_files = [
             args.train_data_url, args.test_data_url, args.dataset_info_url,
             args.data_config_url, args.processed_data_url, args.preprocess_metadata_url,
-            args.upload_summary, args.upload_summary_url
+            args.upload_summary
         ]
         
         for output_file in output_files:
@@ -391,5 +363,3 @@ implementation:
       - {outputPath: preprocess_metadata_url}
       - --upload_summary
       - {outputPath: upload_summary}
-      - --upload_summary_url
-      - {outputPath: upload_summary_url}
