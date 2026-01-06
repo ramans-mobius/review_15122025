@@ -1,4 +1,4 @@
-name: Trigger Pipeline 
+name: Trigger Pipeline v2
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -172,6 +172,8 @@ implementation:
             if not url:
                 return url
             
+            print(f"Original URL: {url}...")
+            
             # Step 1: Decode any existing URL encoding
             try:
                 url = urllib.parse.unquote(url)
@@ -216,6 +218,7 @@ implementation:
                 if paren_pos != -1:
                     encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
             
+            print(f"Encoded URL: {encoded_url[:100]}...")
             return encoded_url
         
         def load_upload_summary(summary_path):
@@ -227,7 +230,9 @@ implementation:
                 print(f"Warning: Could not load upload summary: {e}")
                 return {}
         
-        print("=== DCGAN Pipeline Trigger ===")
+        print("=" * 100)
+        print("DCGAN PIPELINE TRIGGER")
+        print("=" * 100)
         print(f"Pipeline ID: {args.pipeline_id}")
         print(f"Experiment ID: {args.experiment_id}")
         print(f"Domain: {args.domain}")
@@ -236,7 +241,9 @@ implementation:
         upload_summary = load_upload_summary(args.upload_summary)
         
         # Fix all CDN URLs
-        print("\\n=== Fixing CDN URLs ===")
+        print("\\n" + "=" * 100)
+        print("FIXING CDN URLs")
+        print("=" * 100)
         fixed_urls = {}
         
         urls_to_fix = {
@@ -249,14 +256,17 @@ implementation:
         }
         
         for key, url in urls_to_fix.items():
+            print(f"\\n{key}:")
             fixed_urls[key] = fix_cdn_url(url)
         
         # Read access token
         with open(args.access_token, 'r') as f:
             access_token = f.read().strip()
+        print(f"\\nAccess token loaded (first 20 chars): {access_token[:20]}...")
         
         # Build trigger URL
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
+        print(f"\\nTrigger URL: {trigger_url}")
         
         # Build payload with all pipeline parameters
         payload = {
@@ -309,27 +319,58 @@ implementation:
                 'total_size_mb': upload_summary.get('total_size_mb', 0)
             }
         
-        print(f"\\n=== Pipeline Payload Summary ===")
-        print(f"Parameters count: {len(payload['parameters'])}")
-        print(f"CDN URLs included: {len([k for k in payload['parameters'] if k.endswith('_url')])}")
+        print("\\n" + "=" * 100)
+        print("FULL PAYLOAD DETAILS")
+        print("=" * 100)
         
-        # Trigger pipeline
-        print(f"\\n=== Triggering Pipeline ===")
-        print(f"URL: {trigger_url}")
+        print(f"\\n=== PAYLOAD SUMMARY ===")
+        print(f"Total parameters: {len(payload['parameters'])}")
+        print(f"CDN URLs: {len([k for k in payload['parameters'] if k.endswith('_url')])}")
+        
+        print(f"\\n=== COMPLETE PAYLOAD (JSON) ===")
+        print(json.dumps(payload, indent=2))
+        
+        print(f"\\n=== PAYLOAD PARAMETER DETAILS ===")
+        for key, value in payload['parameters'].items():
+            if isinstance(value, str) and len(value) > 100:
+                print(f"{key}: {value[:100]}... (length: {len(value)} chars)")
+            else:
+                print(f"{key}: {value}")
         
         # Create curl command
         curl_command = [
             "curl",
             "--location", trigger_url,
-            "--header", f"accept: application/json",
+            "--header", "accept: application/json",
             "--header", f"Authorization: Bearer {access_token}",
-            "--header", f"Content-Type: application/json",
+            "--header", "Content-Type: application/json",
             "--data", json.dumps(payload),
             "--fail",
             "--show-error",
             "--connect-timeout", "30",
-            "--max-time", "120"
+            "--max-time", "120",
+            "--verbose"
         ]
+        
+        print("\\n" + "=" * 100)
+        print("FULL CURL COMMAND")
+        print("=" * 100)
+        
+        # Print curl command line by line
+        print(f"\\ncurl --location '{trigger_url}' \\")
+        print("  --header 'accept: application/json' \\")
+        print(f"  --header 'Authorization: Bearer {access_token[:20]}...' \\")
+        print("  --header 'Content-Type: application/json' \\")
+        print(f"  --data '{json.dumps(payload)[:200]}...' \\")
+        print("  --fail \\")
+        print("  --show-error \\")
+        print("  --connect-timeout 30 \\")
+        print("  --max-time 120 \\")
+        print("  --verbose")
+        
+        # Also print the actual curl command array
+        print(f"\\n=== Python subprocess command array ===")
+        print(f"curl_command = {curl_command}")
         
         # Save payload to file for manual use
         os.makedirs('/tmp/pipeline_trigger', exist_ok=True)
@@ -338,14 +379,34 @@ implementation:
             json.dump(payload, f, indent=2)
         print(f"\\nPayload saved to: {payload_file}")
         
+        # Save curl command to file
+        curl_cmd_file = '/tmp/pipeline_trigger/curl_command.sh'
+        with open(curl_cmd_file, 'w') as f:
+            f.write(f"curl --location '{trigger_url}' \\\\n")
+            f.write("  --header 'accept: application/json' \\\\n")
+            f.write(f"  --header 'Authorization: Bearer {access_token}' \\\\n")
+            f.write("  --header 'Content-Type: application/json' \\\\n")
+            f.write(f"  --data '{json.dumps(payload)}' \\\\n")
+            f.write("  --fail \\\\n")
+            f.write("  --show-error \\\\n")
+            f.write("  --connect-timeout 30 \\\\n")
+            f.write("  --max-time 120 \\\\n")
+            f.write("  --verbose\\n")
+        print(f"Curl command saved to: {curl_cmd_file}")
+        
+        print("\\n" + "=" * 100)
+        print("EXECUTING TRIGGER")
+        print("=" * 100)
+        
         # Trigger pipeline with retry logic
         max_retries = 3
         retry_delay = 10
         
         for attempt in range(max_retries):
             try:
-                print(f"Attempt {attempt + 1}/{max_retries}")
+                print(f"\\n=== Attempt {attempt + 1}/{max_retries} ===")
                 
+                print(f"Executing curl command...")
                 process = subprocess.run(
                     curl_command,
                     capture_output=True,
@@ -353,21 +414,32 @@ implementation:
                     check=True
                 )
                 
-                print("Trigger successful!")
+                print("✓ Trigger successful!")
+                print(f"Exit code: {process.returncode}")
+                
+                print(f"\\n=== Raw Response ===")
+                print(process.stdout)
                 
                 # Parse response
                 try:
                     response = json.loads(process.stdout)
                     run_id = response.get('run_id', response.get('id', 'unknown'))
                     
+                    print(f"\\n=== Parsed Response ===")
+                    print(json.dumps(response, indent=2))
+                    
+                    print(f"\\n=== Extracted Run ID: {run_id} ===")
+                    
                     # Save outputs
                     os.makedirs(os.path.dirname(args.trigger_response) or '.', exist_ok=True)
                     with open(args.trigger_response, 'w') as f:
                         json.dump(response, f, indent=2)
+                    print(f"Response saved to: {args.trigger_response}")
                     
                     os.makedirs(os.path.dirname(args.run_id) or '.', exist_ok=True)
                     with open(args.run_id, 'w') as f:
                         f.write(str(run_id))
+                    print(f"Run ID saved to: {args.run_id}")
                     
                     # Create status summary
                     status_summary = {
@@ -376,90 +448,113 @@ implementation:
                         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                         'pipeline_id': args.pipeline_id,
                         'experiment_id': args.experiment_id,
-                        'attempts': attempt + 1
+                        'attempts': attempt + 1,
+                        'trigger_url': trigger_url
                     }
                     
                     os.makedirs(os.path.dirname(args.trigger_status) or '.', exist_ok=True)
                     with open(args.trigger_status, 'w') as f:
                         json.dump(status_summary, f, indent=2)
+                    print(f"Status summary saved to: {args.trigger_status}")
                     
-                    print(f"\\n=== Trigger Summary ===")
-                    print(f"Status: SUCCESS")
-                    print(f"Run ID: {run_id}")
+                    print(f"\\n" + "=" * 100)
+                    print("TRIGGER COMPLETE - SUCCESS")
+                    print("=" * 100)
                     
                     break  # Success, exit retry loop
                     
-                except json.JSONDecodeError:
-                    print(f"Warning: Response is not valid JSON")
+                except json.JSONDecodeError as e:
+                    print(f" Warning: Response is not valid JSON: {e}")
+                    print(f"Raw response (first 500 chars): {process.stdout[:500]}")
                     
                     # Save raw response
                     with open(args.trigger_response, 'w') as f:
                         f.write(process.stdout)
+                    print(f"Raw response saved to: {args.trigger_response}")
                     
                     # Generate a run ID
                     run_id = f"run_{int(time.time())}"
                     with open(args.run_id, 'w') as f:
                         f.write(run_id)
+                    print(f"Generated run ID: {run_id}")
                     
                     status_summary = {
                         'status': 'partial_success',
                         'run_id': run_id,
                         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                        'note': 'Response not valid JSON'
+                        'note': 'Response not valid JSON',
+                        'raw_response_preview': process.stdout[:200]
                     }
                     
                     with open(args.trigger_status, 'w') as f:
                         json.dump(status_summary, f, indent=2)
                     
+                    print(f"\\n" + "=" * 100)
+                    print("TRIGGER COMPLETE - PARTIAL SUCCESS")
+                    print("=" * 100)
+                    
                     break
                 
             except subprocess.CalledProcessError as e:
-                print(f"Trigger attempt {attempt + 1} failed")
+                print(f"\\n✗ Trigger attempt {attempt + 1} failed")
                 print(f"Exit code: {e.returncode}")
-                print(f"Error: {e.stderr[:200]}")
+                print(f"Error output: {e.stderr}")
+                print(f"Standard output: {e.stdout}")
                 
                 if attempt < max_retries - 1:
-                    print(f"Retrying in {retry_delay} seconds...")
+                    print(f"\\n Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                 else:
-                    print("Max retries reached")
+                    print("\\n Max retries reached")
                     
                     # Save error information
                     error_info = {
                         'status': 'failed',
                         'error': 'Max retries exceeded',
                         'last_exit_code': e.returncode,
+                        'last_stderr': e.stderr[:500],
+                        'last_stdout': e.stdout[:500],
                         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                        'attempts': attempt + 1
+                        'attempts': attempt + 1,
+                        'trigger_url': trigger_url
                     }
                     
                     os.makedirs(os.path.dirname(args.trigger_response) or '.', exist_ok=True)
                     with open(args.trigger_response, 'w') as f:
                         json.dump(error_info, f, indent=2)
+                    print(f"Error info saved to: {args.trigger_response}")
                     
                     os.makedirs(os.path.dirname(args.run_id) or '.', exist_ok=True)
                     with open(args.run_id, 'w') as f:
                         f.write("failed")
+                    print(f"Run ID saved as: failed")
                     
                     os.makedirs(os.path.dirname(args.trigger_status) or '.', exist_ok=True)
                     with open(args.trigger_status, 'w') as f:
                         json.dump({'status': 'failed', 'error': 'Max retries exceeded'}, f, indent=2)
                     
+                    print(f"\\n" + "=" * 100)
+                    print("TRIGGER FAILED")
+                    print("=" * 100)
+                    
                     raise Exception(f"Pipeline trigger failed after {max_retries} attempts")
             
             except Exception as e:
-                print(f"Unexpected error during trigger attempt {attempt + 1}: {e}")
+                print(f"\\n Unexpected error during trigger attempt {attempt + 1}: {e}")
+                import traceback
+                traceback.print_exc()
                 
                 if attempt < max_retries - 1:
-                    print(f"Retrying in {retry_delay} seconds...")
+                    print(f"\\n Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                 else:
-                    print("Max retries reached")
+                    print("\\n Max retries reached")
                     
                     error_info = {
                         'status': 'failed',
                         'error': str(e),
+                        'traceback': traceback.format_exc(),
                         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                         'attempts': attempt + 1
                     }
@@ -473,9 +568,13 @@ implementation:
                     with open(args.trigger_status, 'w') as f:
                         json.dump({'status': 'failed', 'error': str(e)}, f, indent=2)
                     
+                    print(f"\\n" + "=" * 100)
+                    print("TRIGGER FAILED WITH UNEXPECTED ERROR")
+                    print("=" * 100)
+                    
                     raise
         
-        print("\\n=== Trigger Process Complete ===")
+        print(f"\\n Trigger process finished")
         
     args:
       # CDN URLs
