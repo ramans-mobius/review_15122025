@@ -1,4 +1,4 @@
-name: Trigger Pipeline v9
+name: Trigger Pipeline v10
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -176,26 +176,36 @@ implementation:
             if not url:
                 return url
             
-            print(f"Original URL: {url}...")
+            print(f"Original URL: {url[:200]}...")
             
             # Step 1: Decode any existing URL encoding
             try:
-                url = urllib.parse.unquote(url)
+                decoded_url = urllib.parse.unquote(url)
+                if decoded_url != url:
+                    print(f"  URL was encoded, decoded to: {decoded_url[:200]}...")
+                    url = decoded_url
             except:
                 pass
             
-            # FIX: Check if we already have encoded dollar signs
-            # If url contains %24%24, it's already encoded, don't double encode
-            if "%24%24" in url:
-                print("URL already contains encoded double dollar (%24%24) - skipping re-encoding")
+            # Step 2: Handle the _$$_ pattern correctly
+            # We want to preserve _$$_ and encode it as _%24%24_
+            # First check if we have the pattern
+            if "_$$_" in url:
+                print(f"  Found _$$_ pattern - will encode as _%24%24_")
+                # Replace with placeholder
+                url = url.replace("_$$_", "__DOUBLE_DOLLAR_PLACEHOLDER__")
+            elif "_%24%24_" in url:
+                print(f"  Found _%24%24_ pattern - already correctly encoded")
+                return url  # Already correct, return as-is
+            elif "_%24%24%24%24_" in url:
+                print(f"  Found _%24%24%24%24_ pattern - fixing to _%24%24_")
+                # Fix the quadruple encoding
+                url = url.replace("_%24%24%24%24_", "_%24%24_")
                 return url
-            
-            # Step 2: Handle special patterns - replace $$ with placeholder
-            url = url.replace("$$", "__DOUBLE_DOLLAR_PLACEHOLDER__")
             
             # Step 3: Handle _ENC( pattern
             if "_ENC(" in url:
-                print("Found _ENC( pattern - preserving")
+                print("  Found _ENC( pattern - preserving")
             elif "_ENC%28" in url:
                 url = url.replace("_ENC%28", "_ENC(")
             
@@ -217,9 +227,9 @@ implementation:
             else:
                 encoded_url = urllib.parse.quote(url, safe="/:?=&%")
             
-            # Restore patterns - FIXED: Use single %24%24, not double
+            # Restore patterns - CORRECTED: Use _%24%24_ for double dollar
             encoded_url = encoded_url.replace("__ENC_PAREN_PLACEHOLDER__", "_ENC%28")
-            encoded_url = encoded_url.replace("__DOUBLE_DOLLAR_PLACEHOLDER__", "%24%24")
+            encoded_url = encoded_url.replace("__DOUBLE_DOLLAR_PLACEHOLDER__", "_%24%24_")
             
             # Handle closing parenthesis for _ENC%28
             if "_ENC%28" in encoded_url and ")" in encoded_url:
@@ -228,7 +238,8 @@ implementation:
                 if paren_pos != -1:
                     encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
             
-            print(f"Encoded URL: {encoded_url[:100]}...")
+            print(f"Final encoded URL: {encoded_url[:200]}...")
+            print(f"  Contains _%24%24_: {'_%24%24_' in encoded_url}")
             return encoded_url
         
         print("=" * 100)
@@ -254,12 +265,18 @@ implementation:
             'data_config_url': args.data_config_url,
             'processed_data_url': args.processed_data_url,
             'preprocess_metadata_url': args.preprocess_metadata_url,
-            'upload_summary_url': args.upload_summary_url  # Now this is a CDN URL
+            'upload_summary_url': args.upload_summary_url
         }
         
         for key, url in urls_to_fix.items():
             print(f"\\n{key}:")
-            fixed_urls[key] = fix_cdn_url(url)
+            fixed_url = fix_cdn_url(url)
+            # Verify we have the correct pattern
+            if fixed_url and "_%24%24%24%24_" in fixed_url:
+                print(f"  WARNING: Still has quadruple %24 in URL!")
+                # Fix it one more time
+                fixed_url = fixed_url.replace("_%24%24%24%24_", "_%24%24_")
+            fixed_urls[key] = fixed_url
         
         # Read access token
         with open(args.access_token, 'r') as f:
@@ -287,7 +304,7 @@ implementation:
                 "data_config_url": fixed_urls['data_config_url'],
                 "processed_data_url": fixed_urls['processed_data_url'],
                 "preprocess_metadata_url": fixed_urls['preprocess_metadata_url'],
-                "upload_summary_url": fixed_urls['upload_summary_url'],  # Now a CDN URL
+                "upload_summary_url": fixed_urls['upload_summary_url'],
                 
                 # Model loading parameters
                 "load_from_cdn": args.load_from_cdn,
@@ -302,11 +319,11 @@ implementation:
                 "password": args.password,
                 "productId": args.productid,
                 "requestType": args.requesttype,
-                "domain": args.iam_domain,  # IAM domain for authentication
+                "domain": args.iam_domain,
                 
                 # DQN/RLAF parameters - USING DQN PIPELINE DOMAIN
                 "dqn_experiment_id": args.dqn_experiment_id,
-                "pipeline_domain": args.pipeline_domain,  # DQN pipeline domain
+                "pipeline_domain": args.pipeline_domain,
                 "dqn_pipeline_id": args.dqn_pipeline_id,
                 "schema_id": args.schema_id,
                 "model_id": args.model_id
@@ -321,18 +338,22 @@ implementation:
         print(json.dumps(payload, indent=2))
         print("=" * 80)
         
+        # Verify all URLs have correct encoding
+        print(f"\\n=== URL ENCODING VERIFICATION ===")
+        for key, url in fixed_urls.items():
+            if url:
+                if "_%24%24%24%24_" in url:
+                    print(f"  ✗ {key}: Has quadruple %24 (BAD)")
+                elif "_%24%24_" in url:
+                    print(f"  ✓ {key}: Has double %24 (GOOD)")
+                elif "_$$_" in url:
+                    print(f"  ✗ {key}: Has unencoded $$ (BAD)")
+                else:
+                    print(f"  ? {key}: Unknown pattern")
+        
         print(f"\\nTriggering DCGAN pipeline at: {trigger_url}")
-        print(f"DCGAN Pipeline ID: {args.pipeline_id}")
-        print(f"Experiment ID: {args.experiment_id}")
-        print(f"DCGAN Trigger Domain: {args.domain}")
-        print(f"IAM Domain (passed as parameter): {args.iam_domain}")
-        print(f"DQN Pipeline Domain (passed as parameter): {args.pipeline_domain}")
         
-        print(f"\\n=== FINAL PARAMETERS ===")
-        for key in fixed_urls:
-            print(f"{key} (first 100 chars): {fixed_urls[key][:100]}...")
-        
-        # Print the full curl command - FOLLOWING CNN BRICK FORMAT
+        # Print the full curl command
         print("\\n=== FULL CURL COMMAND ===")
         print("=" * 80)
         print()
@@ -358,20 +379,7 @@ implementation:
             json.dump(payload, f, indent=2)
         print(f"\\nPayload saved to {payload_file} for manual use")
         
-        # Manual trigger instructions - FOLLOWING CNN BRICK FORMAT
-        print("\\n=== MANUAL TRIGGER INSTRUCTIONS ===")
-        print("=" * 80)
-        print("1. Copy the curl command above")
-        print("2. Or use the saved payload file:")
-        print(f"   curl -X POST '{trigger_url}' \\\\")
-        print("     -H 'accept: application/json' \\\\")
-        print(f"     -H 'Authorization: Bearer YOUR_TOKEN_HERE' \\\\")
-        print("     -H 'Content-Type: application/json' \\\\")
-        print("     -d @/tmp/pipeline_trigger/dcgan_payload.json")
-        print("=" * 80)
-        print()
-        
-        # Create curl command array - SIMPLE FORMAT LIKE CNN BRICK
+        # Create curl command array
         curl_command = [
             "curl",
             "--location", trigger_url,
@@ -450,7 +458,7 @@ implementation:
                     print("TRIGGER COMPLETE - SUCCESS")
                     print("=" * 100)
                     
-                    break  # Success, exit retry loop
+                    break
                     
                 except json.JSONDecodeError as e:
                     print(f"Warning: Response is not valid JSON: {e}")
@@ -497,7 +505,6 @@ implementation:
                 else:
                     print("\\nMax retries reached")
                     
-                    # Save error information
                     error_info = {
                         'status': 'failed',
                         'error': 'Max retries exceeded',
