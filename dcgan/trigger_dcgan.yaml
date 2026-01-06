@@ -1,4 +1,4 @@
-name: Trigger Pipeline v2
+name: Trigger Pipeline v3
 description: Triggers DCGAN training pipeline with all necessary CDN URLs and parameters
 inputs:
   # CDN URLs from Upload Data To CDN brick
@@ -356,16 +356,16 @@ implementation:
         print("FULL CURL COMMAND")
         print("=" * 100)
         
-        # Print curl command line by line
-        print(f"\\ncurl --location '{trigger_url}' \\")
-        print("  --header 'accept: application/json' \\")
-        print(f"  --header 'Authorization: Bearer {access_token[:20]}...' \\")
-        print("  --header 'Content-Type: application/json' \\")
-        print(f"  --data '{json.dumps(payload)[:200]}...' \\")
-        print("  --fail \\")
-        print("  --show-error \\")
-        print("  --connect-timeout 30 \\")
-        print("  --max-time 120 \\")
+        # Print curl command line by line - FIXED SECTION
+        print("\\ncurl --location '" + trigger_url + "' " + "\\\\")
+        print("  --header 'accept: application/json' " + "\\\\")
+        print("  --header 'Authorization: Bearer " + access_token[:20] + "...' " + "\\\\")
+        print("  --header 'Content-Type: application/json' " + "\\\\")
+        print("  --data '" + json.dumps(payload)[:200] + "...' " + "\\\\")
+        print("  --fail " + "\\\\")
+        print("  --show-error " + "\\\\")
+        print("  --connect-timeout 30 " + "\\\\")
+        print("  --max-time 120 " + "\\\\")
         print("  --verbose")
         
         # Also print the actual curl command array
@@ -381,17 +381,19 @@ implementation:
         
         # Save curl command to file
         curl_cmd_file = '/tmp/pipeline_trigger/curl_command.sh'
+        curl_cmd_content = "curl --location '" + trigger_url + "' \\\\" + "\\n" + \
+                          "  --header 'accept: application/json' \\\\" + "\\n" + \
+                          "  --header 'Authorization: Bearer " + access_token + "' \\\\" + "\\n" + \
+                          "  --header 'Content-Type: application/json' \\\\" + "\\n" + \
+                          "  --data '" + json.dumps(payload).replace("'", "'\"'\"'") + "' \\\\" + "\\n" + \
+                          "  --fail \\\\" + "\\n" + \
+                          "  --show-error \\\\" + "\\n" + \
+                          "  --connect-timeout 30 \\\\" + "\\n" + \
+                          "  --max-time 120 \\\\" + "\\n" + \
+                          "  --verbose\\n"
+        
         with open(curl_cmd_file, 'w') as f:
-            f.write(f"curl --location '{trigger_url}' \\\\n")
-            f.write("  --header 'accept: application/json' \\\\n")
-            f.write(f"  --header 'Authorization: Bearer {access_token}' \\\\n")
-            f.write("  --header 'Content-Type: application/json' \\\\n")
-            f.write(f"  --data '{json.dumps(payload)}' \\\\n")
-            f.write("  --fail \\\\n")
-            f.write("  --show-error \\\\n")
-            f.write("  --connect-timeout 30 \\\\n")
-            f.write("  --max-time 120 \\\\n")
-            f.write("  --verbose\\n")
+            f.write(curl_cmd_content)
         print(f"Curl command saved to: {curl_cmd_file}")
         
         print("\\n" + "=" * 100)
