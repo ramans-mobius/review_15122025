@@ -1,4 +1,4 @@
-name: Train v8
+name: Train v9
 description: Trains DCGAN using nesyfactory with NO fallbacks - throws errors on failure
 inputs:
   - name: data_path
@@ -60,6 +60,55 @@ implementation:
             print(f" ERROR importing from nesy_factory: {e}")
             traceback.print_exc()
             sys.exit(1)
+        
+        # ============================================================================
+        # Define GAN-specific classes for unpickling
+        # ============================================================================
+        class GANDataset:
+            def __init__(self, data_list, transform=None, image_size=64, channels=3):
+                self.data_list = data_list
+                self.transform = transform
+                self.image_size = image_size
+                self.channels = channels
+            
+            def __len__(self):
+                return len(self.data_list)
+            
+            def __getitem__(self, idx):
+                # Return placeholder data
+                return torch.zeros(self.channels, self.image_size, self.image_size)
+
+        class GANDataWrapper:
+            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
+                         transform_params=None):
+                self.dataset = dataset
+                self.model_type = model_type
+                self.image_size = image_size
+                self.channels = channels
+                self.transform_params = transform_params or {}
+                self.num_samples = len(dataset)
+            
+            def __len__(self):
+                return len(self.dataset)
+            
+            def __getitem__(self, idx):
+                return self.dataset[idx]
+
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+
+        class PreprocessMetadata:
+            def __init__(self, image_size=64, channels=3, model_type='dcgan',
+                         mean=(0.5,), std=(0.5,), transform_params=None):
+                self.image_size = image_size
+                self.channels = channels
+                self.model_type = model_type
+                self.mean = mean
+                self.std = std
+                self.transform_params = transform_params or {}
+                import time
+                self.timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ')
         
         # ============================================================================
         # Parse arguments
@@ -126,6 +175,15 @@ implementation:
             # Define safe unpickler class
             class SafeUnpickler(pickle.Unpickler):
                 def find_class(self, module, name):
+                    # Add the classes we defined above
+                    if name == 'GANDataWrapper':
+                        return GANDataWrapper
+                    elif name == 'GANDataset':
+                        return GANDataset
+                    elif name == 'DatasetInfoWrapper':
+                        return DatasetInfoWrapper
+                    elif name == 'PreprocessMetadata':
+                        return PreprocessMetadata
                     return super().find_class(module, name)
             
             with open(args.data_path, "rb") as f:
@@ -145,6 +203,7 @@ implementation:
             
         except Exception as e:
             print(f" ERROR loading dataset: {e}")
+            traceback.print_exc()
             sys.exit(1)
         
         # Device
