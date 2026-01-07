@@ -1,4 +1,4 @@
-name: Train v10
+name: Train v11
 description: Trains DCGAN using nesy_factory with CAFO, FF, or Backprop and uploads generated images to CDN
 inputs:
   - name: data_path
@@ -150,7 +150,7 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-            
+         
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
@@ -281,34 +281,46 @@ implementation:
             generator_cfg = gan_cfg['generator']
             discriminator_cfg = gan_cfg['discriminator']
             
-            # Determine training mode
-            use_ff_generator = generator_cfg.get('use_forward_forward', False)
-            use_ff_discriminator = discriminator_cfg.get('use_forward_forward', False)
+            # Check for CAFO and FF flags
             use_cafo_generator = generator_cfg.get('use_cafo', False)
             use_cafo_discriminator = discriminator_cfg.get('use_cafo', False)
+            use_ff_generator = generator_cfg.get('use_forward_forward', False)
+            use_ff_discriminator = discriminator_cfg.get('use_forward_forward', False)
             
-            print(f"\\nTraining mode detection from config:")
-            print(f"  Generator use_forward_forward: {use_ff_generator}")
-            print(f"  Discriminator use_forward_forward: {use_ff_discriminator}")
+            print(f"\\nTraining mode detection from flags:")
             print(f"  Generator use_cafo: {use_cafo_generator}")
             print(f"  Discriminator use_cafo: {use_cafo_discriminator}")
+            print(f"  Generator use_forward_forward: {use_ff_generator}")
+            print(f"  Discriminator use_forward_forward: {use_ff_discriminator}")
             
-            # Determine training mode
+            # Validate only one training method is selected
+            cafo_total = sum([use_cafo_generator, use_cafo_discriminator])
+            ff_total = sum([use_ff_generator, use_ff_discriminator])
+            
+            if cafo_total > 0 and ff_total > 0:
+                raise ValueError("Cannot use both CAFO and Forward-Forward flags. Choose one training method.")
+            
+            # Determine training mode based on flags
             if use_cafo_generator or use_cafo_discriminator:
                 training_mode = "CAFO"
                 algorithm = "cafo"
-                print(f"✓ Using CAFO training")
+                print(f"✓ Using CAFO training (detected from use_cafo flags)")
             elif use_ff_generator or use_ff_discriminator:
                 training_mode = "Forward-Forward"
                 algorithm = "forward_forward"
-                print(f"✓ Using Forward-Forward training")
+                print(f"✓ Using Forward-Forward training (detected from use_forward_forward flags)")
             else:
                 training_mode = "Backpropagation"
                 algorithm = "backprop"
-                print(f"✓ Using Backpropagation training")
+                print(f"✓ Using Backpropagation training (default - no CAFO/FF flags detected)")
+            
+            # Get epochs from training config
+            epochs = training_cfg.get('epochs', 1)
+            print(f"✓ Training for {epochs} epoch(s)")
             
         except Exception as e:
             print(f" ERROR parsing master_config: {e}")
+            traceback.print_exc()
             sys.exit(1)
         
         # ============================================================================
@@ -367,16 +379,28 @@ implementation:
                 model_config = checkpoint['config']
                 print("✓ Found config in checkpoint")
             else:
+                # Create config structure expected by nesy_factory
                 model_config = {
                     'dataset': {'resize_size': image_size},
-                    'generator': gan_cfg['generator'],
-                    'discriminator': gan_cfg['discriminator'],
-                    'train': training_cfg
+                    'generator': generator_cfg,
+                    'discriminator': discriminator_cfg,
                 }
                 print("✓ Created config from master config")
             
+            # Add train section if not present
+            if 'train' not in model_config:
+                model_config['train'] = {}
+            
+            # Set algorithm based on flags
             model_config['train']['algorithm'] = algorithm
             model_config['device'] = str(device)
+            
+            # Ensure training config has required fields
+            if 'training' not in model_config:
+                model_config['training'] = training_cfg
+            else:
+                # Merge training config
+                model_config['training'].update(training_cfg)
             
             # Create DCGAN models
             generator, discriminator, full_config = create_dcgan(model_config)
@@ -460,7 +484,6 @@ implementation:
             sys.exit(1)
         
         # Training results
-        epochs = training_cfg.get('epochs', 10)
         results = {
             'epochs': epochs,
             'algorithm': algorithm,
