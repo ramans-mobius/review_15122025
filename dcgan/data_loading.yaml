@@ -1,4 +1,4 @@
-name: Load Dataset v6
+name: Load Dataset v7
 description: Universal dataset loader with single master config
 inputs:
   - name: master_config
@@ -41,7 +41,7 @@ implementation:
         args = parser.parse_args()
         
         print('=' * 80)
-        print('Load Dataset v5 - Minimal Version')
+        print('Load Dataset v6 - Configurable Version')
         print('=' * 80)
         
         # ============================================================================
@@ -61,7 +61,8 @@ implementation:
         dataset_cfg = config.get('dataset', {})
         image_size = dataset_cfg.get('image_size', 64)
         channels = dataset_cfg.get('channels', 1)
-        max_samples = dataset_cfg.get('max_samples', 10)
+        max_samples = dataset_cfg.get('max_samples', 100)
+        train_split = dataset_cfg.get('train_split', 0.8)
         dataset_name = dataset_cfg.get('name', 'mnist')
         dataset_type = dataset_cfg.get('type', 'torchvision')
         
@@ -71,6 +72,20 @@ implementation:
         print(f'  Image size: {image_size}')
         print(f'  Channels: {channels}')
         print(f'  Max samples: {max_samples}')
+        print(f'  Train split: {train_split}')
+        
+        # ============================================================================
+        # Create train/test split based on config
+        # ============================================================================
+        print('\\nCreating dataset split...')
+        
+        # Calculate train/test split
+        num_train = int(max_samples * train_split)
+        num_test = max_samples - num_train
+        
+        print(f'  Train samples: {num_train}')
+        print(f'  Test samples: {num_test}')
+        print(f'  Total samples: {max_samples}')
         
         # ============================================================================
         # Create minimal dataset info
@@ -82,15 +97,15 @@ implementation:
                 self.__dict__.update(info_dict)
         
         dataset_info = DatasetInfoWrapper({
-            'total_samples': 15,
-            'train_samples': 10,
-            'test_samples': 5,
+            'total_samples': max_samples,
+            'train_samples': num_train,
+            'test_samples': num_test,
             'image_size': image_size,
             'channels': channels,
             'dataset_type': dataset_type,
             'dataset_name': dataset_name,
             'requires_preprocessing': True,
-            'note': 'minimal_test_dataset'
+            'note': f'synthetic_dataset_{max_samples}_samples'
         })
         
         # ============================================================================
@@ -101,25 +116,26 @@ implementation:
         train_data = []
         test_data = []
         
-        # Create simple data entries
-        for i in range(10):
+        # Create train data
+        for i in range(num_train):
             train_data.append({
                 'image_id': f'train_{i}',
                 'label': str(i % 10),
                 'dataset': dataset_name,
                 'image_size': image_size,
                 'channels': channels,
-                'note': 'placeholder_for_real_image'
+                'note': f'placeholder_for_real_image_{i}'
             })
         
-        for i in range(5):
+        # Create test data
+        for i in range(num_test):
             test_data.append({
                 'image_id': f'test_{i}',
                 'label': str(i % 10),
                 'dataset': dataset_name,
                 'image_size': image_size,
                 'channels': channels,
-                'note': 'placeholder_for_real_image'
+                'note': f'placeholder_for_real_image_{i+num_train}'
             })
         
         print(f'Created {len(train_data)} train entries')
