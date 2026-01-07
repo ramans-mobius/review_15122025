@@ -1,4 +1,4 @@
-name: Train v6
+name: Train v7
 description: Trains DCGAN using nesyfactory with NO fallbacks - throws errors on failure
 inputs:
   - name: data_path
@@ -57,7 +57,7 @@ implementation:
             print("✓ Successfully imported all nesy_factory components")
             
         except Exception as e:
-            print(f"❌ ERROR importing from nesy_factory: {e}")
+            print(f" ERROR importing from nesy_factory: {e}")
             traceback.print_exc()
             sys.exit(1)
         
@@ -116,7 +116,7 @@ implementation:
                 print(f"✓ Using Backpropagation training (default)")
             
         except Exception as e:
-            print(f"❌ ERROR parsing master_config: {e}")
+            print(f" ERROR parsing master_config: {e}")
             sys.exit(1)
         
         # ============================================================================
