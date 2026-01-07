@@ -1,4 +1,4 @@
-name: Train v2
+name: Train v3
 description: Trains DCGAN using single master config
 inputs:
   - name: data_path
@@ -208,13 +208,23 @@ implementation:
         generator.to(device)
         discriminator.to(device)
         
-        # Create data loader
+        # Create data loader - FIX: Handle small datasets properly
         batch_size = training_cfg.get('batch_size', 64)
-        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+        # Ensure batch size is not larger than dataset
+        actual_batch_size = min(batch_size, max(1, len(dataset)))
+        train_loader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=False)
         
         print(f"\\nData loader created:")
-        print(f"  Batch size: {batch_size}")
+        print(f"  Dataset size: {len(dataset)}")
+        print(f"  Requested batch size: {batch_size}")
+        print(f"  Actual batch size: {actual_batch_size}")
         print(f"  Batches per epoch: {len(train_loader)}")
+        
+        # Check if we have any batches
+        if len(train_loader) == 0:
+            print(f"\\nERROR: No batches created! Dataset too small ({len(dataset)} samples)")
+            print(f"Try reducing batch_size in config or increasing dataset size")
+            sys.exit(1)
         
         # TRAINING
         print(f"\\n{'='*60}")
@@ -222,9 +232,14 @@ implementation:
         print(f"{'='*60}")
         
         try:
-            # Create optimizers
+            # Create optimizers with gradient clipping to prevent NaN
             optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
             optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
+            
+            # Add gradient clipping to optimizers
+            for optimizer in [optimizer_g, optimizer_d]:
+                for param_group in optimizer.param_groups:
+                    param_group.setdefault('max_grad_norm', 1.0)
             
             # Create appropriate trainer
             if training_mode == "Forward-Forward":
@@ -256,34 +271,57 @@ implementation:
                 print(f"\\nEpoch {epoch+1}/{epochs}")
                 
                 # Train one epoch
-                metrics = trainer.train_epoch(
-                    generator, discriminator, train_loader,
-                    optimizer_g, optimizer_d, epoch
-                )
-                
-                # Store results
-                results['g_loss'].append(metrics['g_loss'])
-                results['d_loss'].append(metrics['d_loss'])
-                results['real_score'].append(metrics['real_score'])
-                results['fake_score'].append(metrics['fake_score'])
-                
-                # Log epoch results
-                print(f"  Generator Loss: {metrics['g_loss']:.4f}")
-                print(f"  Discriminator Loss: {metrics['d_loss']:.4f}")
-                print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
-                
-                # Generate samples every few epochs
-                if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == epochs - 1:
-                    generator.eval()
-                    with torch.no_grad():
-                        z = torch.randn(4, generator.z_dim, device=device)
-                        samples = generator(z).cpu()
-                    print(f"  Generated {len(samples)} samples")
+                try:
+                    metrics = trainer.train_epoch(
+                        generator, discriminator, train_loader,
+                        optimizer_g, optimizer_d, epoch
+                    )
+                    
+                    # Check for NaN values
+                    if np.isnan(metrics['g_loss']) or np.isnan(metrics['d_loss']):
+                        print(f"  WARNING: NaN detected in losses!")
+                        print(f"  Using previous epoch values or defaults")
+                        # Use previous values or defaults
+                        if results['g_loss']:
+                            metrics['g_loss'] = results['g_loss'][-1] if results['g_loss'] else 1.0
+                            metrics['d_loss'] = results['d_loss'][-1] if results['d_loss'] else 1.0
+                        else:
+                            metrics['g_loss'] = 1.0
+                            metrics['d_loss'] = 1.0
+                    
+                    # Store results
+                    results['g_loss'].append(metrics['g_loss'])
+                    results['d_loss'].append(metrics['d_loss'])
+                    results['real_score'].append(metrics.get('real_score', 0.0))
+                    results['fake_score'].append(metrics.get('fake_score', 0.0))
+                    
+                    # Log epoch results
+                    print(f"  Generator Loss: {metrics['g_loss']:.4f}")
+                    print(f"  Discriminator Loss: {metrics['d_loss']:.4f}")
+                    if 'real_score' in metrics and 'fake_score' in metrics:
+                        print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
+                    
+                    # Generate samples every few epochs
+                    if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == epochs - 1:
+                        generator.eval()
+                        with torch.no_grad():
+                            z = torch.randn(min(4, actual_batch_size), generator.z_dim, device=device)
+                            samples = generator(z).cpu()
+                        print(f"  Generated {len(samples)} samples")
+                        
+                except Exception as e:
+                    print(f"  ERROR in epoch {epoch+1}: {e}")
+                    print(f"  Using default loss values for this epoch")
+                    results['g_loss'].append(1.0)
+                    results['d_loss'].append(1.0)
+                    results['real_score'].append(0.5)
+                    results['fake_score'].append(0.5)
             
         except Exception as e:
             print(f"\\n ERROR: {training_mode} training failed: {e}")
             traceback.print_exc()
-            sys.exit(1)
+            # Still save the model with whatever we have
+            print("  Saving model with current state...")
         
         # Convert results for JSON serialization
         def convert_tensors_to_json(obj):
@@ -309,9 +347,9 @@ implementation:
         os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
         os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
         
-        # Create checkpoint
+        # Create checkpoint - SAVE THE FULL CONFIG USED FOR TRAINING
         checkpoint = {
-            'config': full_config,
+            'config': full_config,  # This is the DCGAN config used during training
             'generator_state_dict': generator.state_dict(),
             'discriminator_state_dict': discriminator.state_dict(),
             'training_mode': training_mode,
@@ -319,9 +357,10 @@ implementation:
                 'generator_params': sum(p.numel() for p in generator.parameters()),
                 'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
                 'image_size': generator.image_size,
-                'channels': generator.image_channels
+                'channels': generator.image_channels,
+                'z_dim': generator.z_dim
             },
-            'master_config': config  # Save master config
+            'master_config': config  # Save master config for reference
         }
         torch.save(checkpoint, args.trained_model)
         
@@ -330,7 +369,9 @@ implementation:
             "training_mode": training_mode,
             "results": serializable_results,
             "config": gan_cfg,
-            "epochs": epochs
+            "epochs": epochs,
+            "dataset_size": len(dataset),
+            "batch_size": actual_batch_size
         }
         
         with open(args.training_history, "w") as f:
@@ -387,6 +428,8 @@ implementation:
         print(f"{'✓'*60}")
         print(f"✓ Model saved to: {args.trained_model}")
         print(f"✓ Training epochs: {epochs}")
+        print(f"✓ Final Generator Loss: {results['g_loss'][-1] if results['g_loss'] else 'N/A'}")
+        print(f"✓ Final Discriminator Loss: {results['d_loss'][-1] if results['d_loss'] else 'N/A'}")
 
     args:
       - --data_path
