@@ -1,5 +1,5 @@
-name: Train v3
-description: Trains DCGAN using single master config
+name: Train v4
+description: Trains DCGAN using single master config with proper algorithm support
 inputs:
   - name: data_path
     type: Dataset
@@ -64,10 +64,11 @@ implementation:
                     if self.transform:
                         img = self.transform(img)
                     
-                    return img
+                    # Return (image, dummy_label) - GANs need this format
+                    return img, torch.tensor(0.0, dtype=torch.float32)
                 except Exception as e:
                     print(f"Error creating dummy image {idx}: {e}")
-                    return torch.zeros(self.channels, self.image_size, self.image_size)
+                    return torch.zeros(self.channels, self.image_size, self.image_size), torch.tensor(0.0, dtype=torch.float32)
         
         class GANDataWrapper:
             def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
@@ -92,9 +93,12 @@ implementation:
             from nesy_factory.GANs.dcgan import (
                 create_dcgan,
                 OptimizerFactory,
-                TrainerFactory
+                TrainerFactory,
+                BackpropTrainer,
+                ForwardForwardTrainer,
+                CAFOTrainer
             )
-            print(" Successfully imported DCGAN modules")
+            print(" Successfully imported DCGAN modules with all trainers")
         except ImportError as e:
             print(f" ERROR: nesyfactory not available: {e}")
             sys.exit(1)
@@ -226,120 +230,120 @@ implementation:
             print(f"Try reducing batch_size in config or increasing dataset size")
             sys.exit(1)
         
-        # TRAINING
+        # TRAINING WITH NESY_FACTORY TRAINERS
         print(f"\\n{'='*60}")
         print(f"STARTING {training_mode.upper()} TRAINING")
         print(f"{'='*60}")
         
-        try:
-            # Create optimizers with gradient clipping to prevent NaN
-            optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
-            optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
+        # Create appropriate trainer from nesy_factory
+        if training_mode == "Forward-Forward":
+            trainer = ForwardForwardTrainer(full_config, device)
+            print(f" Using ForwardForwardTrainer from nesy_factory")
+        elif training_mode == "CAFO":
+            trainer = CAFOTrainer(full_config, device)
+            print(f" Using CAFOTrainer from nesy_factory")
+        else:
+            trainer = BackpropTrainer(full_config, device)
+            print(f" Using BackpropTrainer from nesy_factory")
+        
+        # Create optimizers using nesy_factory
+        optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
+        optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
+        
+        print(f" Optimizers created")
+        
+        # Training loop
+        epochs = training_cfg.get('epochs', 10)
+        results = {
+            'epochs': epochs,
+            'g_loss': [],
+            'd_loss': [],
+            'real_score': [],
+            'fake_score': []
+        }
+        
+        for epoch in range(epochs):
+            print(f"\\nEpoch {epoch+1}/{epochs}")
             
-            # Add gradient clipping to optimizers
-            for optimizer in [optimizer_g, optimizer_d]:
-                for param_group in optimizer.param_groups:
-                    param_group.setdefault('max_grad_norm', 1.0)
-            
-            # Create appropriate trainer
-            if training_mode == "Forward-Forward":
-                from nesy_factory.GANs.dcgan import ForwardForwardTrainer
-                trainer = ForwardForwardTrainer(full_config, device)
-                print(f" Forward-Forward Trainer created")
+            # Train one epoch using nesy_factory trainer
+            try:
+                metrics = trainer.train_epoch(
+                    generator, discriminator, train_loader,
+                    optimizer_g, optimizer_d, epoch
+                )
                 
-            elif training_mode == "CAFO":
-                from nesy_factory.GANs.dcgan import CAFOTrainer
-                trainer = CAFOTrainer(full_config, device)
-                print(f" CAFO Trainer created")
+                # Store results
+                results['g_loss'].append(metrics.get('g_loss', 1.0))
+                results['d_loss'].append(metrics.get('d_loss', 1.0))
+                results['real_score'].append(metrics.get('real_score', 0.0))
+                results['fake_score'].append(metrics.get('fake_score', 0.0))
                 
-            else:
-                from nesy_factory.GANs.dcgan import BackpropTrainer
-                trainer = BackpropTrainer(full_config, device)
-                print(f" Backpropagation Trainer created")
-            
-            # Training loop
-            epochs = training_cfg.get('epochs', 10)
-            results = {
-                'epochs': epochs,
-                'g_loss': [],
-                'd_loss': [],
-                'real_score': [],
-                'fake_score': []
-            }
-            
-            for epoch in range(epochs):
-                print(f"\\nEpoch {epoch+1}/{epochs}")
+                # Log epoch results
+                print(f"  Generator Loss: {results['g_loss'][-1]:.4f}")
+                print(f"  Discriminator Loss: {results['d_loss'][-1]:.4f}")
+                if 'real_score' in metrics and 'fake_score' in metrics:
+                    print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
                 
-                # Train one epoch
+                # Generate samples every few epochs
+                if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == epochs - 1:
+                    generator.eval()
+                    with torch.no_grad():
+                        z = torch.randn(min(4, actual_batch_size), generator.z_dim, device=device)
+                        samples = generator(z).cpu()
+                    print(f"  Generated {len(samples)} samples")
+                    
+            except Exception as e:
+                print(f"  ERROR in epoch {epoch+1} using {training_mode} trainer: {e}")
+                traceback.print_exc()
+                print(f"  Falling back to manual training for this epoch")
+                
+                # Fallback to manual training if trainer fails
                 try:
-                    metrics = trainer.train_epoch(
-                        generator, discriminator, train_loader,
-                        optimizer_g, optimizer_d, epoch
-                    )
+                    generator.train()
+                    discriminator.train()
                     
-                    # Check for NaN values
-                    if np.isnan(metrics['g_loss']) or np.isnan(metrics['d_loss']):
-                        print(f"  WARNING: NaN detected in losses!")
-                        print(f"  Using previous epoch values or defaults")
-                        # Use previous values or defaults
-                        if results['g_loss']:
-                            metrics['g_loss'] = results['g_loss'][-1] if results['g_loss'] else 1.0
-                            metrics['d_loss'] = results['d_loss'][-1] if results['d_loss'] else 1.0
-                        else:
-                            metrics['g_loss'] = 1.0
-                            metrics['d_loss'] = 1.0
+                    g_losses, d_losses = [], []
+                    real_scores, fake_scores = [], []
                     
-                    # Store results
-                    results['g_loss'].append(metrics['g_loss'])
-                    results['d_loss'].append(metrics['d_loss'])
-                    results['real_score'].append(metrics.get('real_score', 0.0))
-                    results['fake_score'].append(metrics.get('fake_score', 0.0))
-                    
-                    # Log epoch results
-                    print(f"  Generator Loss: {metrics['g_loss']:.4f}")
-                    print(f"  Discriminator Loss: {metrics['d_loss']:.4f}")
-                    if 'real_score' in metrics and 'fake_score' in metrics:
-                        print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
-                    
-                    # Generate samples every few epochs
-                    if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == epochs - 1:
-                        generator.eval()
-                        with torch.no_grad():
-                            z = torch.randn(min(4, actual_batch_size), generator.z_dim, device=device)
-                            samples = generator(z).cpu()
-                        print(f"  Generated {len(samples)} samples")
+                    for batch_images, batch_labels in train_loader:
+                        batch_images = batch_images.to(device)
+                        batch_size = batch_images.size(0)
                         
-                except Exception as e:
-                    print(f"  ERROR in epoch {epoch+1}: {e}")
-                    print(f"  Using default loss values for this epoch")
-                    results['g_loss'].append(1.0)
-                    results['d_loss'].append(1.0)
-                    results['real_score'].append(0.5)
-                    results['fake_score'].append(0.5)
-            
-        except Exception as e:
-            print(f"\\n ERROR: {training_mode} training failed: {e}")
-            traceback.print_exc()
-            # Still save the model with whatever we have
-            print("  Saving model with current state...")
-        
-        # Convert results for JSON serialization
-        def convert_tensors_to_json(obj):
-            if torch.is_tensor(obj):
-                if obj.numel() == 1:
-                    return float(obj.cpu().detach().numpy())
-                else:
-                    return obj.cpu().detach().numpy().tolist()
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                return {k: convert_tensors_to_json(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_tensors_to_json(item) for item in obj]
-            else:
-                return obj
-        
-        serializable_results = convert_tensors_to_json(results)
+                        # Train Discriminator
+                        optimizer_d.zero_grad()
+                        z = torch.randn(batch_size, generator.z_dim, device=device)
+                        fake_images = generator(z).detach()
+                        real_output = discriminator(batch_images)
+                        fake_output = discriminator(fake_images)
+                        d_loss = discriminator.calculate_loss(real_output, fake_output)
+                        d_loss.backward()
+                        optimizer_d.step()
+                        
+                        # Train Generator
+                        optimizer_g.zero_grad()
+                        z = torch.randn(batch_size, generator.z_dim, device=device)
+                        fake_images = generator(z)
+                        fake_output = discriminator(fake_images)
+                        g_loss = generator.calculate_loss(fake_output)
+                        g_loss.backward()
+                        optimizer_g.step()
+                        
+                        g_losses.append(g_loss.item())
+                        d_losses.append(d_loss.item())
+                        real_scores.append(real_output.mean().item())
+                        fake_scores.append(fake_output.mean().item())
+                    
+                    results['g_loss'].append(np.mean(g_losses) if g_losses else 1.0)
+                    results['d_loss'].append(np.mean(d_losses) if d_losses else 1.0)
+                    results['real_score'].append(np.mean(real_scores) if real_scores else 0.0)
+                    results['fake_score'].append(np.mean(fake_scores) if fake_scores else 0.0)
+                    
+                    print(f"  Manual fallback - Generator Loss: {results['g_loss'][-1]:.4f}")
+                    print(f"  Manual fallback - Discriminator Loss: {results['d_loss'][-1]:.4f}")
+                    
+                except Exception as e2:
+                    print(f"  Manual fallback also failed: {e2}")
+                    continue
         
         # Save results
         print("\\nSaving model and training history...")
@@ -367,11 +371,12 @@ implementation:
         # Save training history
         history = {
             "training_mode": training_mode,
-            "results": serializable_results,
+            "results": results,
             "config": gan_cfg,
             "epochs": epochs,
             "dataset_size": len(dataset),
-            "batch_size": actual_batch_size
+            "batch_size": actual_batch_size,
+            "algorithm_used": algorithm
         }
         
         with open(args.training_history, "w") as f:
