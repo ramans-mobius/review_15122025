@@ -1,4 +1,4 @@
-name: Train v14
+name: Train v15
 description: Trains DCGAN using nesy_factory with Traditional, CAFO, or Forward-Forward methods
 inputs:
   - name: data_path
@@ -133,14 +133,14 @@ implementation:
         # ============================================================================
         
         class DCGANBlockTrainer:
-            """Base class for block training in DCGAN."""
+            
             
             def __init__(self, config, device):
                 self.config = config
                 self.device = device
                 
             def extract_blocks(self, model):
-                """Extract trainable blocks from DCGAN model."""
+               
                 blocks = []
                 
                 if hasattr(model, 'deconv_layers'):
@@ -157,10 +157,10 @@ implementation:
                 return blocks
         
         class DCGANCAFOTrainer(DCGANBlockTrainer):
-            """CAFO trainer for DCGAN with block-by-block training."""
+        
             
             def train_cafo(self, generator, discriminator, train_loader, epochs_per_block=2):
-                """Train DCGAN using CAFO methodology with block-level results."""
+               
                 
                 print(f"Starting CAFO training with {epochs_per_block} epochs per block")
                 
@@ -343,10 +343,10 @@ implementation:
                 }
         
         class DCGANForwardForwardTrainer(DCGANBlockTrainer):
-            """Forward-Forward trainer for DCGAN with block-by-block training."""
+          
             
             def train_forward_forward(self, generator, discriminator, train_loader, epochs_per_block=2, threshold=2.0):
-                """Train DCGAN using Forward-Forward methodology with block-level results."""
+                
                 
                 print(f"Starting Forward-Forward training with {epochs_per_block} epochs per block")
                 print(f"Threshold: {threshold}")
@@ -459,7 +459,7 @@ implementation:
                 }
             
             def compute_goodness(self, x):
-                """Compute goodness score for FF."""
+               
                 if x.numel() == 0:
                     return torch.zeros(x.size(0), device=x.device)
                 
@@ -470,7 +470,7 @@ implementation:
                     return x ** 2
             
             def forward_forward_loss(self, pos_goodness, neg_goodness, threshold):
-                """Compute Forward-Forward loss."""
+               
                 if pos_goodness.numel() == 0 or neg_goodness.numel() == 0:
                     return torch.tensor(0.0, device=pos_goodness.device)
                 
@@ -503,7 +503,7 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-            """Upload file to CDN and return URL."""
+          
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
@@ -561,7 +561,7 @@ implementation:
         # Helper function to save and encode images
         # ============================================================================
         def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
-            """Generate, save, and encode images."""
+           
             os.makedirs(save_dir, exist_ok=True)
             
             # Generate images
@@ -724,13 +724,13 @@ implementation:
                 generator.load_state_dict(checkpoint['generator_state_dict'])
                 print("✓ Generator weights loaded")
             else:
-                print("⚠️ No generator weights in checkpoint")
+                print(" No generator weights in checkpoint")
             
             if 'discriminator_state_dict' in checkpoint:
                 discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
                 print("✓ Discriminator weights loaded")
             else:
-                print("⚠️ No discriminator weights in checkpoint")
+                print(" No discriminator weights in checkpoint")
             
             # Move to device
             generator.to(device)
