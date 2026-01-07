@@ -1,5 +1,5 @@
-name: Train DCGAN All Algorithms with Image Upload
-description: Trains DCGAN using nesy_factory with CAFO, FF, or Backprop and uploads generated images to CDN
+name: Train v12
+description: Trains DCGAN using nesy_factory with Traditional, CAFO, or Forward-Forward methods
 inputs:
   - name: data_path
     type: Dataset
@@ -56,7 +56,7 @@ implementation:
         import matplotlib.pyplot as plt
         
         # ============================================================================
-        # Import nesy_factory modules - NO FALLBACKS
+        # Import nesy_factory modules
         # ============================================================================
         print("Importing nesy_factory.GANs.dcgan...")
         try:
@@ -69,8 +69,6 @@ implementation:
             BackpropTrainer = dcgan_module.BackpropTrainer
             ForwardForwardTrainer = dcgan_module.ForwardForwardTrainer
             CAFOTrainer = dcgan_module.CAFOTrainer
-            ForwardForwardModule = dcgan_module.ForwardForwardModule
-            CAFOModule = dcgan_module.CAFOModule
             
             print("✓ Successfully imported all nesy_factory components")
             
@@ -126,6 +124,84 @@ implementation:
                 self.timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ')
         
         # ============================================================================
+        # DCGAN Wrapper with LSTM-like training methods
+        # ============================================================================
+        class DCGANWrapper:
+           
+            
+            def __init__(self, config, device):
+                self.config = config
+                self.device = device
+                self.use_cafo = False
+                self.use_forward_forward = False
+                self.training_mode = "traditional"
+                
+                # Create models
+                self.generator, self.discriminator, self.full_config = create_dcgan(config)
+                self.generator.to(device)
+                self.discriminator.to(device)
+                
+                # Create optimizers
+                self.optimizer_g = OptimizerFactory.create_optimizer(self.generator, self.full_config, 'generator')
+                self.optimizer_d = OptimizerFactory.create_optimizer(self.discriminator, self.full_config, 'discriminator')
+                
+                # Check training mode from config
+                generator_cfg = config.get('generator', {})
+                discriminator_cfg = config.get('discriminator', {})
+                
+                self.use_cafo = generator_cfg.get('use_cafo', False) or discriminator_cfg.get('use_cafo', False)
+                self.use_forward_forward = generator_cfg.get('use_forward_forward', False) or discriminator_cfg.get('use_forward_forward', False)
+                
+                if self.use_cafo and self.use_forward_forward:
+                    raise ValueError("Only one training method can be selected: use_cafo or use_forward_forward")
+                
+                if self.use_cafo:
+                    self.training_mode = "cafo"
+                    self.trainer = CAFOTrainer(config, device)
+                elif self.use_forward_forward:
+                    self.training_mode = "forward_forward"
+                    self.trainer = ForwardForwardTrainer(config, device)
+                else:
+                    self.training_mode = "traditional"
+                    self.trainer = BackpropTrainer(config, device)
+                
+                print(f"Created DCGANWrapper with training mode: {self.training_mode}")
+            
+            def train_epoch(self, train_loader, epoch):
+              
+                return self.trainer.train_epoch(
+                    self.generator, self.discriminator, train_loader,
+                    self.optimizer_g, self.optimizer_d, epoch
+                )
+            
+            def generate_samples(self, num_samples):
+                
+                self.generator.eval()
+                with torch.no_grad():
+                    z = torch.randn(num_samples, self.generator.z_dim, device=self.device)
+                    return self.generator(z)
+            
+            def get_state_dicts(self):
+             
+                return {
+                    'generator_state_dict': self.generator.state_dict(),
+                    'discriminator_state_dict': self.discriminator.state_dict(),
+                    'optimizer_g_state_dict': self.optimizer_g.state_dict(),
+                    'optimizer_d_state_dict': self.optimizer_d.state_dict()
+                }
+            
+            def load_state_dicts(self, state_dicts):
+            
+                if 'generator_state_dict' in state_dicts:
+                    self.generator.load_state_dict(state_dicts['generator_state_dict'])
+                if 'discriminator_state_dict' in state_dicts:
+                    self.discriminator.load_state_dict(state_dicts['discriminator_state_dict'])
+                if 'optimizer_g_state_dict' in state_dicts:
+                    self.optimizer_g.load_state_dict(state_dicts['optimizer_g_state_dict'])
+                if 'optimizer_d_state_dict' in state_dicts:
+                    self.optimizer_d.load_state_dict(state_dicts['optimizer_d_state_dict'])
+        
+        # ============================================================================
         # Parse arguments
         # ============================================================================
         parser = argparse.ArgumentParser()
@@ -150,7 +226,7 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-           
+          
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
@@ -173,7 +249,7 @@ implementation:
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "120"
+                "--max_time", "120"
             ]
             
             try:
@@ -208,7 +284,7 @@ implementation:
         # Helper function to save and encode images
         # ============================================================================
         def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
-           
+          
             os.makedirs(save_dir, exist_ok=True)
             
             # Generate images
@@ -281,38 +357,27 @@ implementation:
             generator_cfg = gan_cfg['generator']
             discriminator_cfg = gan_cfg['discriminator']
             
-            # Check for CAFO and FF flags
-            use_cafo_generator = generator_cfg.get('use_cafo', False)
-            use_cafo_discriminator = discriminator_cfg.get('use_cafo', False)
-            use_ff_generator = generator_cfg.get('use_forward_forward', False)
-            use_ff_discriminator = discriminator_cfg.get('use_forward_forward', False)
+            # Check for CAFO and FF flags - like LSTM
+            use_cafo = generator_cfg.get('use_cafo', False) or discriminator_cfg.get('use_cafo', False)
+            use_forward_forward = generator_cfg.get('use_forward_forward', False) or discriminator_cfg.get('use_forward_forward', False)
             
-            print(f"\\nTraining mode detection from flags:")
-            print(f"  Generator use_cafo: {use_cafo_generator}")
-            print(f"  Discriminator use_cafo: {use_cafo_discriminator}")
-            print(f"  Generator use_forward_forward: {use_ff_generator}")
-            print(f"  Discriminator use_forward_forward: {use_ff_discriminator}")
+            # Validate only one training method is selected - like LSTM
+            if use_cafo and use_forward_forward:
+                raise ValueError("Only one training method can be selected: use_cafo or use_forward_forward")
             
-            # Validate only one training method is selected
-            cafo_total = sum([use_cafo_generator, use_cafo_discriminator])
-            ff_total = sum([use_ff_generator, use_ff_discriminator])
-            
-            if cafo_total > 0 and ff_total > 0:
-                raise ValueError("Cannot use both CAFO and Forward-Forward flags. Choose one training method.")
-            
-            # Determine training mode based on flags
-            if use_cafo_generator or use_cafo_discriminator:
+            # Determine training mode
+            if use_cafo:
                 training_mode = "CAFO"
                 algorithm = "cafo"
-                print(f"✓ Using CAFO training (detected from use_cafo flags)")
-            elif use_ff_generator or use_ff_discriminator:
+                print(f"✓ Using CAFO training")
+            elif use_forward_forward:
                 training_mode = "Forward-Forward"
                 algorithm = "forward_forward"
-                print(f"✓ Using Forward-Forward training (detected from use_forward_forward flags)")
+                print(f"✓ Using Forward-Forward training")
             else:
                 training_mode = "Backpropagation"
                 algorithm = "backprop"
-                print(f"✓ Using Backpropagation training (default - no CAFO/FF flags detected)")
+                print(f"✓ Using Backpropagation training")
             
             # Get epochs from training config
             epochs = training_cfg.get('epochs', 1)
@@ -363,76 +428,52 @@ implementation:
         print(f"Device: {device}")
         
         # ============================================================================
-        # LOAD MODEL
+        # CREATE/CONFIGURE MODEL (Following LSTM pattern)
         # ============================================================================
         try:
-            if not args.model_input or not os.path.exists(args.model_input):
-                raise FileNotFoundError(f"Model input not found: {args.model_input}")
+            # Create model config
+            model_config = {
+                'dataset': {'resize_size': image_size},
+                'generator': generator_cfg,
+                'discriminator': discriminator_cfg,
+                'train': {'algorithm': algorithm},
+                'device': str(device),
+                'training': training_cfg
+            }
             
-            print(f"\\nLoading model from: {args.model_input}")
-            checkpoint = torch.load(args.model_input, map_location='cpu')
+            # Create DCGAN wrapper (like LSTM model)
+            dcgan_model = DCGANWrapper(model_config, device)
             
-            if not isinstance(checkpoint, dict):
-                raise ValueError("Invalid checkpoint format - expected dict")
+            print(f"\\n✓ DCGAN model created:")
+            print(f"  Training mode: {dcgan_model.training_mode}")
+            print(f"  Use CAFO: {dcgan_model.use_cafo}")
+            print(f"  Use Forward-Forward: {dcgan_model.use_forward_forward}")
+            print(f"  Generator parameters: {sum(p.numel() for p in dcgan_model.generator.parameters()):,}")
+            print(f"  Discriminator parameters: {sum(p.numel() for p in dcgan_model.discriminator.parameters()):,}")
             
-            if 'config' in checkpoint:
-                model_config = checkpoint['config']
-                print("✓ Found config in checkpoint")
-            else:
-                # Create config structure expected by nesy_factory
-                model_config = {
-                    'dataset': {'resize_size': image_size},
-                    'generator': generator_cfg,
-                    'discriminator': discriminator_cfg,
-                }
-                print("✓ Created config from master config")
-            
-            # Add train section if not present
-            if 'train' not in model_config:
-                model_config['train'] = {}
-            
-            # Set algorithm based on flags
-            model_config['train']['algorithm'] = algorithm
-            model_config['device'] = str(device)
-            
-            # Ensure training config has required fields
-            if 'training' not in model_config:
-                model_config['training'] = training_cfg
-            else:
-                # Merge training config
-                model_config['training'].update(training_cfg)
-            
-            # Create DCGAN models
-            generator, discriminator, full_config = create_dcgan(model_config)
-            
-            if generator is None or discriminator is None:
-                raise RuntimeError("Failed to create models")
-            
-            # Load state dict
-            if 'generator_state_dict' in checkpoint:
-                generator.load_state_dict(checkpoint['generator_state_dict'], strict=True)
-                print("✓ Generator state dict loaded")
-            else:
-                raise KeyError("Checkpoint missing 'generator_state_dict'")
-            
-            if 'discriminator_state_dict' in checkpoint:
-                discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=True)
-                print("✓ Discriminator state dict loaded")
-            else:
-                raise KeyError("Checkpoint missing 'discriminator_state_dict'")
-            
-            print(f"\\n✓ Models loaded successfully")
-            print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
-            print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
+            # Load pre-trained weights if provided
+            if args.model_input and os.path.exists(args.model_input):
+                print(f"\\nLoading pre-trained weights from: {args.model_input}")
+                checkpoint = torch.load(args.model_input, map_location='cpu')
+                
+                if isinstance(checkpoint, dict):
+                    # Check if it's a full checkpoint or just state dicts
+                    if 'generator_state_dict' in checkpoint:
+                        state_dicts = {
+                            'generator_state_dict': checkpoint['generator_state_dict'],
+                            'discriminator_state_dict': checkpoint.get('discriminator_state_dict')
+                        }
+                        dcgan_model.load_state_dicts(state_dicts)
+                        print("✓ Model weights loaded")
+                    else:
+                        print("⚠️ Checkpoint doesn't contain expected state dicts")
+                else:
+                    print("⚠️ Invalid checkpoint format")
             
         except Exception as e:
-            print(f" ERROR loading model: {e}")
+            print(f" ERROR creating/loading model: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
-        # Move to device
-        generator.to(device)
-        discriminator.to(device)
         
         # ============================================================================
         # CREATE DATA LOADER
@@ -455,210 +496,18 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # CREATE OPTIMIZERS
-        # ============================================================================
-        print(f"\\nCreating optimizers...")
-        try:
-            optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
-            optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
-            print("✓ Optimizers created")
-        except Exception as e:
-            print(f" ERROR creating optimizers: {e}")
-            traceback.print_exc()
-            sys.exit(1)
-        
-        # ============================================================================
-        # CREATE FIXED TRAINERS (to fix BatchNorm and input issues)
-        # ============================================================================
-        print(f"\\nCreating trainer for {training_mode}...")
-        
-        if algorithm == 'cafo':
-            print(f"⚠️ Creating FixedCAFOTrainer to handle BatchNorm issue...")
-            
-            class FixedCAFOTrainer:
-               
-                
-                def __init__(self, config, device):
-                    self.original_trainer = CAFOTrainer(config, device)
-                    self.config = config
-                    self.device = device
-                
-                def train_epoch(self, generator, discriminator, train_loader,
-                              optimizer_g, optimizer_d, epoch):
-                  
-                    
-                   
-                    if hasattr(generator, 'cafo_module'):
-                        original_cafo_method = generator.cafo_module.train_cafo_block
-                        
-                        def fixed_generator_cafo_block(block_module, input_data, target_data=None,
-                                                     optimizer=None, epochs=None, device='cpu', is_discriminator=True):
-                            # For generator, always use noise, not images
-                            if block_module == generator and input_data.dim() == 4:
-                                # This is images, convert to noise
-                                batch_size = input_data.size(0)
-                                print(f"    FixedCAFOTrainer: Converting images to noise for generator CAFO (batch_size={batch_size})")
-                                input_data = torch.randn(batch_size, generator.z_dim, device=device)
-                            
-                            # Ensure batch size > 1 for BatchNorm
-                            if input_data.size(0) < 2:
-                                print(f"    FixedCAFOTrainer: Batch size {input_data.size(0)} too small, skipping")
-                                return []
-                            
-                            # Temporarily set BatchNorm to eval mode for small batches
-                            if input_data.size(0) < 4:
-                                for module in block_module.modules():
-                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
-                                        module.eval()
-                            
-                            # Call original method
-                            result = original_cafo_method(block_module, input_data, target_data,
-                                                         optimizer, epochs, device, is_discriminator)
-                            
-                            # Restore BatchNorm to train mode
-                            if input_data.size(0) < 4:
-                                for module in block_module.modules():
-                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
-                                        module.train()
-                            
-                            return result
-                        
-                        # Apply the patch
-                        generator.cafo_module.train_cafo_block = fixed_generator_cafo_block
-                    
-                    # Also patch discriminator's CAFO module for small batches
-                    if hasattr(discriminator, 'cafo_module'):
-                        original_disc_cafo_method = discriminator.cafo_module.train_cafo_block
-                        
-                        def fixed_discriminator_cafo_block(block_module, input_data, target_data=None,
-                                                          optimizer=None, epochs=None, device='cpu', is_discriminator=True):
-                            # Ensure batch size > 1 for BatchNorm
-                            if input_data.size(0) < 2:
-                                print(f"    FixedCAFOTrainer: Discriminator batch size {input_data.size(0)} too small, skipping")
-                                return []
-                            
-                            # Temporarily set BatchNorm to eval mode for small batches
-                            if input_data.size(0) < 4:
-                                for module in block_module.modules():
-                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
-                                        module.eval()
-                            
-                            # Call original method
-                            result = original_disc_cafo_method(block_module, input_data, target_data,
-                                                              optimizer, epochs, device, is_discriminator)
-                            
-                            # Restore BatchNorm to train mode
-                            if input_data.size(0) < 4:
-                                for module in block_module.modules():
-                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
-                                        module.train()
-                            
-                            return result
-                        
-                        # Apply the patch
-                        discriminator.cafo_module.train_cafo_block = fixed_discriminator_cafo_block
-                    
-                    try:
-                        # Call original trainer
-                        print(f"    FixedCAFOTrainer: Starting epoch {epoch} training...")
-                        return self.original_trainer.train_epoch(
-                            generator, discriminator, train_loader,
-                            optimizer_g, optimizer_d, epoch
-                        )
-                    finally:
-                        # Restore original methods
-                        if hasattr(generator, 'cafo_module') and 'original_cafo_method' in locals():
-                            generator.cafo_module.train_cafo_block = original_cafo_method
-                        
-                        if hasattr(discriminator, 'cafo_module') and 'original_disc_cafo_method' in locals():
-                            discriminator.cafo_module.train_cafo_block = original_disc_cafo_method
-            
-            # Create fixed trainer
-            trainer = FixedCAFOTrainer(full_config, device)
-            print(f"✓ FixedCAFOTrainer created")
-        
-        elif algorithm == 'forward_forward':
-            print(f" Creating FixedForwardForwardTrainer to handle BatchNorm issue...")
-            
-            class FixedForwardForwardTrainer:
-               
-                def __init__(self, config, device):
-                    self.original_trainer = ForwardForwardTrainer(config, device)
-                    self.config = config
-                    self.device = device
-                
-                def train_epoch(self, generator, discriminator, train_loader,
-                              optimizer_g, optimizer_d, epoch):
-                 
-                    
-                    
-                    if hasattr(discriminator, 'ff_module'):
-                        original_ff_method = discriminator.ff_module.train_forward_forward_block
-                        
-                        def fixed_ff_block(block_module, positive_data, negative_data=None,
-                                         optimizer=None, epochs=None, device='cpu'):
-                            # Ensure batch size > 1 for BatchNorm
-                            if positive_data.size(0) < 2:
-                                print(f"    FixedFFTrainer: Batch size {positive_data.size(0)} too small, skipping")
-                                return []
-                            
-                            # Temporarily set BatchNorm to eval mode for small batches
-                            if positive_data.size(0) < 4:
-                                for module in block_module.modules():
-                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
-                                        module.eval()
-                            
-                            # Call original method
-                            result = original_ff_method(block_module, positive_data, negative_data,
-                                                       optimizer, epochs, device)
-                            
-                            # Restore BatchNorm to train mode
-                            if positive_data.size(0) < 4:
-                                for module in block_module.modules():
-                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
-                                        module.train()
-                            
-                            return result
-                        
-                        # Apply the patch
-                        discriminator.ff_module.train_forward_forward_block = fixed_ff_block
-                    
-                    try:
-                        # Call original trainer
-                        print(f"    FixedForwardForwardTrainer: Starting epoch {epoch} training...")
-                        return self.original_trainer.train_epoch(
-                            generator, discriminator, train_loader,
-                            optimizer_g, optimizer_d, epoch
-                        )
-                    finally:
-                        # Restore original method
-                        if hasattr(discriminator, 'ff_module') and 'original_ff_method' in locals():
-                            discriminator.ff_module.train_forward_forward_block = original_ff_method
-            
-            # Create fixed trainer
-            trainer = FixedForwardForwardTrainer(full_config, device)
-            print(f"✓ FixedForwardForwardTrainer created")
-        
-        else:
-            print(f"Creating BackpropTrainer...")
-            trainer = BackpropTrainer(full_config, device)
-            print(f"✓ BackpropTrainer created")
-        
-        # ============================================================================
-        # TRAINING WITH ALL ALGORITHMS
+        # TRAINING LOOP (Following LSTM pattern)
         # ============================================================================
         print(f"\\n{'='*60}")
-        print(f"STARTING {training_mode.upper()} TRAINING")
+        print(f"STARTING {dcgan_model.training_mode.upper()} TRAINING")
         print(f"{'='*60}")
         
-        # Training results
+        # Training results - structured like LSTM
+        epoch_loss_data = []
         results = {
+            'training_mode': dcgan_model.training_mode,
             'epochs': epochs,
-            'algorithm': algorithm,
-            'g_loss': [],
-            'd_loss': [],
-            'real_score': [],
-            'fake_score': []
+            'epoch_data': []
         }
         
         # For image tracking
@@ -668,7 +517,7 @@ implementation:
         # Initial images (before training)
         print(f"\\nGenerating initial images (before training)...")
         initial_images, initial_grid, initial_base64 = save_and_encode_images(
-            generator, device, epoch=0, num_images=16, save_dir="/tmp/generated_images"
+            dcgan_model.generator, device, epoch=0, num_images=16, save_dir="/tmp/generated_images"
         )
         
         # Upload initial grid to CDN
@@ -683,47 +532,56 @@ implementation:
             'epoch': 0,
             'grid_url': initial_grid_url,
             'description': 'Initial images before training',
-            'base64_previews': initial_base64[:4]  # First 4 images as preview
+            'base64_previews': initial_base64[:4],
+            'training_mode': dcgan_model.training_mode
         })
         
         print(f"\\nInitial images saved and uploaded to CDN")
         if initial_grid_url:
             print(f"Initial grid URL: {initial_grid_url[:80]}...")
         
-        # ============================================================================
-        # TRAINING LOOP
-        # ============================================================================
+        # Training loop - similar to LSTM's training
         for epoch in range(epochs):
             print(f"\\n{'='*40}")
-            print(f"Epoch {epoch+1}/{epochs} ({training_mode})")
+            print(f"Epoch {epoch+1}/{epochs} ({dcgan_model.training_mode})")
             print(f"{'='*40}")
             
             try:
-                # Train one epoch using trainer
-                metrics = trainer.train_epoch(
-                    generator, discriminator, train_loader,
-                    optimizer_g, optimizer_d, epoch
-                )
+                # Train one epoch using wrapper - similar to LSTM's train_epoch
+                metrics = dcgan_model.train_epoch(train_loader, epoch)
                 
-                # Store results
-                results['g_loss'].append(float(metrics['g_loss']))
-                results['d_loss'].append(float(metrics['d_loss']))
+                # Create epoch result similar to LSTM format
+                epoch_result = {
+                    'epoch': epoch + 1,
+                    'loss': float(metrics.get('g_loss', 0.0)),  # Generator loss as main loss
+                    'validation_loss': float(metrics.get('d_loss', 0.0)),  # Discriminator loss as validation
+                    'training_mode': dcgan_model.training_mode.lower(),
+                    'real_score': float(metrics.get('real_score', 0.0)),
+                    'fake_score': float(metrics.get('fake_score', 0.0))
+                }
                 
-                if 'real_score' in metrics:
-                    results['real_score'].append(float(metrics['real_score']))
-                if 'fake_score' in metrics:
-                    results['fake_score'].append(float(metrics['fake_score']))
+                # Add to LSTM-like loss data
+                loss_entry = {
+                    'epoch': epoch + 1,
+                    'loss': epoch_result['loss'],
+                    'validation_loss': epoch_result['validation_loss'],
+                    'training_mode': dcgan_model.training_mode.lower(),
+                    'uid': str(uuid.uuid4())
+                }
+                epoch_loss_data.append(loss_entry)
+                
+                results['epoch_data'].append(epoch_result)
                 
                 # Log epoch results
-                print(f"  Generator Loss: {results['g_loss'][-1]:.4f}")
-                print(f"  Discriminator Loss: {results['d_loss'][-1]:.4f}")
+                print(f"  Generator Loss: {epoch_result['loss']:.4f}")
+                print(f"  Discriminator Loss: {epoch_result['validation_loss']:.4f}")
                 if 'real_score' in metrics and 'fake_score' in metrics:
                     print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
                 
                 # Generate and save images every epoch
                 print(f"  Generating images for epoch {epoch+1}...")
                 image_paths, grid_path, base64_images = save_and_encode_images(
-                    generator, device, epoch=epoch+1, num_images=16, save_dir="/tmp/generated_images"
+                    dcgan_model.generator, device, epoch=epoch+1, num_images=16, save_dir="/tmp/generated_images"
                 )
                 
                 # Upload grid to CDN
@@ -738,9 +596,10 @@ implementation:
                     'epoch': epoch + 1,
                     'grid_url': grid_url,
                     'image_paths': image_paths,
-                    'base64_previews': base64_images[:4],  # First 4 as preview
-                    'g_loss': results['g_loss'][-1],
-                    'd_loss': results['d_loss'][-1]
+                    'base64_previews': base64_images[:4],
+                    'g_loss': epoch_result['loss'],
+                    'd_loss': epoch_result['validation_loss'],
+                    'training_mode': dcgan_model.training_mode
                 }
                 
                 generated_images_info.append(epoch_images_info)
@@ -751,42 +610,42 @@ implementation:
                 if grid_url:
                     print(f"  Grid uploaded to: {grid_url[:80]}...")
                 
-                # Display first 2 base64 previews in logs
-                if len(base64_images) >= 2:
-                    print(f"  Image 1 preview (base64): {base64_images[0][:50]}...")
-                    print(f"  Image 2 preview (base64): {base64_images[1][:50]}...")
-                
             except Exception as e:
                 print(f" ERROR in epoch {epoch+1}: {e}")
                 traceback.print_exc()
                 sys.exit(1)
         
         # ============================================================================
-        # SAVE MODEL
+        # SAVE MODEL (Following LSTM pattern)
         # ============================================================================
         print("\\nSaving trained model...")
         
         try:
             os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
             
+            # Create full checkpoint like LSTM might do
             checkpoint = {
-                'config': full_config,
-                'generator_state_dict': generator.state_dict(),
-                'discriminator_state_dict': discriminator.state_dict(),
-                'training_mode': training_mode,
-                'algorithm_used': algorithm,
-                'model_info': {
-                    'generator_params': sum(p.numel() for p in generator.parameters()),
-                    'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
-                    'image_size': generator.image_size,
-                    'channels': generator.image_channels,
-                    'z_dim': generator.z_dim
-                },
-                'master_config': config,
+                'generator_state_dict': dcgan_model.generator.state_dict(),
+                'discriminator_state_dict': dcgan_model.discriminator.state_dict(),
+                'optimizer_g_state_dict': dcgan_model.optimizer_g.state_dict(),
+                'optimizer_d_state_dict': dcgan_model.optimizer_d.state_dict(),
+                'config': model_config,
+                'training_mode': dcgan_model.training_mode,
+                'epochs_trained': epochs,
+                'image_size': image_size,
+                'channels': channels,
+                'z_dim': dcgan_model.generator.z_dim,
+                'final_loss': epoch_loss_data[-1]['loss'] if epoch_loss_data else 0.0,
+                'final_validation_loss': epoch_loss_data[-1]['validation_loss'] if epoch_loss_data else 0.0,
                 'generated_images_info': generated_images_info
             }
+            
             torch.save(checkpoint, args.trained_model)
             print(f"✓ Model saved to: {args.trained_model}")
+            print(f"  Training mode: {dcgan_model.training_mode}")
+            print(f"  Epochs trained: {epochs}")
+            print(f"  Final Generator Loss: {checkpoint['final_loss']:.4f}")
+            print(f"  Final Discriminator Loss: {checkpoint['final_validation_loss']:.4f}")
             
         except Exception as e:
             print(f" ERROR saving model: {e}")
@@ -794,24 +653,37 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # CREATE TRAINING HISTORY
+        # SAVE TRAINING HISTORY (Following LSTM pattern)
         # ============================================================================
         try:
             os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
             
+            # Create history similar to LSTM output
             history = {
-                "training_mode": training_mode,
-                "algorithm": algorithm,
-                "results": results,
+                "training_mode": dcgan_model.training_mode,
+                "model_type": "dcgan",
+                "total_epochs": epochs,
+                "epoch_loss_data": epoch_loss_data,
                 "config": {
-                    "model": gan_cfg,
+                    "generator": generator_cfg,
+                    "discriminator": discriminator_cfg,
                     "training": training_cfg
                 },
-                "epochs": epochs,
-                "dataset_size": len(dataset),
-                "batch_size": actual_batch_size,
-                "generated_images_count": len(all_epoch_images),
-                "image_info": generated_images_info
+                "dataset_info": {
+                    "size": len(dataset),
+                    "image_size": image_size,
+                    "channels": channels
+                },
+                "model_info": {
+                    "generator_params": sum(p.numel() for p in dcgan_model.generator.parameters()),
+                    "discriminator_params": sum(p.numel() for p in dcgan_model.discriminator.parameters()),
+                    "z_dim": dcgan_model.generator.z_dim
+                },
+                "generated_images": {
+                    "total_images": len(all_epoch_images),
+                    "grids_count": len(generated_images_info),
+                    "image_grids": [img_info['grid_url'] for img_info in generated_images_info if img_info.get('grid_url')]
+                }
             }
             
             with open(args.training_history, "w") as f:
@@ -824,62 +696,47 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # PROCESS HISTORY FOR OUTPUT
+        # CREATE PROCESSED HISTORY (Following LSTM pattern)
         # ============================================================================
         try:
-            processed_rows = []
+            os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
             
-            # For DCGAN, we have both generator and discriminator losses
-            g_losses = results.get("g_loss", [])
-            d_losses = results.get("d_loss", [])
-            
-            if len(g_losses) == 0 or len(d_losses) == 0:
-                raise ValueError("No training loss data available")
+            # Process data similar to LSTM output format
+            processed_data = []
             
             # Create rows for both generator and discriminator
-            for epoch_idx in range(len(g_losses)):
+            for epoch_result in results['epoch_data']:
                 # Generator row
-                row = {
-                    "epoch": epoch_idx + 1,
-                    "loss": float(g_losses[epoch_idx]),
-                    "component": "generator",
-                    "type": "train",
-                    "image_grid_url": generated_images_info[epoch_idx + 1]['grid_url'] if epoch_idx + 1 < len(generated_images_info) else None
+                gen_row = {
+                    'epoch': epoch_result['epoch'],
+                    'loss': epoch_result['loss'],
+                    'component': 'generator',
+                    'type': 'train',
+                    'training_mode': epoch_result['training_mode']
                 }
-                processed_rows.append(row)
+                processed_data.append(gen_row)
                 
                 # Discriminator row
-                if epoch_idx < len(d_losses):
-                    row = {
-                        "epoch": epoch_idx + 1,
-                        "loss": float(d_losses[epoch_idx]),
-                        "component": "discriminator",
-                        "type": "train",
-                        "image_grid_url": generated_images_info[epoch_idx + 1]['grid_url'] if epoch_idx + 1 < len(generated_images_info) else None
-                    }
-                    processed_rows.append(row)
+                disc_row = {
+                    'epoch': epoch_result['epoch'],
+                    'loss': epoch_result['validation_loss'],
+                    'component': 'discriminator',
+                    'type': 'train',
+                    'training_mode': epoch_result['training_mode']
+                }
+                processed_data.append(disc_row)
             
-            # Get last epoch data
-            last_epoch = processed_rows[-1]["epoch"]
-            last_g_loss = None
-            last_d_loss = None
-            
-            for row in processed_rows:
-                if row["epoch"] == last_epoch:
-                    if row["component"] == "generator":
-                        last_g_loss = row["loss"]
-                    elif row["component"] == "discriminator":
-                        last_d_loss = row["loss"]
-            
+            # Final output similar to LSTM
             output = {
-                "epoch": int(last_epoch),
-                "loss": float(last_g_loss),
-                "validation_loss": float(last_d_loss) if last_d_loss is not None else 0.0,
-                "training_mode": training_mode,
-                "algorithm": algorithm,
-                "total_images_generated": len(all_epoch_images),
-                "image_grids": [img_info['grid_url'] for img_info in generated_images_info if img_info.get('grid_url')],
-                "data": processed_rows[:10]
+                'training_completed': True,
+                'model_type': 'dcgan',
+                'training_mode': dcgan_model.training_mode,
+                'epoch': epochs,
+                'loss': epoch_loss_data[-1]['loss'] if epoch_loss_data else 0.0,
+                'validation_loss': epoch_loss_data[-1]['validation_loss'] if epoch_loss_data else 0.0,
+                'total_epochs_trained': epochs,
+                'image_grids': [img_info['grid_url'] for img_info in generated_images_info if img_info.get('grid_url')],
+                'data': processed_data[:20]  # Include first 20 rows like LSTM
             }
             
             with open(args.processed_history_json, "w") as f:
@@ -897,45 +754,41 @@ implementation:
         try:
             os.makedirs(os.path.dirname(args.generated_images_urls), exist_ok=True)
             
-            # Create a comprehensive image URLs file
+            # Create images output
             images_output = {
-                "training_mode": training_mode,
-                "algorithm": algorithm,
+                "training_mode": dcgan_model.training_mode,
+                "model_type": "dcgan",
                 "total_epochs": epochs,
                 "images_per_epoch": 16,
                 "total_images": len(all_epoch_images),
                 "image_grids": [],
-                "epoch_images": {}
+                "epoch_progress": []
             }
             
             # Add all grid URLs
             for img_info in generated_images_info:
                 if img_info.get('grid_url'):
-                    images_output["image_grids"].append({
+                    grid_info = {
                         "epoch": img_info['epoch'],
                         "url": img_info['grid_url'],
-                        "description": img_info.get('description', f'Epoch {img_info["epoch"]} images')
-                    })
-            
-            # Add epoch-wise image info
-            for img_info in generated_images_info:
-                if img_info['epoch'] > 0:  # Skip initial
-                    images_output["epoch_images"][img_info['epoch']] = {
-                        "grid_url": img_info['grid_url'],
-                        "g_loss": img_info['g_loss'],
-                        "d_loss": img_info['d_loss'],
-                        "base64_previews": img_info['base64_previews']
+                        "description": img_info.get('description', f'Epoch {img_info["epoch"]}'),
+                        "training_mode": img_info.get('training_mode', dcgan_model.training_mode)
                     }
+                    images_output["image_grids"].append(grid_info)
+            
+            # Add epoch progress
+            for epoch_result in results['epoch_data']:
+                epoch_progress = {
+                    "epoch": epoch_result['epoch'],
+                    "loss": epoch_result['loss'],
+                    "validation_loss": epoch_result['validation_loss'],
+                    "training_mode": epoch_result['training_mode']
+                }
+                images_output["epoch_progress"].append(epoch_progress)
             
             with open(args.generated_images_urls, "w") as f:
                 json.dump(images_output, f, indent=2)
             print(f"✓ Generated images URLs saved to: {args.generated_images_urls}")
-            
-            # Print some URLs to logs
-            print(f"\\nGenerated Image URLs Summary:")
-            print(f"  Total grids: {len(images_output['image_grids'])}")
-            for i, grid in enumerate(images_output['image_grids'][:3]):  # Show first 3
-                print(f"  Epoch {grid['epoch']}: {grid['url'][:80]}...")
             
         except Exception as e:
             print(f" ERROR creating images URLs file: {e}")
@@ -948,69 +801,41 @@ implementation:
         try:
             os.makedirs(os.path.dirname(args.training_images_summary), exist_ok=True)
             
-            # Create a summary with base64 previews
+            # Create summary similar to LSTM
             summary = {
                 "training_completed": True,
-                "training_mode": training_mode,
-                "algorithm": algorithm,
+                "model_type": "dcgan",
+                "training_mode": dcgan_model.training_mode,
                 "epochs_trained": epochs,
-                "final_losses": {
-                    "generator": results['g_loss'][-1] if results['g_loss'] else 0.0,
-                    "discriminator": results['d_loss'][-1] if results['d_loss'] else 0.0
+                "final_metrics": {
+                    "loss": epoch_loss_data[-1]['loss'] if epoch_loss_data else 0.0,
+                    "validation_loss": epoch_loss_data[-1]['validation_loss'] if epoch_loss_data else 0.0
                 },
                 "image_progress": [],
-                "sample_base64_images": []
+                "sample_images": {
+                    "initial": generated_images_info[0]['base64_previews'][:2] if generated_images_info else [],
+                    "final": generated_images_info[-1]['base64_previews'][:2] if len(generated_images_info) > 1 else []
+                },
+                "training_stats": {
+                    "dataset_size": len(dataset),
+                    "batch_size": actual_batch_size,
+                    "total_images_generated": len(all_epoch_images),
+                    "grids_generated": len(generated_images_info)
+                }
             }
             
             # Add image progress
             for img_info in generated_images_info:
-                if img_info['epoch'] == 0:
-                    summary["image_progress"].append({
-                        "epoch": 0,
-                        "description": "Initial (before training)",
-                        "grid_url": img_info['grid_url'],
-                        "has_training": False
-                    })
-                else:
-                    summary["image_progress"].append({
-                        "epoch": img_info['epoch'],
-                        "description": f"After {img_info['epoch']} epochs",
-                        "grid_url": img_info['grid_url'],
-                        "g_loss": img_info['g_loss'],
-                        "d_loss": img_info['d_loss'],
-                        "has_training": True
-                    })
-            
-            # Add sample base64 images (first and last epoch)
-            if len(generated_images_info) >= 2:
-                # First training epoch
-                first_epoch_info = generated_images_info[1]  # Index 1 is epoch 1
-                if first_epoch_info['base64_previews']:
-                    summary["sample_base64_images"].append({
-                        "epoch": 1,
-                        "description": "First training epoch",
-                        "previews": first_epoch_info['base64_previews'][:2]  # First 2 images
-                    })
-                
-                # Last epoch
-                last_epoch_info = generated_images_info[-1]
-                if last_epoch_info['base64_previews']:
-                    summary["sample_base64_images"].append({
-                        "epoch": last_epoch_info['epoch'],
-                        "description": f"Final epoch ({last_epoch_info['epoch']})",
-                        "previews": last_epoch_info['base64_previews'][:2]  # First 2 images
-                    })
+                summary["image_progress"].append({
+                    "epoch": img_info['epoch'],
+                    "grid_url": img_info['grid_url'],
+                    "description": img_info.get('description', f'Epoch {img_info["epoch"]}'),
+                    "has_training": img_info['epoch'] > 0
+                })
             
             with open(args.training_images_summary, "w") as f:
                 json.dump(summary, f, indent=2)
             print(f"✓ Training images summary saved to: {args.training_images_summary}")
-            
-            # Print base64 previews in logs
-            print(f"\\nBase64 Image Previews in Logs:")
-            for sample in summary["sample_base64_images"]:
-                print(f"  Epoch {sample['epoch']} ({sample['description']}):")
-                for i, preview in enumerate(sample['previews']):
-                    print(f"    Image {i+1}: {preview[:50]}...")
             
         except Exception as e:
             print(f" ERROR creating images summary: {e}")
@@ -1021,18 +846,15 @@ implementation:
         # FINAL SUMMARY
         # ============================================================================
         print(f"\\n{'✓'*80}")
-        print(f"SUCCESS: {training_mode} TRAINING COMPLETED WITH IMAGE UPLOAD")
+        print(f"SUCCESS: {dcgan_model.training_mode.upper()} TRAINING COMPLETED")
         print(f"{'✓'*80}")
-        print(f"✓ Training mode: {training_mode}")
-        print(f"✓ Algorithm: {algorithm}")
+        print(f"✓ Model type: DCGAN")
+        print(f"✓ Training mode: {dcgan_model.training_mode}")
         print(f"✓ Epochs trained: {epochs}")
-        print(f"✓ Final Generator Loss: {results['g_loss'][-1]:.4f}")
-        print(f"✓ Final Discriminator Loss: {results['d_loss'][-1]:.4f}")
+        print(f"✓ Final Generator Loss: {epoch_loss_data[-1]['loss']:.4f}")
+        print(f"✓ Final Discriminator Loss: {epoch_loss_data[-1]['validation_loss']:.4f}")
         print(f"✓ Images generated: {len(all_epoch_images)}")
-        print(f"✓ Image grids uploaded: {len([i for i in generated_images_info if i.get('grid_url')])}")
         print(f"✓ Model saved: {args.trained_model}")
-        print(f"✓ Image URLs file: {args.generated_images_urls}")
-        print(f"✓ Images summary: {args.training_images_summary}")
         
     args:
       - --data_path
