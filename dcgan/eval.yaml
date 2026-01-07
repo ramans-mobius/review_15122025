@@ -1,5 +1,5 @@
-name: Evaluate v3
-description: Evaluates DCGAN model using single master config
+name: Evaluate v4
+description: Evaluates DCGAN model using single master config with DCGANEvaluator
 inputs:
   - name: trained_model
     type: Model
@@ -36,10 +36,8 @@ implementation:
         import argparse, pickle, json, os, io, traceback
         import numpy as np
         import torchvision.transforms as transforms
-        import torch.nn.functional as F
         from PIL import Image
-        from torch.utils.data import DataLoader, Dataset
-        import base64
+        from torch.utils.data import DataLoader
         
         # ============================================================================
         # Define classes needed for unpickling
@@ -66,10 +64,11 @@ implementation:
                     if self.transform:
                         img = self.transform(img)
                     
-                    return img
+                    # Return (image, dummy_label) - GANs need this format
+                    return img, torch.tensor(0.0, dtype=torch.float32)
                 except Exception as e:
                     print(f"Error creating dummy image {idx}: {e}")
-                    return torch.zeros(self.channels, self.image_size, self.image_size)
+                    return torch.zeros(self.channels, self.image_size, self.image_size), torch.tensor(0.0, dtype=torch.float32)
         
         class GANDataWrapper:
             def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
@@ -178,22 +177,18 @@ implementation:
         print(f"Preprocessed test dataset: {len(test_dataset)} samples")
         
         # ============================================================================
-        # LOAD MODEL - USE CONFIG FROM CHECKPOINT, NOT MASTER CONFIG
+        # LOAD MODEL
         # ============================================================================
         print("\\nLoading trained model...")
         checkpoint = torch.load(args.trained_model, map_location='cpu')
         
         if isinstance(checkpoint, dict):
-            # Use the EXACT config from training, not master config
+            # Use the EXACT config from training
             model_config = checkpoint.get('config', {})
             training_mode = checkpoint.get('training_mode', 'unknown')
             
             print(f"Model config from checkpoint:")
             print(f"  Training mode: {training_mode}")
-            if 'generator' in model_config and 'hidden_dims' in model_config['generator']:
-                print(f"  Generator hidden_dims: {model_config['generator']['hidden_dims']}")
-            if 'discriminator' in model_config and 'hidden_dims' in model_config['discriminator']:
-                print(f"  Discriminator hidden_dims: {model_config['discriminator']['hidden_dims']}")
             
             # Create DCGAN models WITH THE EXACT SAME CONFIG AS TRAINING
             generator, discriminator, full_config = create_dcgan(model_config)
@@ -224,108 +219,125 @@ implementation:
         generator.eval()
         discriminator.eval()
         
-        # Create data loader
-        batch_size = 4  # Use small batch size for small dataset
-        test_loader = DataLoader(test_dataset, batch_size=min(batch_size, len(test_dataset)), shuffle=False)
+        # Create data loader for DCGANEvaluator
+        batch_size = 4  # Small batch size
+        actual_batch_size = min(batch_size, max(1, len(test_dataset)))
+        test_loader = DataLoader(test_dataset, batch_size=actual_batch_size, shuffle=False)
         
-        # Evaluate
+        # ============================================================================
+        # EVALUATE USING DCGANEvaluator
+        # ============================================================================
         print(f"\\nEvaluating DCGAN on {len(test_dataset)} test samples...")
         
-        # Create evaluator
-        evaluator = DCGANEvaluator(full_config, device)
-        
-        # Evaluate using DCGANEvaluator (skip if dataset too small)
-        eval_metrics = {}
-        if len(test_dataset) >= 2:  # Need at least 2 samples for metrics
-            try:
-                eval_metrics = evaluator.evaluate(
-                    generator, discriminator, 
-                    test_loader,
-                    num_batches=min(2, len(test_dataset) // max(1, batch_size))
-                )
-                print(f"✓ DCGANEvaluator metrics calculated")
-            except Exception as e:
-                print(f"Warning: DCGANEvaluator failed: {e}")
-                eval_metrics = {}
-        else:
-            print(f"Warning: Dataset too small ({len(test_dataset)} samples) for full evaluation")
-        
-        # Basic manual metrics
-        all_preds, all_targets = [], []
-        total_g_loss = 0.0
-        total_d_loss = 0.0
-        total_batches = 0
-        
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(test_loader):
-                if batch_idx >= 5:  # Limit to 5 batches
-                    break
-                    
-                real_images = batch
-                real_images = real_images.to(device)
-                
-                # Generate fake images
-                z = torch.randn(real_images.size(0), generator.z_dim, device=device)
-                fake_images = generator(z)
-                
-                # Discriminator outputs
-                real_output = discriminator(real_images)
-                fake_output = discriminator(fake_images)
-                
-                # Generator loss
-                g_loss = generator.calculate_loss(fake_output)
-                
-                # Discriminator loss
-                d_loss = discriminator.calculate_loss(real_output, fake_output)
-                
-                total_g_loss += g_loss.item()
-                total_d_loss += d_loss.item()
-                total_batches += 1
-                
-                # Collect discriminator scores
-                real_preds = (real_output > 0).float()
-                fake_preds = (fake_output < 0).float()
-                
-                all_preds.extend(real_preds.cpu().tolist())
-                all_preds.extend(fake_preds.cpu().tolist())
-                
-                all_targets.extend([1] * len(real_preds))
-                all_targets.extend([0] * len(fake_preds))
-        
-        # Calculate accuracy
         try:
-            correct = sum(1 for p, t in zip(all_preds, all_targets) if abs(p - t) < 0.5)
-            total = len(all_targets)
-            accuracy = float(correct / total) if total > 0 else 0.0
+            # Create DCGANEvaluator
+            evaluator = DCGANEvaluator(full_config, device)
+            
+            # Use evaluate method which handles the (image, label) unpacking
+            dcgan_metrics = evaluator.evaluate(
+                generator, discriminator, test_loader,
+                num_batches=min(5, len(test_dataset) // max(1, actual_batch_size))
+            )
+            
+            print("✓ DCGANEvaluator metrics calculated successfully")
+            for key, value in dcgan_metrics.items():
+                if isinstance(value, (int, float)) and not np.isnan(value):
+                    print(f"  {key}: {value:.4f}")
+                    
         except Exception as e:
-            print(f"Warning: accuracy calculation failed: {e}")
-            accuracy = 0.0
+            print(f"✗ DCGANEvaluator failed: {e}")
+            traceback.print_exc()
+            print("  Falling back to basic metrics calculation...")
+            dcgan_metrics = {}
         
-        # Calculate average losses
-        avg_g_loss = float(total_g_loss / max(1, total_batches))
-        avg_d_loss = float(total_d_loss / max(1, total_batches))
+        # ============================================================================
+        # Basic metrics fallback
+        # ============================================================================
+        if not dcgan_metrics:
+            print("\\nCalculating basic metrics...")
+            
+            all_preds, all_targets = [], []
+            total_g_loss = 0.0
+            total_d_loss = 0.0
+            total_batches = 0
+            
+            with torch.no_grad():
+                for batch_idx, (batch_images, batch_labels) in enumerate(test_loader):
+                    if batch_idx >= 5:
+                        break
+                        
+                    real_images = batch_images.to(device)
+                    batch_size = real_images.size(0)
+                    
+                    # Generate fake images
+                    z = torch.randn(batch_size, generator.z_dim, device=device)
+                    fake_images = generator(z)
+                    
+                    # Discriminator outputs
+                    real_output = discriminator(real_images)
+                    fake_output = discriminator(fake_images)
+                    
+                    # Generator loss
+                    g_loss = generator.calculate_loss(fake_output)
+                    
+                    # Discriminator loss
+                    d_loss = discriminator.calculate_loss(real_output, fake_output)
+                    
+                    total_g_loss += g_loss.item()
+                    total_d_loss += d_loss.item()
+                    total_batches += 1
+                    
+                    # Collect discriminator scores
+                    real_preds = (real_output > 0).float()
+                    fake_preds = (fake_output < 0).float()
+                    
+                    all_preds.extend(real_preds.cpu().numpy().tolist())
+                    all_preds.extend(fake_preds.cpu().numpy().tolist())
+                    
+                    all_targets.extend([1] * len(real_preds))
+                    all_targets.extend([0] * len(fake_preds))
+            
+            # Calculate accuracy
+            try:
+                correct = sum(1 for p, t in zip(all_preds, all_targets) if abs(p - t) < 0.5)
+                total = len(all_targets)
+                accuracy = float(correct / total) if total > 0 else 0.0
+            except Exception as e:
+                print(f"Warning: accuracy calculation failed: {e}")
+                accuracy = 0.0
+            
+            # Calculate average losses
+            avg_g_loss = float(total_g_loss / max(1, total_batches))
+            avg_d_loss = float(total_d_loss / max(1, total_batches))
+            
+            # Create basic metrics
+            dcgan_metrics = {
+                'accuracy': accuracy,
+                'generator_loss': avg_g_loss,
+                'discriminator_loss': avg_d_loss,
+                'num_samples': len(all_targets)
+            }
         
-        # Combine metrics
+        # ============================================================================
+        # Combine all metrics
+        # ============================================================================
+        print("\\nCombining all metrics...")
+        
         metrics_output = {
-            "accuracy": float(accuracy),
-            "generator_loss": float(avg_g_loss),
-            "discriminator_loss": float(avg_d_loss),
             "training_mode": training_mode,
-            "num_samples": int(len(all_targets)),
             "num_test_samples": len(test_dataset),
             "evaluation_success": True
         }
         
-        # Add DCGANEvaluator metrics if available
-        for key, value in eval_metrics.items():
+        # Add all metrics from dcgan_metrics
+        for key, value in dcgan_metrics.items():
             if isinstance(value, (int, float)) and not np.isnan(value):
-                metrics_output[f"dcgan_{key}"] = float(value)
+                metrics_output[key] = float(value)
         
-        print(f"\\nEvaluation Metrics:")
-        print(f"  Accuracy: {float(accuracy):.4f}")
-        print(f"  Generator Loss: {avg_g_loss:.4f}")
-        print(f"  Discriminator Loss: {avg_d_loss:.4f}")
-        print(f"  Training Mode: {training_mode}")
+        print(f"\\nFinal Metrics Summary:")
+        for key in ['accuracy', 'generator_loss', 'discriminator_loss', 'psnr', 'ssim', 'd_accuracy']:
+            if key in metrics_output:
+                print(f"  {key}: {metrics_output[key]:.4f}")
         
         # Save outputs
         os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
@@ -336,10 +348,10 @@ implementation:
         
         # KFP metrics format
         with open(args.metrics, "w") as f:
-            f.write(f"accuracy: {float(accuracy)}\\n")
-            f.write(f"generator_loss: {float(avg_g_loss)}\\n")
-            f.write(f"discriminator_loss: {float(avg_d_loss)}\\n")
             f.write(f"training_mode: {training_mode}\\n")
+            for key in ['accuracy', 'generator_loss', 'discriminator_loss']:
+                if key in metrics_output:
+                    f.write(f"{key}: {metrics_output[key]}\\n")
         
         print("\\n=== EVALUATION COMPLETE ===")
         
