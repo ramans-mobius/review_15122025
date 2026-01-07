@@ -1,4 +1,4 @@
-name: Train v7
+name: Train v8
 description: Trains DCGAN using nesyfactory with NO fallbacks - throws errors on failure
 inputs:
   - name: data_path
@@ -361,7 +361,7 @@ implementation:
         print(f"{'='*60}")
         
         for epoch in range(epochs):
-            print(f"\nEpoch {epoch+1}/{epochs} ({training_mode})")
+            print(f"\\nEpoch {epoch+1}/{epochs} ({training_mode})")
             
             try:
                 # Train one epoch using nesy_factory trainer
