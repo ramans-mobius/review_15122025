@@ -1,5 +1,5 @@
-name: Train v4
-description: Trains DCGAN using single master config with proper algorithm support
+name: Train v5
+description: Trains DCGAN using nesyfactory with NO fallbacks - throws errors on failure
 inputs:
   - name: data_path
     type: Dataset
@@ -68,7 +68,7 @@ implementation:
                     return img, torch.tensor(0.0, dtype=torch.float32)
                 except Exception as e:
                     print(f"Error creating dummy image {idx}: {e}")
-                    return torch.zeros(self.channels, self.image_size, self.image_size), torch.tensor(0.0, dtype=torch.float32)
+                    raise RuntimeError(f"Failed to create dummy image: {e}")
         
         class GANDataWrapper:
             def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
@@ -87,20 +87,37 @@ implementation:
                 return self.dataset[idx]
         
         # ============================================================================
-        # Import DCGAN modules
+        # Import DCGAN modules - NO FALLBACK
         # ============================================================================
+        print("Importing nesy_factory.GANs.dcgan...")
         try:
-            from nesy_factory.GANs.dcgan import (
-                create_dcgan,
-                OptimizerFactory,
-                TrainerFactory,
-                BackpropTrainer,
-                ForwardForwardTrainer,
-                CAFOTrainer
-            )
-            print(" Successfully imported DCGAN modules with all trainers")
-        except ImportError as e:
-            print(f" ERROR: nesyfactory not available: {e}")
+            # Import the entire module
+            import nesy_factory.GANs.dcgan as dcgan_module
+            
+            # Get all necessary components - THROW ERROR IF NOT FOUND
+            required_components = [
+                'create_dcgan', 'OptimizerFactory', 'TrainerFactory',
+                'BackpropTrainer', 'ForwardForwardTrainer', 'CAFOTrainer'
+            ]
+            
+            for component in required_components:
+                if not hasattr(dcgan_module, component):
+                    raise ImportError(f"Required component '{component}' not found in nesy_factory.GANs.dcgan")
+            
+            # Import all components
+            create_dcgan = dcgan_module.create_dcgan
+            OptimizerFactory = dcgan_module.OptimizerFactory
+            TrainerFactory = dcgan_module.TrainerFactory
+            BackpropTrainer = dcgan_module.BackpropTrainer
+            ForwardForwardTrainer = dcgan_module.ForwardForwardTrainer
+            CAFOTrainer = dcgan_module.CAFOTrainer
+            
+            print("✓ Successfully imported all required DCGAN components")
+            print(f"Available trainers: BackpropTrainer, ForwardForwardTrainer, CAFOTrainer")
+            
+        except Exception as e:
+            print(f" ERROR importing from nesy_factory: {e}")
+            traceback.print_exc()
             sys.exit(1)
         
         parser = argparse.ArgumentParser()
@@ -112,150 +129,226 @@ implementation:
         parser.add_argument("--processed_history_json", required=True)
         args = parser.parse_args()
         
-        print("Starting DCGAN Training")
+        print("\\n" + "="*60)
+        print("STARTING DCGAN TRAINING - NO FALLBACKS")
+        print("="*60)
         
-        # Parse master config
-        config = json.loads(args.master_config)
-        gan_cfg = config['gan']
-        training_cfg = gan_cfg['training']
+        # ============================================================================
+        # PARSE CONFIG AND DETERMINE TRAINING MODE
+        # ============================================================================
+        try:
+            config = json.loads(args.master_config)
+            gan_cfg = config['gan']
+            training_cfg = gan_cfg['training']
+            
+            # Check generator and discriminator configs for training mode flags
+            generator_cfg = gan_cfg['generator']
+            discriminator_cfg = gan_cfg['discriminator']
+            
+            # Determine training mode based on use_forward_forward and use_cafo flags
+            use_ff_generator = generator_cfg.get('use_forward_forward', False)
+            use_ff_discriminator = discriminator_cfg.get('use_forward_forward', False)
+            use_cafo_generator = generator_cfg.get('use_cafo', False)
+            use_cafo_discriminator = discriminator_cfg.get('use_cafo', False)
+            
+            print(f"\\nTraining mode detection from config:")
+            print(f"  Generator use_forward_forward: {use_ff_generator}")
+            print(f"  Discriminator use_forward_forward: {use_ff_discriminator}")
+            print(f"  Generator use_cafo: {use_cafo_generator}")
+            print(f"  Discriminator use_cafo: {use_cafo_discriminator}")
+            
+            # Determine training mode (priority: CAFO > Forward-Forward > Backprop)
+            if use_cafo_generator or use_cafo_discriminator:
+                training_mode = "CAFO"
+                algorithm = "cafo"
+                print(f"✓ Using CAFO training (detected from use_cafo flags)")
+            elif use_ff_generator or use_ff_discriminator:
+                training_mode = "Forward-Forward"
+                algorithm = "forward_forward"
+                print(f"✓ Using Forward-Forward training (detected from use_forward_forward flags)")
+            else:
+                training_mode = "Backpropagation"
+                algorithm = "backprop"
+                print(f"✓ Using Backpropagation training (default)")
+            
+            # Also check algorithm field for backward compatibility
+            algorithm_from_training = training_cfg.get('algorithm', '').lower()
+            if algorithm_from_training:
+                print(f"  Note: Found algorithm field in training config: '{algorithm_from_training}'")
+                # Map 'ff' to 'forward_forward'
+                if algorithm_from_training == 'ff':
+                    algorithm_from_training = 'forward_forward'
+                
+                # Warn if there's a conflict
+                if algorithm_from_training != algorithm:
+                    print(f"  Warning: Algorithm from training config '{algorithm_from_training}' differs from detected mode '{algorithm}'")
+                    print(f"  Using detected mode from use_* flags: {algorithm}")
+            
+        except Exception as e:
+            print(f" ERROR parsing master_config: {e}")
+            sys.exit(1)
         
-        # Load preprocessed data with custom unpickler
-        class SafeUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                # Allow our custom classes
-                if name == 'GANDataWrapper':
-                    return GANDataWrapper
-                elif name == 'GANDataset':
-                    return GANDataset
-                return super().find_class(module, name)
-        
-        with open(args.data_path, "rb") as f:
-            unpickler = SafeUnpickler(f)
-            data_wrapper = unpickler.load()
-        
-        # Extract dataset
-        if hasattr(data_wrapper, 'dataset'):
+        # ============================================================================
+        # LOAD DATASET - NO FALLBACK
+        # ============================================================================
+        try:
+            class SafeUnpickler(pickle.Unpickler):
+                def find_class(self, module, name):
+                    # Allow our custom classes
+                    if name == 'GANDataWrapper':
+                        return GANDataWrapper
+                    elif name == 'GANDataset':
+                        return GANDataset
+                    return super().find_class(module, name)
+            
+            with open(args.data_path, "rb") as f:
+                unpickler = SafeUnpickler(f)
+                data_wrapper = unpickler.load()
+            
+            if not hasattr(data_wrapper, 'dataset'):
+                raise ValueError("Invalid preprocessed data format - missing 'dataset' attribute")
+            
             dataset = data_wrapper.dataset
             image_size = data_wrapper.image_size
             channels = data_wrapper.channels
-            print(f"Loaded preprocessed dataset:")
+            
+            print(f"\\n✓ Loaded preprocessed dataset:")
             print(f"  Samples: {len(dataset)}")
             print(f"  Image size: {image_size}x{image_size}")
             print(f"  Channels: {channels}")
-        elif isinstance(data_wrapper, dict) and 'dataset' in data_wrapper:
-            dataset = data_wrapper['dataset']
-            image_size = data_wrapper.get('image_size', 32)
-            channels = data_wrapper.get('channels', 1)
-            print(f"Loaded preprocessed dataset (dict format):")
-            print(f"  Samples: {len(dataset)}")
-        else:
-            print("Error: Invalid preprocessed data format")
+            
+        except Exception as e:
+            print(f" ERROR loading dataset: {e}")
+            traceback.print_exc()
             sys.exit(1)
-        
-        # Extract training mode
-        algorithm = training_cfg.get('algorithm', 'backprop')
-        
-        if algorithm == 'forward_forward':
-            training_mode = "Forward-Forward"
-        elif algorithm == 'cafo':
-            training_mode = "CAFO"
-        else:
-            training_mode = "Backpropagation"
-        
-        print(f"Training mode: {training_mode}")
         
         # Device
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Device: {device}")
         
-        # Load model
-        if args.model_input and os.path.exists(args.model_input):
+        # ============================================================================
+        # LOAD MODEL - NO FALLBACK
+        # ============================================================================
+        try:
+            if not args.model_input or not os.path.exists(args.model_input):
+                raise FileNotFoundError(f"Model input not found: {args.model_input}")
+            
             print(f"\\nLoading model from: {args.model_input}")
-            try:
-                checkpoint = torch.load(args.model_input, map_location='cpu')
-                
-                if isinstance(checkpoint, dict) and 'config' in checkpoint:
-                    model_config = checkpoint['config']
-                else:
-                    # Create config from master config
-                    model_config = {
-                        'dataset': {'resize_size': image_size},
-                        'generator': gan_cfg['generator'],
-                        'discriminator': gan_cfg['discriminator'],
-                        'train': training_cfg
+            checkpoint = torch.load(args.model_input, map_location='cpu')
+            
+            if not isinstance(checkpoint, dict):
+                raise ValueError("Invalid checkpoint format - expected dict")
+            
+            if 'config' in checkpoint:
+                model_config = checkpoint['config']
+                print("✓ Found config in checkpoint")
+            else:
+                # Create config from master config - IMPORTANT: Include use_* flags
+                model_config = {
+                    'dataset': {'resize_size': image_size},
+                    'generator': gan_cfg['generator'],
+                    'discriminator': gan_cfg['discriminator'],
+                    'train': {
+                        'algorithm': algorithm,  # Add algorithm to config for TrainerFactory
+                        'epochs': training_cfg.get('epochs', 10),
+                        'batch_size': training_cfg.get('batch_size', 32)
                     }
-                
-                model_config['device'] = str(device)
-                
-                # Create DCGAN models
-                generator, discriminator, full_config = create_dcgan(model_config)
-                
-                # Load state dict
-                if 'generator_state_dict' in checkpoint:
-                    generator.load_state_dict(checkpoint['generator_state_dict'], strict=False)
-                if 'discriminator_state_dict' in checkpoint:
-                    discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
-                
-                print(f"✓ Models loaded successfully")
-                print(f"✓ Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
-                print(f"✓ Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
-                
-            except Exception as e:
-                print(f" ERROR loading model: {e}")
-                traceback.print_exc()
-                sys.exit(1)
-        else:
-            print(" ERROR: No model input provided")
+                }
+                print("✓ Created config from master config")
+            
+            # Ensure training algorithm is in config for TrainerFactory
+            if 'train' not in model_config:
+                model_config['train'] = {}
+            model_config['train']['algorithm'] = algorithm
+            
+            model_config['device'] = str(device)
+            
+            print(f"\\nModel configuration for create_dcgan:")
+            print(f"  Training algorithm: {model_config['train']['algorithm']}")
+            print(f"  Generator use_forward_forward: {model_config['generator'].get('use_forward_forward', False)}")
+            print(f"  Discriminator use_forward_forward: {model_config['discriminator'].get('use_forward_forward', False)}")
+            print(f"  Generator use_cafo: {model_config['generator'].get('use_cafo', False)}")
+            print(f"  Discriminator use_cafo: {model_config['discriminator'].get('use_cafo', False)}")
+            
+            # Create DCGAN models
+            generator, discriminator, full_config = create_dcgan(model_config)
+            
+            if generator is None or discriminator is None:
+                raise RuntimeError("Failed to create models - generator or discriminator is None")
+            
+            # Load state dict
+            if 'generator_state_dict' in checkpoint:
+                generator.load_state_dict(checkpoint['generator_state_dict'], strict=True)
+                print("✓ Generator state dict loaded")
+            else:
+                raise KeyError("Checkpoint missing 'generator_state_dict'")
+            
+            if 'discriminator_state_dict' in checkpoint:
+                discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=True)
+                print("✓ Discriminator state dict loaded")
+            else:
+                raise KeyError("Checkpoint missing 'discriminator_state_dict'")
+            
+            print(f"\\n✓ Models loaded successfully")
+            print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
+            print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
+            
+        except Exception as e:
+            print(f" ERROR loading model: {e}")
+            traceback.print_exc()
             sys.exit(1)
         
         # Move to device
         generator.to(device)
         discriminator.to(device)
         
-        # Create data loader - FIX: Handle small datasets properly
-        batch_size = training_cfg.get('batch_size', 64)
-        # Ensure batch size is not larger than dataset
-        actual_batch_size = min(batch_size, max(1, len(dataset)))
-        train_loader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=False)
-        
-        print(f"\\nData loader created:")
-        print(f"  Dataset size: {len(dataset)}")
-        print(f"  Requested batch size: {batch_size}")
-        print(f"  Actual batch size: {actual_batch_size}")
-        print(f"  Batches per epoch: {len(train_loader)}")
-        
-        # Check if we have any batches
-        if len(train_loader) == 0:
-            print(f"\\nERROR: No batches created! Dataset too small ({len(dataset)} samples)")
-            print(f"Try reducing batch_size in config or increasing dataset size")
+        # ============================================================================
+        # CREATE DATA LOADER - NO FALLBACK
+        # ============================================================================
+        try:
+            batch_size = training_cfg.get('batch_size', 32)
+            actual_batch_size = min(batch_size, max(1, len(dataset)))
+            train_loader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=False)
+            
+            if len(train_loader) == 0:
+                raise RuntimeError(f"No batches created! Dataset too small ({len(dataset)} samples)")
+            
+            print(f"\\n✓ Data loader created:")
+            print(f"  Dataset size: {len(dataset)}")
+            print(f"  Actual batch size: {actual_batch_size}")
+            print(f"  Batches per epoch: {len(train_loader)}")
+            
+        except Exception as e:
+            print(f" ERROR creating data loader: {e}")
             sys.exit(1)
         
-        # TRAINING WITH NESY_FACTORY TRAINERS
+        # ============================================================================
+        # TRAINING - NO FALLBACK
+        # ============================================================================
         print(f"\\n{'='*60}")
         print(f"STARTING {training_mode.upper()} TRAINING")
         print(f"{'='*60}")
         
-        # Create appropriate trainer from nesy_factory
-        if training_mode == "Forward-Forward":
-            trainer = ForwardForwardTrainer(full_config, device)
-            print(f" Using ForwardForwardTrainer from nesy_factory")
-        elif training_mode == "CAFO":
-            trainer = CAFOTrainer(full_config, device)
-            print(f" Using CAFOTrainer from nesy_factory")
-        else:
-            trainer = BackpropTrainer(full_config, device)
-            print(f" Using BackpropTrainer from nesy_factory")
-        
-        # Create optimizers using nesy_factory
-        optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
-        optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
-        
-        print(f" Optimizers created")
+        try:
+            # Create trainer based on algorithm using TrainerFactory
+            trainer = TrainerFactory.create_trainer(full_config, device)
+            print(f"✓ Trainer created: {type(trainer).__name__}")
+            
+            # Create optimizers
+            optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
+            optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
+            print("✓ Optimizers created")
+            
+        except Exception as e:
+            print(f" ERROR creating trainer/optimizers: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
         # Training loop
-        epochs = training_cfg.get('epochs', 10)
+        epochs = training_cfg.get('epochs', 1)
         results = {
             'epochs': epochs,
+            'algorithm': algorithm,
             'g_loss': [],
             'd_loss': [],
             'real_score': [],
@@ -263,20 +356,30 @@ implementation:
         }
         
         for epoch in range(epochs):
-            print(f"\\nEpoch {epoch+1}/{epochs}")
+            print(f"\\nEpoch {epoch+1}/{epochs} ({training_mode})")
             
-            # Train one epoch using nesy_factory trainer
             try:
+                # Train one epoch
                 metrics = trainer.train_epoch(
                     generator, discriminator, train_loader,
                     optimizer_g, optimizer_d, epoch
                 )
                 
+                # Validate metrics
+                required_metrics = ['g_loss', 'd_loss']
+                for metric in required_metrics:
+                    if metric not in metrics:
+                        raise KeyError(f"Missing metric '{metric}' in training results")
+                
                 # Store results
-                results['g_loss'].append(metrics.get('g_loss', 1.0))
-                results['d_loss'].append(metrics.get('d_loss', 1.0))
-                results['real_score'].append(metrics.get('real_score', 0.0))
-                results['fake_score'].append(metrics.get('fake_score', 0.0))
+                results['g_loss'].append(float(metrics['g_loss']))
+                results['d_loss'].append(float(metrics['d_loss']))
+                
+                # Optional metrics
+                if 'real_score' in metrics:
+                    results['real_score'].append(float(metrics['real_score']))
+                if 'fake_score' in metrics:
+                    results['fake_score'].append(float(metrics['fake_score']))
                 
                 # Log epoch results
                 print(f"  Generator Loss: {results['g_loss'][-1]:.4f}")
@@ -284,158 +387,154 @@ implementation:
                 if 'real_score' in metrics and 'fake_score' in metrics:
                     print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
                 
-                # Generate samples every few epochs
-                if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == epochs - 1:
-                    generator.eval()
-                    with torch.no_grad():
-                        z = torch.randn(min(4, actual_batch_size), generator.z_dim, device=device)
-                        samples = generator(z).cpu()
-                    print(f"  Generated {len(samples)} samples")
-                    
             except Exception as e:
-                print(f"  ERROR in epoch {epoch+1} using {training_mode} trainer: {e}")
+                print(f" ERROR in epoch {epoch+1}: {e}")
                 traceback.print_exc()
-                print(f"  Falling back to manual training for this epoch")
-                
-                # Fallback to manual training if trainer fails
-                try:
-                    generator.train()
-                    discriminator.train()
-                    
-                    g_losses, d_losses = [], []
-                    real_scores, fake_scores = [], []
-                    
-                    for batch_images, batch_labels in train_loader:
-                        batch_images = batch_images.to(device)
-                        batch_size = batch_images.size(0)
-                        
-                        # Train Discriminator
-                        optimizer_d.zero_grad()
-                        z = torch.randn(batch_size, generator.z_dim, device=device)
-                        fake_images = generator(z).detach()
-                        real_output = discriminator(batch_images)
-                        fake_output = discriminator(fake_images)
-                        d_loss = discriminator.calculate_loss(real_output, fake_output)
-                        d_loss.backward()
-                        optimizer_d.step()
-                        
-                        # Train Generator
-                        optimizer_g.zero_grad()
-                        z = torch.randn(batch_size, generator.z_dim, device=device)
-                        fake_images = generator(z)
-                        fake_output = discriminator(fake_images)
-                        g_loss = generator.calculate_loss(fake_output)
-                        g_loss.backward()
-                        optimizer_g.step()
-                        
-                        g_losses.append(g_loss.item())
-                        d_losses.append(d_loss.item())
-                        real_scores.append(real_output.mean().item())
-                        fake_scores.append(fake_output.mean().item())
-                    
-                    results['g_loss'].append(np.mean(g_losses) if g_losses else 1.0)
-                    results['d_loss'].append(np.mean(d_losses) if d_losses else 1.0)
-                    results['real_score'].append(np.mean(real_scores) if real_scores else 0.0)
-                    results['fake_score'].append(np.mean(fake_scores) if fake_scores else 0.0)
-                    
-                    print(f"  Manual fallback - Generator Loss: {results['g_loss'][-1]:.4f}")
-                    print(f"  Manual fallback - Discriminator Loss: {results['d_loss'][-1]:.4f}")
-                    
-                except Exception as e2:
-                    print(f"  Manual fallback also failed: {e2}")
-                    continue
+                sys.exit(1)
         
-        # Save results
+        # ============================================================================
+        # SAVE RESULTS - NO FALLBACK
+        # ============================================================================
         print("\\nSaving model and training history...")
-        os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
-        os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
-        os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
         
-        # Create checkpoint - SAVE THE FULL CONFIG USED FOR TRAINING
-        checkpoint = {
-            'config': full_config,  # This is the DCGAN config used during training
-            'generator_state_dict': generator.state_dict(),
-            'discriminator_state_dict': discriminator.state_dict(),
-            'training_mode': training_mode,
-            'model_info': {
-                'generator_params': sum(p.numel() for p in generator.parameters()),
-                'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
-                'image_size': generator.image_size,
-                'channels': generator.image_channels,
-                'z_dim': generator.z_dim
-            },
-            'master_config': config  # Save master config for reference
-        }
-        torch.save(checkpoint, args.trained_model)
-        
-        # Save training history
-        history = {
-            "training_mode": training_mode,
-            "results": results,
-            "config": gan_cfg,
-            "epochs": epochs,
-            "dataset_size": len(dataset),
-            "batch_size": actual_batch_size,
-            "algorithm_used": algorithm
-        }
-        
-        with open(args.training_history, "w") as f:
-            json.dump(history, f, indent=2)
-        
-        # Process history for output
-        processed_rows = []
-        g_losses = history["results"].get("g_loss", [])
-        d_losses = history["results"].get("d_loss", [])
-        
-        if not isinstance(g_losses, list):
-            g_losses = [g_losses] if g_losses is not None else []
-        if not isinstance(d_losses, list):
-            d_losses = [d_losses] if d_losses is not None else []
-        
-        for epoch_idx in range(len(g_losses)):
-            row = {
-                "epoch": epoch_idx + 1,
-                "loss": float(g_losses[epoch_idx]),
-                "component": "generator"
+        try:
+            os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
+            os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
+            os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
+            
+            # Create checkpoint
+            checkpoint = {
+                'config': full_config,
+                'generator_state_dict': generator.state_dict(),
+                'discriminator_state_dict': discriminator.state_dict(),
+                'training_mode': training_mode,
+                'algorithm_used': algorithm,
+                'model_info': {
+                    'generator_params': sum(p.numel() for p in generator.parameters()),
+                    'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
+                    'image_size': generator.image_size,
+                    'channels': generator.image_channels,
+                    'z_dim': generator.z_dim
+                },
+                'master_config': config
             }
-            processed_rows.append(row)
+            torch.save(checkpoint, args.trained_model)
+            print(f"✓ Model saved to: {args.trained_model}")
+            
+        except Exception as e:
+            print(f" ERROR saving model: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
-        for epoch_idx in range(len(d_losses)):
-            row = {
-                "epoch": epoch_idx + 1,
-                "loss": float(d_losses[epoch_idx]),
-                "component": "discriminator"
+        # ============================================================================
+        # CREATE TRAINING HISTORY - NO FALLBACK
+        # ============================================================================
+        try:
+            history = {
+                "training_mode": training_mode,
+                "algorithm": algorithm,
+                "results": results,
+                "config": {
+                    "model": gan_cfg,
+                    "training": training_cfg
+                },
+                "epochs": epochs,
+                "dataset_size": len(dataset),
+                "batch_size": actual_batch_size
             }
-            processed_rows.append(row)
+            
+            with open(args.training_history, "w") as f:
+                json.dump(history, f, indent=2)
+            print(f"✓ Training history saved to: {args.training_history}")
+            
+        except Exception as e:
+            print(f" ERROR saving training history: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
-        # Create output format
-        if processed_rows:
-            last_row = processed_rows[-1]
+        # ============================================================================
+        # PROCESS HISTORY FOR OUTPUT - NO FALLBACK
+        # ============================================================================
+        try:
+            processed_rows = []
+            
+            # For DCGAN, we have both generator and discriminator losses
+            g_losses = results.get("g_loss", [])
+            d_losses = results.get("d_loss", [])
+            
+            if not isinstance(g_losses, list) or not isinstance(d_losses, list):
+                raise TypeError("Losses must be lists")
+            
+            if len(g_losses) == 0 or len(d_losses) == 0:
+                raise ValueError("No training loss data available")
+            
+            # Create rows for both generator and discriminator
+            for epoch_idx in range(len(g_losses)):
+                # Generator row
+                row = {
+                    "epoch": epoch_idx + 1,
+                    "loss": float(g_losses[epoch_idx]),
+                    "component": "generator",
+                    "type": "train"
+                }
+                processed_rows.append(row)
+                
+                # Discriminator row
+                if epoch_idx < len(d_losses):
+                    row = {
+                        "epoch": epoch_idx + 1,
+                        "loss": float(d_losses[epoch_idx]),
+                        "component": "discriminator",
+                        "type": "train"
+                    }
+                    processed_rows.append(row)
+            
+            # Create output format (matching your CNN format)
+            # Get last epoch data
+            last_epoch = processed_rows[-1]["epoch"]
+            last_g_loss = None
+            last_d_loss = None
+            
+            for row in processed_rows:
+                if row["epoch"] == last_epoch:
+                    if row["component"] == "generator":
+                        last_g_loss = row["loss"]
+                    elif row["component"] == "discriminator":
+                        last_d_loss = row["loss"]
+            
+            if last_g_loss is None:
+                raise ValueError("No generator loss found for last epoch")
+            
             output = {
-                "epoch": int(last_row.get("epoch", len(processed_rows))),
-                "loss": float(last_row.get("loss", 0.0)),
-                "data": processed_rows
+                "epoch": int(last_epoch),
+                "loss": float(last_g_loss),
+                "validation_loss": float(last_d_loss) if last_d_loss is not None else 0.0,
+                "training_mode": training_mode,
+                "algorithm": algorithm,
+                "data": processed_rows[:10]  # Limit to first 10 rows
             }
-        else:
-            output = {
-                "epoch": 0,
-                "loss": 0.0,
-                "component": "unknown",
-                "data": []
-            }
+            
+            with open(args.processed_history_json, "w") as f:
+                json.dump(output, f, indent=2)
+            print(f"✓ Processed history saved to: {args.processed_history_json}")
+            
+        except Exception as e:
+            print(f" ERROR processing history: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
-        # Save processed history
-        with open(args.processed_history_json, "w") as f:
-            json.dump(output, f, indent=2)
-        
+        # ============================================================================
+        # FINAL SUCCESS MESSAGE
+        # ============================================================================
         print(f"\\n{'✓'*60}")
-        print(f"SUCCESS: {training_mode} TRAINING COMPLETED")
+        print(f"SUCCESS: {training_mode} TRAINING COMPLETED WITHOUT FALLBACKS")
         print(f"{'✓'*60}")
-        print(f"✓ Model saved to: {args.trained_model}")
+        print(f"✓ Final Generator Loss: {results['g_loss'][-1]:.4f}")
+        print(f"✓ Final Discriminator Loss: {results['d_loss'][-1]:.4f}")
         print(f"✓ Training epochs: {epochs}")
-        print(f"✓ Final Generator Loss: {results['g_loss'][-1] if results['g_loss'] else 'N/A'}")
-        print(f"✓ Final Discriminator Loss: {results['d_loss'][-1] if results['d_loss'] else 'N/A'}")
-
+        print(f"✓ Algorithm used: {algorithm}")
+        print(f"✓ Training mode detected from flags: {training_mode}")
+        
     args:
       - --data_path
       - {inputPath: data_path}
