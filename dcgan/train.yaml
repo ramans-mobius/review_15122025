@@ -1,4 +1,4 @@
-name: Train v5
+name: Train v6
 description: Trains DCGAN using nesyfactory with NO fallbacks - throws errors on failure
 inputs:
   - name: data_path
@@ -36,90 +36,34 @@ implementation:
         import argparse, pickle, os, json, sys, io, traceback
         import numpy as np
         from torch.utils.data import DataLoader
-        from PIL import Image
-        import torchvision.transforms as transforms
         
         # ============================================================================
-        # Define classes needed for unpickling
-        # ============================================================================
-        class GANDataset:
-            def __init__(self, data_list, transform=None, image_size=64, channels=3):
-                self.data_list = data_list
-                self.transform = transform
-                self.image_size = image_size
-                self.channels = channels
-            
-            def __len__(self):
-                return len(self.data_list)
-            
-            def __getitem__(self, idx):
-                item = self.data_list[idx]
-                try:
-                    # Create a dummy image since we don't have real images
-                    if self.channels == 1:
-                        img = Image.new('L', (self.image_size, self.image_size), color=128)
-                    else:
-                        img = Image.new('RGB', (self.image_size, self.image_size), color=(128, 128, 128))
-                    
-                    if self.transform:
-                        img = self.transform(img)
-                    
-                    # Return (image, dummy_label) - GANs need this format
-                    return img, torch.tensor(0.0, dtype=torch.float32)
-                except Exception as e:
-                    print(f"Error creating dummy image {idx}: {e}")
-                    raise RuntimeError(f"Failed to create dummy image: {e}")
-        
-        class GANDataWrapper:
-            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
-                        transform_params=None):
-                self.dataset = dataset
-                self.model_type = model_type
-                self.image_size = image_size
-                self.channels = channels
-                self.transform_params = transform_params or {}
-                self.num_samples = len(dataset)
-            
-            def __len__(self):
-                return len(self.dataset)
-            
-            def __getitem__(self, idx):
-                return self.dataset[idx]
-        
-        # ============================================================================
-        # Import DCGAN modules - NO FALLBACK
+        # Import nesy_factory modules - NO FALLBACKS
         # ============================================================================
         print("Importing nesy_factory.GANs.dcgan...")
         try:
-            # Import the entire module
             import nesy_factory.GANs.dcgan as dcgan_module
             
-            # Get all necessary components - THROW ERROR IF NOT FOUND
-            required_components = [
-                'create_dcgan', 'OptimizerFactory', 'TrainerFactory',
-                'BackpropTrainer', 'ForwardForwardTrainer', 'CAFOTrainer'
-            ]
-            
-            for component in required_components:
-                if not hasattr(dcgan_module, component):
-                    raise ImportError(f"Required component '{component}' not found in nesy_factory.GANs.dcgan")
-            
-            # Import all components
+            # Get all required components
             create_dcgan = dcgan_module.create_dcgan
             OptimizerFactory = dcgan_module.OptimizerFactory
             TrainerFactory = dcgan_module.TrainerFactory
             BackpropTrainer = dcgan_module.BackpropTrainer
             ForwardForwardTrainer = dcgan_module.ForwardForwardTrainer
             CAFOTrainer = dcgan_module.CAFOTrainer
+            ForwardForwardModule = dcgan_module.ForwardForwardModule
+            CAFOModule = dcgan_module.CAFOModule
             
-            print("✓ Successfully imported all required DCGAN components")
-            print(f"Available trainers: BackpropTrainer, ForwardForwardTrainer, CAFOTrainer")
+            print("✓ Successfully imported all nesy_factory components")
             
         except Exception as e:
-            print(f" ERROR importing from nesy_factory: {e}")
+            print(f"❌ ERROR importing from nesy_factory: {e}")
             traceback.print_exc()
             sys.exit(1)
         
+        # ============================================================================
+        # Parse arguments
+        # ============================================================================
         parser = argparse.ArgumentParser()
         parser.add_argument("--data_path", required=True)
         parser.add_argument("--master_config", required=True)
@@ -171,55 +115,36 @@ implementation:
                 algorithm = "backprop"
                 print(f"✓ Using Backpropagation training (default)")
             
-            # Also check algorithm field for backward compatibility
-            algorithm_from_training = training_cfg.get('algorithm', '').lower()
-            if algorithm_from_training:
-                print(f"  Note: Found algorithm field in training config: '{algorithm_from_training}'")
-                # Map 'ff' to 'forward_forward'
-                if algorithm_from_training == 'ff':
-                    algorithm_from_training = 'forward_forward'
-                
-                # Warn if there's a conflict
-                if algorithm_from_training != algorithm:
-                    print(f"  Warning: Algorithm from training config '{algorithm_from_training}' differs from detected mode '{algorithm}'")
-                    print(f"  Using detected mode from use_* flags: {algorithm}")
-            
         except Exception as e:
-            print(f" ERROR parsing master_config: {e}")
+            print(f"❌ ERROR parsing master_config: {e}")
             sys.exit(1)
         
         # ============================================================================
         # LOAD DATASET - NO FALLBACK
         # ============================================================================
         try:
+            # Define safe unpickler class
             class SafeUnpickler(pickle.Unpickler):
                 def find_class(self, module, name):
-                    # Allow our custom classes
-                    if name == 'GANDataWrapper':
-                        return GANDataWrapper
-                    elif name == 'GANDataset':
-                        return GANDataset
                     return super().find_class(module, name)
             
             with open(args.data_path, "rb") as f:
-                unpickler = SafeUnpickler(f)
-                data_wrapper = unpickler.load()
+                data = SafeUnpickler(f).load()
             
-            if not hasattr(data_wrapper, 'dataset'):
-                raise ValueError("Invalid preprocessed data format - missing 'dataset' attribute")
-            
-            dataset = data_wrapper.dataset
-            image_size = data_wrapper.image_size
-            channels = data_wrapper.channels
-            
-            print(f"\\n✓ Loaded preprocessed dataset:")
-            print(f"  Samples: {len(dataset)}")
-            print(f"  Image size: {image_size}x{image_size}")
-            print(f"  Channels: {channels}")
+            # Extract dataset
+            if hasattr(data, 'dataset'):
+                dataset = data.dataset
+                image_size = data.image_size
+                channels = data.channels
+                print(f"\\n✓ Loaded preprocessed dataset:")
+                print(f"  Samples: {len(dataset)}")
+                print(f"  Image size: {image_size}x{image_size}")
+                print(f"  Channels: {channels}")
+            else:
+                raise ValueError("Invalid preprocessed data format")
             
         except Exception as e:
             print(f" ERROR loading dataset: {e}")
-            traceback.print_exc()
             sys.exit(1)
         
         # Device
@@ -243,38 +168,27 @@ implementation:
                 model_config = checkpoint['config']
                 print("✓ Found config in checkpoint")
             else:
-                # Create config from master config - IMPORTANT: Include use_* flags
+                # Create config from master config
                 model_config = {
                     'dataset': {'resize_size': image_size},
                     'generator': gan_cfg['generator'],
                     'discriminator': gan_cfg['discriminator'],
-                    'train': {
-                        'algorithm': algorithm,  # Add algorithm to config for TrainerFactory
-                        'epochs': training_cfg.get('epochs', 10),
-                        'batch_size': training_cfg.get('batch_size', 32)
-                    }
+                    'train': training_cfg
                 }
                 print("✓ Created config from master config")
             
-            # Ensure training algorithm is in config for TrainerFactory
+            # Ensure training algorithm is in config
             if 'train' not in model_config:
                 model_config['train'] = {}
             model_config['train']['algorithm'] = algorithm
             
             model_config['device'] = str(device)
             
-            print(f"\\nModel configuration for create_dcgan:")
-            print(f"  Training algorithm: {model_config['train']['algorithm']}")
-            print(f"  Generator use_forward_forward: {model_config['generator'].get('use_forward_forward', False)}")
-            print(f"  Discriminator use_forward_forward: {model_config['discriminator'].get('use_forward_forward', False)}")
-            print(f"  Generator use_cafo: {model_config['generator'].get('use_cafo', False)}")
-            print(f"  Discriminator use_cafo: {model_config['discriminator'].get('use_cafo', False)}")
-            
-            # Create DCGAN models
+            # Create DCGAN models using nesy_factory
             generator, discriminator, full_config = create_dcgan(model_config)
             
             if generator is None or discriminator is None:
-                raise RuntimeError("Failed to create models - generator or discriminator is None")
+                raise RuntimeError("Failed to create models")
             
             # Load state dict
             if 'generator_state_dict' in checkpoint:
@@ -323,18 +237,18 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # TRAINING - NO FALLBACK
+        # TRAINING - NO FALLBACK (USING NESY_FACTORY FUNCTIONS ONLY)
         # ============================================================================
         print(f"\\n{'='*60}")
         print(f"STARTING {training_mode.upper()} TRAINING")
         print(f"{'='*60}")
         
         try:
-            # Create trainer based on algorithm using TrainerFactory
+            # Create trainer based on algorithm using nesy_factory TrainerFactory
             trainer = TrainerFactory.create_trainer(full_config, device)
             print(f"✓ Trainer created: {type(trainer).__name__}")
             
-            # Create optimizers
+            # Create optimizers using nesy_factory OptimizerFactory
             optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
             optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
             print("✓ Optimizers created")
@@ -344,8 +258,10 @@ implementation:
             traceback.print_exc()
             sys.exit(1)
         
-        # Training loop
-        epochs = training_cfg.get('epochs', 1)
+        # ============================================================================
+        # BLOCK-BY-BLOCK TRAINING FOR FF AND CAFO
+        # ============================================================================
+        epochs = training_cfg.get('epochs', 10)
         results = {
             'epochs': epochs,
             'algorithm': algorithm,
@@ -355,11 +271,100 @@ implementation:
             'fake_score': []
         }
         
+        # Get real data for block training
+        real_batch = next(iter(train_loader))
+        if isinstance(real_batch, tuple):
+            real_batch = real_batch[0]
+        real_batch = real_batch.to(device)
+        
+        # FORWARD-FORWARD BLOCK TRAINING
+        if algorithm == 'forward_forward' and hasattr(discriminator, 'ff_module'):
+            print(f"\\n{'='*60}")
+            print(f"FORWARD-FORWARD BLOCK TRAINING")
+            print(f"{'='*60}")
+            
+            ff_module = discriminator.ff_module
+            ff_epochs_per_block = full_config['discriminator'].get('ff_epochs_per_block', 2)
+            
+            print(f"Training discriminator with Forward-Forward:")
+            print(f"  Blocks: {ff_epochs_per_block}")
+            print(f"  Theta: {ff_module.ff_theta}")
+            print(f"  Samples per block: {real_batch.size(0)}")
+            
+            # Train each block for specified epochs
+            for block_epoch in range(ff_epochs_per_block):
+                print(f"\\n  Block Epoch {block_epoch + 1}/{ff_epochs_per_block}:")
+                
+                # Use nesy_factory ForwardForwardModule to train block
+                losses = ff_module.train_forward_forward_block(
+                    block_module=discriminator,
+                    positive_data=real_batch,
+                    negative_data=None,
+                    optimizer=optimizer_d,
+                    epochs=1,
+                    device=device
+                )
+                
+                if losses:
+                    print(f"    Block loss: {losses[-1]:.4f}")
+        
+        # CAFO BLOCK TRAINING
+        elif algorithm == 'cafo' and hasattr(discriminator, 'cafo_module'):
+            print(f"\\n{'='*60}")
+            print(f"CAFO BLOCK TRAINING")
+            print(f"{'='*60}")
+            
+            cafo_module = discriminator.cafo_module
+            cafo_epochs_per_block = full_config['discriminator'].get('cafo_epochs_per_block', 2)
+            
+            print(f"Training discriminator with CAFO:")
+            print(f"  Blocks: {cafo_epochs_per_block}")
+            print(f"  Samples per block: {real_batch.size(0)}")
+            
+            # Generate fake data for CAFO
+            with torch.no_grad():
+                z = torch.randn(real_batch.size(0), generator.z_dim, device=device)
+                fake_batch = generator(z)
+            
+            # Prepare labels: 1 for real, 0 for fake
+            labels = torch.cat([
+                torch.ones(real_batch.size(0), device=device),
+                torch.zeros(fake_batch.size(0), device=device)
+            ]).long()
+            
+            # Combine real and fake data
+            combined_data = torch.cat([real_batch, fake_batch])
+            
+            # Train each block for specified epochs
+            for block_epoch in range(cafo_epochs_per_block):
+                print(f"\\n  Block Epoch {block_epoch + 1}/{cafo_epochs_per_block}:")
+                
+                # Use nesy_factory CAFOModule to train block
+                losses = cafo_module.train_cafo_block(
+                    block_module=discriminator,
+                    input_data=combined_data,
+                    target_data=labels,
+                    optimizer=optimizer_d,
+                    epochs=1,
+                    device=device,
+                    is_discriminator=True
+                )
+                
+                if losses:
+                    print(f"    Block loss: {losses[-1]:.4f}")
+        
+        # ============================================================================
+        # MAIN TRAINING LOOP (AFTER BLOCK TRAINING)
+        # ============================================================================
+        print(f"\\n{'='*60}")
+        print(f"MAIN TRAINING PHASE")
+        print(f"{'='*60}")
+        
         for epoch in range(epochs):
-            print(f"\\nEpoch {epoch+1}/{epochs} ({training_mode})")
+            print(f"\nEpoch {epoch+1}/{epochs} ({training_mode})")
             
             try:
-                # Train one epoch
+                # Train one epoch using nesy_factory trainer
                 metrics = trainer.train_epoch(
                     generator, discriminator, train_loader,
                     optimizer_g, optimizer_d, epoch
@@ -489,7 +494,10 @@ implementation:
                     }
                     processed_rows.append(row)
             
-            # Create output format (matching your CNN format)
+            # Create output format
+            if not processed_rows:
+                raise ValueError("No training data to process")
+            
             # Get last epoch data
             last_epoch = processed_rows[-1]["epoch"]
             last_g_loss = None
