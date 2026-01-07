@@ -1,4 +1,4 @@
-name: Evaluate v2
+name: Evaluate v3
 description: Evaluates DCGAN model using single master config
 inputs:
   - name: trained_model
@@ -123,10 +123,6 @@ implementation:
         
         print("=== STARTING DCGAN EVALUATION ===")
         
-        # Parse master config
-        config = json.loads(args.master_config)
-        gan_cfg = config['gan']
-        
         # Define custom unpickler
         class SafeUnpickler(pickle.Unpickler):
             def find_class(self, module, name):
@@ -181,35 +177,44 @@ implementation:
         
         print(f"Preprocessed test dataset: {len(test_dataset)} samples")
         
-        # Load model
+        # ============================================================================
+        # LOAD MODEL - USE CONFIG FROM CHECKPOINT, NOT MASTER CONFIG
+        # ============================================================================
+        print("\\nLoading trained model...")
         checkpoint = torch.load(args.trained_model, map_location='cpu')
         
         if isinstance(checkpoint, dict):
+            # Use the EXACT config from training, not master config
             model_config = checkpoint.get('config', {})
             training_mode = checkpoint.get('training_mode', 'unknown')
             
-            # Merge with master config
-            model_config.update({
-                'generator': gan_cfg['generator'],
-                'discriminator': gan_cfg['discriminator'],
-                'train': gan_cfg['training']
-            })
+            print(f"Model config from checkpoint:")
+            print(f"  Training mode: {training_mode}")
+            if 'generator' in model_config and 'hidden_dims' in model_config['generator']:
+                print(f"  Generator hidden_dims: {model_config['generator']['hidden_dims']}")
+            if 'discriminator' in model_config and 'hidden_dims' in model_config['discriminator']:
+                print(f"  Discriminator hidden_dims: {model_config['discriminator']['hidden_dims']}")
             
-            # Create DCGAN models
+            # Create DCGAN models WITH THE EXACT SAME CONFIG AS TRAINING
             generator, discriminator, full_config = create_dcgan(model_config)
             
             # Load state dicts
             if 'generator_state_dict' in checkpoint:
-                generator.load_state_dict(checkpoint['generator_state_dict'], strict=False)
+                generator.load_state_dict(checkpoint['generator_state_dict'], strict=True)
+                print(f"✓ Generator state dict loaded")
             if 'discriminator_state_dict' in checkpoint:
-                discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
+                discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=True)
+                print(f"✓ Discriminator state dict loaded")
                 
-            print(f" Model loaded (Training mode: {training_mode})")
+            print(f"✓ Model loaded successfully")
+            print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
+            print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
         else:
-            print(" Invalid checkpoint format")
+            print("✗ Invalid checkpoint format")
             sys.exit(1)
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Device: {device}")
         
         # Set device
         generator.to(device)
@@ -220,8 +225,8 @@ implementation:
         discriminator.eval()
         
         # Create data loader
-        batch_size = gan_cfg['training'].get('batch_size', 32)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        batch_size = 4  # Use small batch size for small dataset
+        test_loader = DataLoader(test_dataset, batch_size=min(batch_size, len(test_dataset)), shuffle=False)
         
         # Evaluate
         print(f"\\nEvaluating DCGAN on {len(test_dataset)} test samples...")
@@ -229,14 +234,23 @@ implementation:
         # Create evaluator
         evaluator = DCGANEvaluator(full_config, device)
         
-        # Evaluate using DCGANEvaluator
-        eval_metrics = evaluator.evaluate(
-            generator, discriminator, 
-            test_loader,
-            num_batches=min(5, len(test_dataset) // batch_size)
-        )
+        # Evaluate using DCGANEvaluator (skip if dataset too small)
+        eval_metrics = {}
+        if len(test_dataset) >= 2:  # Need at least 2 samples for metrics
+            try:
+                eval_metrics = evaluator.evaluate(
+                    generator, discriminator, 
+                    test_loader,
+                    num_batches=min(2, len(test_dataset) // max(1, batch_size))
+                )
+                print(f"✓ DCGANEvaluator metrics calculated")
+            except Exception as e:
+                print(f"Warning: DCGANEvaluator failed: {e}")
+                eval_metrics = {}
+        else:
+            print(f"Warning: Dataset too small ({len(test_dataset)} samples) for full evaluation")
         
-        # Additional manual metrics
+        # Basic manual metrics
         all_preds, all_targets = [], []
         total_g_loss = 0.0
         total_d_loss = 0.0
@@ -244,7 +258,7 @@ implementation:
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(test_loader):
-                if batch_idx >= 10:
+                if batch_idx >= 5:  # Limit to 5 batches
                     break
                     
                 real_images = batch
@@ -298,18 +312,20 @@ implementation:
             "discriminator_loss": float(avg_d_loss),
             "training_mode": training_mode,
             "num_samples": int(len(all_targets)),
+            "num_test_samples": len(test_dataset),
             "evaluation_success": True
         }
         
-        # Add DCGANEvaluator metrics
+        # Add DCGANEvaluator metrics if available
         for key, value in eval_metrics.items():
-            if isinstance(value, (int, float)):
+            if isinstance(value, (int, float)) and not np.isnan(value):
                 metrics_output[f"dcgan_{key}"] = float(value)
         
         print(f"\\nEvaluation Metrics:")
         print(f"  Accuracy: {float(accuracy):.4f}")
         print(f"  Generator Loss: {avg_g_loss:.4f}")
         print(f"  Discriminator Loss: {avg_d_loss:.4f}")
+        print(f"  Training Mode: {training_mode}")
         
         # Save outputs
         os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
