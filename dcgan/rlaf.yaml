@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v10
+name: DCGAN RLAF Loop 
 description: Triggers the DCGAN RLAF pipeline in a loop to optimize GAN hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -37,488 +37,331 @@ implementation:
         from urllib3.util.retry import Retry
         import time
         import pickle
-        from typing import List, Dict, Any
         import numpy as np
-        import torch.nn.functional as F
-        from torch.utils.data import DataLoader, TensorDataset
+        from torch.utils.data import DataLoader
+        import traceback
         
         # ============================================================================
-        # CONSISTENT CLASSES (Match Preprocess brick)
+        # SIMPLE GAN RETRAINING FUNCTION (Similar to Train brick)
         # ============================================================================
         
-        class GANDataset:
-           
-            def __init__(self, data_list, transform=None, image_size=64, channels=3):
-                self.data_list = data_list
-                self.transform = transform
-                self.image_size = image_size
-                self.channels = channels
-            
-            def __len__(self):
-                return len(self.data_list)
-            
-            def __getitem__(self, idx):
-                return self.data_list[idx]
-        
-        class GANDataWrapper:
-            
-            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
-                        transform_params=None):
-                self.dataset = dataset
-                self.model_type = model_type
-                self.image_size = image_size
-                self.channels = channels
-                self.transform_params = transform_params or {}
-                self.num_samples = len(dataset)
-            
-            def __len__(self):
-                return len(self.dataset)
-            
-            def __getitem__(self, idx):
-                return self.dataset[idx]
-        
-        class PreprocessMetadata:
+        def gan_retraining(action_params, model_path, data_path, tasks_path, output_model_path, previous_metrics, dqn_params, base_config):
           
-            def __init__(self, image_size=64, channels=3, model_type='dcgan',
-                        mean=(0.5,), std=(0.5,), transform_params=None):
-                self.image_size = image_size
-                self.channels = channels
-                self.model_type = model_type
-                self.mean = mean
-                self.std = std
-                self.transform_params = transform_params or {}
-        
-        class TasksWrapper:
-          
-            def __init__(self, tasks):
-                self.tasks = tasks
-                self.num_tasks = len(tasks)
+            print(f"Starting DCGAN retraining with action parameters: {action_params}")
             
-            def __len__(self):
-                return len(self.tasks)
+            # Load data
+            with open(data_path, "rb") as f:
+                data = pickle.load(f)
             
-            def __getitem__(self, idx):
-                return self.tasks[idx]
-        
-        # Safe unpickler
-        class SafeUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
+            # Load tasks
+            with open(tasks_path, "rb") as f:
+                tasks_wrapper = pickle.load(f)
+            
+            # Extract dataset info
+            if hasattr(data, 'dataset'):
+                dataset = data.dataset
+                image_size = data.image_size
+                channels = data.channels
+            else:
+                dataset = data
+                image_size = 64
+                channels = 1
+            
+            if hasattr(tasks_wrapper, 'tasks'):
+                tasks = tasks_wrapper.tasks
+            else:
+                tasks = tasks_wrapper
+            
+            print(f"Dataset: {len(dataset)} samples, {len(tasks)} tasks")
+            
+            # Determine algorithm from action name
+            action_name = action_params.get('name', '').lower()
+            if 'forward' in action_name:
+                algorithm = 'forward_forward'
+                use_ff = True
+                use_cafo = False
+            elif 'cafo' in action_name:
+                algorithm = 'cafo'
+                use_ff = False
+                use_cafo = True
+            else:
+                algorithm = 'backprop'
+                use_ff = False
+                use_cafo = False
+            
+            print(f"Training algorithm: {algorithm}")
+            
+            # Import nesy_factory modules
+            try:
+                import nesy_factory.GANs.dcgan as dcgan_module
+                
+                # Get all required components
+                create_dcgan = dcgan_module.create_dcgan
+                OptimizerFactory = dcgan_module.OptimizerFactory
+                TrainerFactory = dcgan_module.TrainerFactory
+                
+                print("Successfully imported nesy_factory components")
+                
+            except ImportError as e:
+                print(f"Error importing nesy_factory: {e}")
+                traceback.print_exc()
+                return {"metrics": {}, "model_path": output_model_path}
+            
+            # Load existing model checkpoint
+            checkpoint = torch.load(model_path, map_location='cpu')
+            
+            # Get base config values
+            gan_cfg = base_config.get('gan', {})
+            dataset_cfg = base_config.get('dataset', {})
+            
+            # Merge action parameters with base config
+            merged_generator_config = gan_cfg.get('generator', {}).copy()
+            merged_discriminator_config = gan_cfg.get('discriminator', {}).copy()
+            
+            # Update with action parameters
+            if 'learning_rate_g' in action_params:
+                merged_generator_config['learning_rate'] = action_params['learning_rate_g']
+            if 'learning_rate_d' in action_params:
+                merged_discriminator_config['learning_rate'] = action_params['learning_rate_d']
+            if 'dropout' in action_params:
+                merged_discriminator_config['dropout'] = action_params['dropout']
+            
+            # Set algorithm flags
+            merged_generator_config['use_forward_forward'] = use_ff
+            merged_generator_config['use_cafo'] = use_cafo
+            merged_discriminator_config['use_forward_forward'] = use_ff
+            merged_discriminator_config['use_cafo'] = use_cafo
+            
+            # Create DCGAN config
+            dcgan_config = {
+                'dataset': {
+                    'resize_size': image_size
+                },
+                'generator': merged_generator_config,
+                'discriminator': merged_discriminator_config,
+                'train': {
+                    'algorithm': algorithm,
+                    'batch_size': action_params.get('batch_size', 32),
+                    'epochs': 5  # Reduced for RLAF loop
+                }
+            }
+            
+            # Add z_dim and hidden_dims if not present
+            if 'z_dim' not in dcgan_config['generator']:
+                dcgan_config['generator']['z_dim'] = 100
+            if 'hidden_dims' not in dcgan_config['generator']:
+                dcgan_config['generator']['hidden_dims'] = [256, 128, 64]
+            if 'hidden_dims' not in dcgan_config['discriminator']:
+                dcgan_config['discriminator']['hidden_dims'] = [64, 128, 256]
+            if 'image_channels' not in dcgan_config['generator']:
+                dcgan_config['generator']['image_channels'] = channels
+            if 'image_channels' not in dcgan_config['discriminator']:
+                dcgan_config['discriminator']['image_channels'] = channels
+            
+            print(f"Merged DCGAN config for {algorithm} training")
+            
+            # Create DCGAN models
+            generator, discriminator, full_config = create_dcgan(dcgan_config)
+            
+            # Load state dict from checkpoint
+            if 'generator_state_dict' in checkpoint:
+                generator.load_state_dict(checkpoint['generator_state_dict'])
+                print("Loaded generator weights")
+            if 'discriminator_state_dict' in checkpoint:
+                discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+                print("Loaded discriminator weights")
+            
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            generator.to(device)
+            discriminator.to(device)
+            
+            # Create data loader
+            batch_size = action_params.get('batch_size', 32)
+            actual_batch_size = min(batch_size, max(1, len(dataset)))
+            train_loader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=False)
+            
+            print(f"Data loader created: batch_size={actual_batch_size}, batches={len(train_loader)}")
+            
+            # Create trainer based on algorithm
+            trainer = TrainerFactory.create_trainer(full_config, device)
+            print(f"Created trainer: {type(trainer).__name__}")
+            
+            # Create optimizers
+            optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
+            optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
+            
+            print("Optimizers created")
+            
+            # Training loop
+            epochs = 5
+            results = {
+                'g_loss': [],
+                'd_loss': [],
+                'real_score': [],
+                'fake_score': []
+            }
+            
+            for epoch in range(epochs):
+                print(f"\\nEpoch {epoch+1}/{epochs} ({algorithm})")
+                
                 try:
-                    return super().find_class(module, name)
-                except:
-                    if name == 'GANDataset':
-                        return GANDataset
-                    elif name == 'GANDataWrapper':
-                        return GANDataWrapper
-                    elif name == 'PreprocessMetadata':
-                        return PreprocessMetadata
-                    elif name == 'TasksWrapper':
-                        return TasksWrapper
-                    else:
-                        class FallbackClass:
-                            def __init__(self, *args, **kwargs):
-                                pass
-                        return FallbackClass
-        
-        # ============================================================================
-        # CONTINUAL GAN TRAINER (Uses consistent classes)
-        # ============================================================================
-        
-        class ContinualGANTrainer:
-           
-            
-            def __init__(self, config: Dict[str, Any]):
-                self.config = config
-                self.results = {}
-                self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                print(f"Using device: {self.device}")
-            
-            def train_continual_gan(
-                self, 
-                tasks: List[Dict], 
-                generator, 
-                discriminator,
-                strategies: List[str] = ['naive']
-            ) -> Dict[str, Any]:
-            
-                results = {}
-                
-                for strategy_name in strategies:
-                    print(f'Training with {strategy_name.upper()} strategy')
-                    strategy_results = self._train_single_strategy(
-                        tasks, strategy_name, generator, discriminator
+                    # Train one epoch using the trainer
+                    metrics = trainer.train_epoch(
+                        generator, discriminator, train_loader,
+                        optimizer_g, optimizer_d, epoch
                     )
-                    results[strategy_name] = strategy_results
                     
-                return results
+                    # Store results
+                    results['g_loss'].append(float(metrics.get('g_loss', 0.0)))
+                    results['d_loss'].append(float(metrics.get('d_loss', 0.0)))
+                    if 'real_score' in metrics:
+                        results['real_score'].append(float(metrics.get('real_score', 0.0)))
+                    if 'fake_score' in metrics:
+                        results['fake_score'].append(float(metrics.get('fake_score', 0.0)))
+                    
+                    print(f"  Generator Loss: {results['g_loss'][-1]:.4f}")
+                    print(f"  Discriminator Loss: {results['d_loss'][-1]:.4f}")
+                    
+                except Exception as e:
+                    print(f"  Error in epoch {epoch+1}: {e}")
+                    traceback.print_exc()
+                    continue
             
-            def _train_single_strategy(
-                self, 
-                tasks: List[Dict], 
-                strategy_name: str, 
-                generator, 
-                discriminator
-            ) -> Dict[str, Any]:
-             
-                
-                task_metrics = []
-                all_task_performance = []
-                previous_task_data = []
-                
-                print(f" Learning {len(tasks)} sequential tasks")
-                
-                # Create optimizers
-                optimizer_g = torch.optim.Adam(
-                    generator.parameters(),
-                    lr=self.config.get('generator', {}).get('learning_rate', 0.0002),
-                    betas=(0.5, 0.999)
-                )
-                optimizer_d = torch.optim.Adam(
-                    discriminator.parameters(),
-                    lr=self.config.get('discriminator', {}).get('learning_rate', 0.0004),
-                    betas=(0.5, 0.999)
-                )
-                
-                for task_idx, task_data in enumerate(tasks):
-                    task_desc = task_data.get('description', f'Task {task_idx}')
-                    print(f"Learning Task {task_idx + 1}: {task_desc}")
-                    
-                    # Get data loader for current task
-                    if strategy_name == 'naive':
-                        training_loader = task_data['train_loader']
-                    elif strategy_name == 'replay':
-                        if previous_task_data:
-                            training_loader = self._create_replay_loader(task_data, previous_task_data)
-                        else:
-                            training_loader = task_data['train_loader']
+            # Evaluate on all tasks
+            evaluation_metrics = {}
+            for task_idx, task in enumerate(tasks):
+                try:
+                    if hasattr(task, 'test_loader'):
+                        test_loader = task.test_loader
+                    elif hasattr(task, 'train_loader'):
+                        test_loader = task.train_loader
                     else:
-                        training_loader = task_data['train_loader']
+                        continue
                     
-                    # Train on current task
-                    print(f"  Training on Task {task_idx + 1}")
-                    epochs_per_task = self.config.get('train', {}).get('epochs_per_task', 5)
+                    generator.eval()
+                    discriminator.eval()
                     
-                    for epoch in range(epochs_per_task):
-                        generator.train()
-                        discriminator.train()
-                        
-                        total_g_loss = 0.0
-                        total_d_loss = 0.0
-                        
-                        for batch_idx, batch in enumerate(training_loader):
+                    total_g_loss = 0.0
+                    total_d_loss = 0.0
+                    real_scores = []
+                    fake_scores = []
+                    batch_count = 0
+                    
+                    with torch.no_grad():
+                        for batch in test_loader:
                             real_images = batch if torch.is_tensor(batch) else batch[0]
-                            real_images = real_images.to(self.device)
+                            real_images = real_images.to(device)
                             batch_size = real_images.size(0)
                             
-                            # Train Discriminator
-                            optimizer_d.zero_grad()
-                            
                             # Generate fake images
-                            z = torch.randn(batch_size, generator.z_dim, device=self.device)
-                            fake_images = generator(z).detach()
+                            z = torch.randn(batch_size, generator.z_dim, device=device)
+                            fake_images = generator(z)
                             
-                            # Forward pass
+                            # Discriminator outputs
                             real_output = discriminator(real_images)
                             fake_output = discriminator(fake_images)
                             
-                            # Calculate discriminator loss
-                            d_loss = self._calculate_discriminator_loss(
-                                discriminator, real_output, fake_output, real_images, fake_images
-                            )
+                            # Calculate losses
+                            if hasattr(generator, 'calculate_loss'):
+                                g_loss = generator.calculate_loss(fake_output)
+                            else:
+                                g_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                                    fake_output, torch.ones_like(fake_output)
+                                )
                             
-                            d_loss.backward()
-                            optimizer_d.step()
-                            
-                            # Train Generator
-                            optimizer_g.zero_grad()
-                            
-                            # Generate new fake images
-                            z = torch.randn(batch_size, generator.z_dim, device=self.device)
-                            fake_images = generator(z)
-                            fake_output = discriminator(fake_images)
-                            
-                            # Calculate generator loss
-                            g_loss = self._calculate_generator_loss(fake_output)
-                            g_loss.backward()
-                            optimizer_g.step()
+                            if hasattr(discriminator, 'calculate_loss'):
+                                d_loss = discriminator.calculate_loss(real_output, fake_output)
+                            else:
+                                real_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                                    real_output, torch.ones_like(real_output)
+                                )
+                                fake_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                                    fake_output, torch.zeros_like(fake_output)
+                                )
+                                d_loss = (real_loss + fake_loss) / 2
                             
                             total_g_loss += g_loss.item()
                             total_d_loss += d_loss.item()
+                            real_scores.append(real_output.mean().item())
+                            fake_scores.append(fake_output.mean().item())
+                            batch_count += 1
+                    
+                    if batch_count > 0:
+                        task_metrics = {
+                            f'task_{task_idx}_generator_loss': total_g_loss / batch_count,
+                            f'task_{task_idx}_discriminator_loss': total_d_loss / batch_count,
+                            f'task_{task_idx}_real_score': np.mean(real_scores) if real_scores else 0.0,
+                            f'task_{task_idx}_fake_score': np.mean(fake_scores) if fake_scores else 0.0
+                        }
+                        evaluation_metrics.update(task_metrics)
                         
-                        avg_g_loss = total_g_loss / len(training_loader)
-                        avg_d_loss = total_d_loss / len(training_loader)
-                        
-                        if epoch % max(1, epochs_per_task // 3) == 0:
-                            print(f"    Epoch {epoch:03d} | G Loss: {avg_g_loss:.4f} | D Loss: {avg_d_loss:.4f}")
-                    
-                    # Store task data for replay if needed
-                    if strategy_name == 'replay':
-                        previous_task_data.append(task_data)
-                        if len(previous_task_data) > 3:
-                            previous_task_data = previous_task_data[-3:]
-                    
-                    # Evaluate on current task
-                    current_metrics = self._evaluate_gan(generator, discriminator, task_data)
-                    task_metrics.append(current_metrics)
-                    
-                    print(f"     Task {task_idx + 1} Evaluation:")
-                    print(f"       Generator Loss: {current_metrics['generator_loss']:.4f}")
-                    print(f"       Discriminator Loss: {current_metrics['discriminator_loss']:.4f}")
-                    print(f"       Real Score: {current_metrics['real_score']:.4f}")
-                    print(f"       Fake Score: {current_metrics['fake_score']:.4f}")
-                    
-                    # Evaluate on all previous tasks
-                    task_performance = []
-                    for eval_task_idx in range(task_idx + 1):
-                        eval_metrics = self._evaluate_gan(generator, discriminator, tasks[eval_task_idx])
-                        task_performance.append({
-                            'task_id': eval_task_idx,
-                            'generator_loss': eval_metrics['generator_loss'],
-                            'discriminator_loss': eval_metrics['discriminator_loss'],
-                            'description': tasks[eval_task_idx].get('description', f'Task {eval_task_idx}')
-                        })
-                    
-                    all_task_performance.append(task_performance)
-                    
-                    # Print performance on previous tasks
-                    if task_idx > 0:
-                        print(f"    Performance on previous tasks:")
-                        for prev_task in task_performance[:-1]:
-                            print(f"      Task {prev_task['task_id'] + 1}: G Loss={prev_task['generator_loss']:.4f}, D Loss={prev_task['discriminator_loss']:.4f}")
-                
-                # Calculate continual learning metrics
-                cl_metrics = self._calculate_continual_metrics(all_task_performance)
-                
-                # Final evaluation on all tasks
-                final_eval_metrics = []
-                for i in range(len(tasks)):
-                    metrics = self._evaluate_gan(generator, discriminator, tasks[i])
-                    final_eval_metrics.append(metrics)
-                
-                # Average metrics
-                avg_metrics = {}
-                if final_eval_metrics:
-                    for key in final_eval_metrics[0]:
-                        avg_metrics[key] = np.mean([m[key] for m in final_eval_metrics])
-                
-                results = {
-                    'strategy': strategy_name,
-                    'task_metrics': task_metrics,
-                    'all_task_performance': all_task_performance,
-                    'continual_metrics': cl_metrics,
-                    'final_generator': generator,
-                    'final_discriminator': discriminator,
-                    'average_eval_metrics': avg_metrics
+                except Exception as e:
+                    print(f"Error evaluating task {task_idx}: {e}")
+            
+            # Calculate average metrics across all tasks
+            if evaluation_metrics:
+                avg_metrics = {
+                    'generator_loss': np.mean([v for k, v in evaluation_metrics.items() if 'generator_loss' in k]),
+                    'discriminator_loss': np.mean([v for k, v in evaluation_metrics.items() if 'discriminator_loss' in k]),
+                    'real_score': np.mean([v for k, v in evaluation_metrics.items() if 'real_score' in k]),
+                    'fake_score': np.mean([v for k, v in evaluation_metrics.items() if 'fake_score' in k]),
+                    'accuracy': 0.5  # Placeholder
                 }
                 
-                return results
-            
-            def _create_replay_loader(self, current_task: Dict, previous_tasks: List[Dict]) -> DataLoader:
-             
-                replay_ratio = 0.3
+                # Add individual task metrics
+                avg_metrics.update(evaluation_metrics)
                 
-                # Get samples from current task
-                current_samples = []
-                for batch in current_task['train_loader']:
-                    if torch.is_tensor(batch):
-                        current_samples.append(batch)
-                    else:
-                        current_samples.append(batch[0])
-                        break
+                print(f"\\nEvaluation results:")
+                for key, value in avg_metrics.items():
+                    if isinstance(value, (int, float)):
+                        print(f"  {key}: {value:.4f}")
                 
-                if not current_samples:
-                    return current_task['train_loader']
+                # Calculate improvement score
+                improvement_score = 0
+                for param in dqn_params:
+                    key = param['key']
+                    sign = 1 if param['sign'] == '+' else -1
+                    if key in avg_metrics and key in previous_metrics:
+                        improvement = (avg_metrics[key] - previous_metrics[key]) * sign
+                        improvement_score += improvement
+                        print(f"  {key}: {previous_metrics[key]:.4f} -> {avg_metrics[key]:.4f} (improvement: {improvement:.4f})")
                 
-                current_batch = current_samples[0]
-                current_size = current_batch.size(0)
-                replay_size = int(current_size * replay_ratio)
-                
-                replay_samples = []
-                
-                # Collect replay samples from previous tasks
-                for prev_task in previous_tasks[-2:]:
-                    try:
-                        prev_samples = []
-                        for batch in prev_task['train_loader']:
-                            if torch.is_tensor(batch):
-                                prev_samples.append(batch)
-                            else:
-                                prev_samples.append(batch[0])
-                            break
-                        
-                        if prev_samples:
-                            replay_samples.append(prev_samples[0])
-                    except:
-                        continue
-                
-                # Combine current and replay samples
-                if replay_samples:
-                    replay_batch = torch.cat(replay_samples, dim=0)
-                    if replay_batch.size(0) > replay_size:
-                        indices = torch.randperm(replay_batch.size(0))[:replay_size]
-                        replay_batch = replay_batch[indices]
+                if improvement_score > 0:
+                    print(f"\\nMetrics improved (score: {improvement_score:.4f}). Saving model.")
+                    os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
                     
-                    combined_batch = torch.cat([current_batch, replay_batch], dim=0)
+                    # Save checkpoint
+                    checkpoint = {
+                        'config': full_config,
+                        'generator_state_dict': generator.state_dict(),
+                        'discriminator_state_dict': discriminator.state_dict(),
+                        'training_mode': algorithm,
+                        'algorithm_used': algorithm,
+                        'model_info': {
+                            'generator_params': sum(p.numel() for p in generator.parameters()),
+                            'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
+                            'image_size': image_size,
+                            'channels': channels
+                        }
+                    }
+                    
+                    torch.save(checkpoint, output_model_path)
+                    print(f"Saved retrained model to {output_model_path}")
+                    return {"metrics": avg_metrics, "model_path": output_model_path}
                 else:
-                    combined_batch = current_batch
-                
-                # Create new DataLoader
-                replay_dataset = TensorDataset(combined_batch)
-                return DataLoader(
-                    replay_dataset, 
-                    batch_size=self.config.get('train', {}).get('batch_size', 32),
-                    shuffle=True
-                )
-            
-            def _calculate_discriminator_loss(self, discriminator, real_output, fake_output, 
-                                            real_images=None, fake_images=None):
-            
-                try:
-                    if hasattr(discriminator, 'calculate_loss'):
-                        return discriminator.calculate_loss(real_output, fake_output, real_images, fake_images)
-                except:
-                    pass
-                
-                # Fallback: standard BCE loss
-                real_loss = F.binary_cross_entropy_with_logits(
-                    real_output, torch.ones_like(real_output)
-                )
-                fake_loss = F.binary_cross_entropy_with_logits(
-                    fake_output, torch.zeros_like(fake_output)
-                )
-                return (real_loss + fake_loss) / 2
-            
-            def _calculate_generator_loss(self, fake_output):
-              
-                return F.binary_cross_entropy_with_logits(
-                    fake_output, torch.ones_like(fake_output)
-                )
-            
-            def _evaluate_gan(self, generator, discriminator, task_data: Dict) -> Dict[str, float]:
-             
-                generator.eval()
-                discriminator.eval()
-                
-                test_loader = task_data.get('test_loader', task_data.get('train_loader'))
-                if test_loader is None:
-                    return {
-                        'generator_loss': 0.0,
-                        'discriminator_loss': 0.0,
-                        'real_score': 0.5,
-                        'fake_score': 0.5,
-                        'accuracy': 0.5
-                    }
-                
-                total_g_loss = 0.0
-                total_d_loss = 0.0
-                real_scores = []
-                fake_scores = []
-                total_batches = 0
-                
-                with torch.no_grad():
-                    for batch in test_loader:
-                        real_images = batch if torch.is_tensor(batch) else batch[0]
-                        real_images = real_images.to(self.device)
-                        batch_size = real_images.size(0)
-                        
-                        # Generate fake images
-                        z = torch.randn(batch_size, generator.z_dim, device=self.device)
-                        fake_images = generator(z)
-                        
-                        # Discriminator outputs
-                        real_output = discriminator(real_images)
-                        fake_output = discriminator(fake_images)
-                        
-                        # Calculate losses
-                        d_loss = self._calculate_discriminator_loss(
-                            discriminator, real_output, fake_output, real_images, fake_images
-                        )
-                        g_loss = self._calculate_generator_loss(fake_output)
-                        
-                        total_g_loss += g_loss.item()
-                        total_d_loss += d_loss.item()
-                        real_scores.append(real_output.mean().item())
-                        fake_scores.append(fake_output.mean().item())
-                        total_batches += 1
-                
-                if total_batches == 0:
-                    return {
-                        'generator_loss': 0.0,
-                        'discriminator_loss': 0.0,
-                        'real_score': 0.5,
-                        'fake_score': 0.5,
-                        'accuracy': 0.5
-                    }
-                
-                return {
-                    'generator_loss': total_g_loss / total_batches,
-                    'discriminator_loss': total_d_loss / total_batches,
-                    'real_score': np.mean(real_scores),
-                    'fake_score': np.mean(fake_scores),
-                    'accuracy': self._calculate_accuracy(real_scores, fake_scores)
-                }
-            
-            def _calculate_accuracy(self, real_scores, fake_scores, threshold=0.5):
-              
-                if not real_scores or not fake_scores:
-                    return 0.5
-                
-                real_correct = sum(1 for score in real_scores if score > threshold)
-                fake_correct = sum(1 for score in fake_scores if score < threshold)
-                total = len(real_scores) + len(fake_scores)
-                
-                return (real_correct + fake_correct) / total if total > 0 else 0.5
-            
-            def _calculate_continual_metrics(self, all_task_performance: List[List[Dict]]) -> Dict[str, float]:
-              
-                
-                if not all_task_performance or not all_task_performance[-1]:
-                    return {
-                        'average_generator_loss': 0.0,
-                        'average_discriminator_loss': 0.0,
-                        'backward_transfer': 0.0,
-                        'forgetting': 0.0,
-                        'num_tasks': 0
-                    }
-                
-                final_performance = all_task_performance[-1]
-                
-                avg_g_loss = np.mean([task['generator_loss'] for task in final_performance])
-                avg_d_loss = np.mean([task['discriminator_loss'] for task in final_performance])
-                
-                backward_transfers = []
-                if len(all_task_performance) > 1:
-                    for task_idx in range(len(all_task_performance) - 1):
-                        initial_loss = all_task_performance[task_idx][task_idx]['generator_loss']
-                        final_loss = all_task_performance[-1][task_idx]['generator_loss']
-                        backward_transfer = initial_loss - final_loss
-                        backward_transfers.append(backward_transfer)
-                
-                avg_backward_transfer = np.mean(backward_transfers) if backward_transfers else 0.0
-                
-                forgetting_scores = []
-                for task_idx in range(len(all_task_performance) - 1):
-                    min_loss = all_task_performance[task_idx][task_idx]['generator_loss']
-                    final_loss = all_task_performance[-1][task_idx]['generator_loss']
-                    forgetting = final_loss - min_loss
-                    forgetting_scores.append(max(0, forgetting))
-                
-                avg_forgetting = np.mean(forgetting_scores) if forgetting_scores else 0.0
-                
-                return {
-                    'average_generator_loss': avg_g_loss,
-                    'average_discriminator_loss': avg_d_loss,
-                    'backward_transfer': avg_backward_transfer,
-                    'forgetting': avg_forgetting,
-                    'num_tasks': len(all_task_performance)
-                }
-        
-        # [The rest of the RLAF code with API functions, gan_retraining, and main function]
-        # [Keep all the API/DB helper functions from your original RLAF loop]
-        # [Keep the main execution logic]
+                    print(f"\\nNo improvement in metrics (score: {improvement_score:.4f}). Model not saved.")
+                    # Copy original model
+                    if os.path.exists(model_path):
+                        os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
+                        torch.save(torch.load(model_path, map_location='cpu'), output_model_path)
+                        print(f"Copied original model to {output_model_path}")
+                    return {"metrics": avg_metrics, "model_path": output_model_path}
+            else:
+                print("No evaluation metrics collected")
+                return {"metrics": {}, "model_path": output_model_path}
         
         # ============================================================================
-        # REST OF THE RLAF CODE (API functions, gan_retraining, main function)
+        # API FUNCTIONS
         # ============================================================================
         
         def get_retry_session():
@@ -593,136 +436,9 @@ implementation:
                     raise RuntimeError(f"DQN Pipeline failed with status {status}")
                 time.sleep(60)
         
-        def gan_retraining(action, model_path, data_path, config, tasks_path, output_model_path, previous_metrics, dqn_params):
-           
-            
-            # Load data using SafeUnpickler
-            with open(data_path, "rb") as f:
-                raw_data = f.read()
-            import io
-            data = SafeUnpickler(io.BytesIO(raw_data)).load()
-            
-            # Load tasks
-            with open(tasks_path, "rb") as f:
-                tasks_wrapper = pickle.load(f)
-            
-            # Extract dataset from wrapper
-            if hasattr(data, 'dataset'):
-                dataset = data.dataset
-                image_size = data.image_size
-                channels = data.channels
-            elif isinstance(data, dict) and 'dataset' in data:
-                dataset = data['dataset']
-                image_size = data.get('image_size', 64)
-                channels = data.get('channels', 3)
-            else:
-                dataset = data
-                image_size = 64
-                channels = 3
-            
-            if hasattr(tasks_wrapper, 'tasks'):
-                tasks = tasks_wrapper.tasks
-            else:
-                tasks = tasks_wrapper
-            
-            print(f"Dataset: {len(dataset)} samples")
-            print(f"Number of tasks: {len(tasks)}")
-            
-            # Update config with action parameters
-            config.update(action)
-            
-            # Import DCGAN components
-            try:
-                from nesy_factory.GANs.dcgan import create_dcgan
-                
-                # Create DCGAN config
-                dcgan_config = {
-                    'dataset': {
-                        'resize_size': image_size
-                    },
-                    'generator': {
-                        'z_dim': config.get('z_dim', 100),
-                        'hidden_dims': config.get('generator_hidden_dims', [256, 128, 64]),
-                        'image_channels': channels,
-                        'learning_rate': config.get('generator_lr', 0.0002),
-                        'loss_type': config.get('loss_type', 'bce_with_logits'),
-                    },
-                    'discriminator': {
-                        'hidden_dims': config.get('discriminator_hidden_dims', [64, 128, 256]),
-                        'image_channels': channels,
-                        'learning_rate': config.get('discriminator_lr', 0.0004),
-                        'loss_type': config.get('loss_type', 'bce_with_logits'),
-                    }
-                }
-                
-                # Create DCGAN models
-                generator, discriminator, full_config = create_dcgan(dcgan_config)
-                
-                # Load state dict if model exists
-                if os.path.exists(model_path):
-                    checkpoint = torch.load(model_path, map_location='cpu')
-                    if isinstance(checkpoint, dict):
-                        if 'generator_state_dict' in checkpoint:
-                            generator.load_state_dict(checkpoint['generator_state_dict'])
-                        if 'discriminator_state_dict' in checkpoint:
-                            discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
-                
-            except ImportError:
-                print("Error: Could not import nesy_factory.GANs.dcgan")
-                return {"metrics": {}, "model_path": output_model_path}
-            
-            # Train continual GAN
-            print("Starting continual GAN training")
-            trainer = ContinualGANTrainer(full_config)
-            continual_strategies = ['naive']
-            
-            results = trainer.train_continual_gan(
-                tasks=tasks, 
-                strategies=continual_strategies, 
-                generator=generator, 
-                discriminator=discriminator
-            )
-            
-            average_eval_metrics = results['naive']['average_eval_metrics']
-            
-            # Calculate improvement score
-            improvement_score = 0
-            for param in dqn_params:
-                key = param['key']
-                sign = 1 if param['sign'] == '+' else -1
-                if key in average_eval_metrics and key in previous_metrics:
-                    improvement = (average_eval_metrics[key] - previous_metrics[key]) * sign
-                    improvement_score += improvement
-                    print(f"  {key}: {previous_metrics[key]:.4f} -> {average_eval_metrics[key]:.4f} (improvement: {improvement:.4f})")
-            
-            if improvement_score > 0:
-                print(f"Metrics improved (score: {improvement_score:.4f}). Saving model.")
-                os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
-                
-                # Save checkpoint
-                checkpoint = {
-                    'config': full_config,
-                    'generator_state_dict': results['naive']['final_generator'].state_dict(),
-                    'discriminator_state_dict': results['naive']['final_discriminator'].state_dict(),
-                    'model_info': {
-                        'generator_params': sum(p.numel() for p in results['naive']['final_generator'].parameters()),
-                        'discriminator_params': sum(p.numel() for p in results['naive']['final_discriminator'].parameters()),
-                        'image_size': image_size,
-                        'channels': channels
-                    }
-                }
-                
-                torch.save(checkpoint, output_model_path)
-                print(f"Saved retrained model to {output_model_path}")
-            else:
-                print(f"No improvement in metrics (score: {improvement_score:.4f}). Model not saved.")
-                # Copy original model if no improvement
-                if os.path.exists(model_path):
-                    os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
-                    torch.save(torch.load(model_path, map_location='cpu'), output_model_path)
-                    print(f"Copied original model to {output_model_path}")
-            
-            return {"metrics": average_eval_metrics, "model_path": output_model_path}
+        # ============================================================================
+        # MAIN FUNCTION
+        # ============================================================================
         
         def main():
             parser = argparse.ArgumentParser()
@@ -742,18 +458,30 @@ implementation:
             parser.add_argument('--retrained_model', type=str, required=True)
             args = parser.parse_args()
             
+            print("\\n" + "="*60)
+            print("DCGAN RLAF LOOP STARTING")
+            print("="*60)
+            
+            # Load access token
             with open(args.access_token, 'r') as f:
                 access_token = f.read().strip()
+            
+            # Load initial metrics
             with open(args.init_metrics, 'r') as f:
                 current_metrics = json.load(f)
             
+            # Load base config
+            base_config = json.loads(args.config)
+            
             action_id_for_next_pierce = -1
             
+            # Run RLAF loop (max 2 iterations)
             for i in range(2):
                 print(f"\\n{'='*60}")
                 print(f"RLAF Loop Iteration {i+1}")
                 print(f"{'='*60}")
                 
+                # Prepare metrics for DQN
                 cleaned_metrics = {}
                 dqn_params = []
                 for key, value in current_metrics.items():
@@ -775,8 +503,10 @@ implementation:
                 
                 print(f"Dynamically generated param_json for DQN: {json.dumps(dqn_params)}")
                 
+                # Get current instance
                 instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                 
+                # Update pierce2rlaf history
                 if instance.get('pierce2rlaf'):
                     latest_pierce2rlaf = instance['pierce2rlaf'][-1]
                     previous_state = latest_pierce2rlaf['current_state']
@@ -797,50 +527,74 @@ implementation:
                 pierce2rlaf_history.append(new_pierce2rlaf_entry)
                 update_instance_field(access_token, args.domain, args.schema_id, args.model_id, "pierce2rlaf", pierce2rlaf_history)
                 
+                # Trigger DQN pipeline
                 dqn_config = {
                     "pipeline_id": args.dqn_pipeline_id,
                     "experiment_id": args.dqn_experiment_id,
                     "access_token": access_token
                 }
                 
-                trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, dqn_params)
+                try:
+                    trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, dqn_params)
+                except Exception as e:
+                    print(f"Error triggering DQN pipeline: {e}")
+                    break
                 
+                # Get updated instance with RLAF action
                 updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                
+                # Check if there are any rlaf2pierce entries
+                if not updated_instance.get('rlaf2pierce'):
+                    print("No rlaf2pierce entries found. Exiting loop.")
+                    break
+                
                 latest_rlaf2pierce = updated_instance['rlaf2pierce'][-1]
                 
+                # Check pierce_or_not flag
                 if not latest_rlaf2pierce.get("pierce_or_not", True):
                     print("pierce_or_not is false. Exiting loop.")
                     break
                 
+                # Get action details
                 rlaf_actions = updated_instance.get('rlaf_actions', {}).get('actions', [])
                 action_id_for_next_pierce = latest_rlaf2pierce['action_id']
                 action_details = next((a for a in rlaf_actions if a["id"] == action_id_for_next_pierce), None)
                 
                 if not action_details:
-                    raise ValueError(f"Action with ID {action_id_for_next_pierce} not found in rlaf_actions")
+                    print(f"Action with ID {action_id_for_next_pierce} not found in rlaf_actions")
+                    break
                 
-                print(f"DQN pipeline recommended action: {action_details}")
+                print(f"\\nDQN pipeline recommended action: {action_details['name']}")
+                print(f"Action parameters: {action_details['params']}")
                 print(f"Retraining DCGAN model with new hyperparameters...")
                 
+                # Retrain with action parameters
                 retraining_results = gan_retraining(
                     action_details['params'], 
                     args.trained_model, 
                     args.data_path, 
-                    json.loads(args.config), 
                     args.tasks,
                     args.retrained_model, 
                     previous_state, 
-                    dqn_params
+                    dqn_params,
+                    base_config
                 )
                 
+                # Update metrics for next iteration
                 current_metrics = retraining_results["metrics"]
+                
+                # Update the trained_model path for next iteration
+                args.trained_model = retraining_results["model_path"]
             
+            # Save final results
             os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
             with open(args.rlaf_output, 'w') as f:
                 json.dump({"final_metrics": current_metrics}, f, indent=4)
             
             print(f"\\n{'='*60}")
-            print(f"RLAF loop finished. Final parameters written to {args.rlaf_output}")
+            print("RLAF LOOP COMPLETED")
+            print(f"Final metrics saved to: {args.rlaf_output}")
+            print(f"Retrained model saved to: {args.retrained_model}")
             print(f"{'='*60}")
         
         if __name__ == '__main__':
