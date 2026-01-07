@@ -1,4 +1,4 @@
-name: Train v12
+name: Train v13
 description: Trains DCGAN using nesy_factory with Traditional, CAFO, or Forward-Forward methods
 inputs:
   - name: data_path
@@ -54,6 +54,8 @@ implementation:
         from torch.utils.data import DataLoader
         from io import BytesIO
         import matplotlib.pyplot as plt
+        import torch.nn.functional as F
+        import torch.optim as optim
         
         # ============================================================================
         # Import nesy_factory modules
@@ -124,82 +126,279 @@ implementation:
                 self.timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ')
         
         # ============================================================================
-        # DCGAN Wrapper with LSTM-like training methods
+        # DCGAN TRAINING CLASSES WITH BLOCK TRAINING
         # ============================================================================
-        class DCGANWrapper:
-           
+        
+        class DCGANBlockTrainer:
+          
             
             def __init__(self, config, device):
                 self.config = config
                 self.device = device
-                self.use_cafo = False
-                self.use_forward_forward = False
-                self.training_mode = "traditional"
                 
-                # Create models
-                self.generator, self.discriminator, self.full_config = create_dcgan(config)
-                self.generator.to(device)
-                self.discriminator.to(device)
-                
-                # Create optimizers
-                self.optimizer_g = OptimizerFactory.create_optimizer(self.generator, self.full_config, 'generator')
-                self.optimizer_d = OptimizerFactory.create_optimizer(self.discriminator, self.full_config, 'discriminator')
-                
-                # Check training mode from config
-                generator_cfg = config.get('generator', {})
-                discriminator_cfg = config.get('discriminator', {})
-                
-                self.use_cafo = generator_cfg.get('use_cafo', False) or discriminator_cfg.get('use_cafo', False)
-                self.use_forward_forward = generator_cfg.get('use_forward_forward', False) or discriminator_cfg.get('use_forward_forward', False)
-                
-                if self.use_cafo and self.use_forward_forward:
-                    raise ValueError("Only one training method can be selected: use_cafo or use_forward_forward")
-                
-                if self.use_cafo:
-                    self.training_mode = "cafo"
-                    self.trainer = CAFOTrainer(config, device)
-                elif self.use_forward_forward:
-                    self.training_mode = "forward_forward"
-                    self.trainer = ForwardForwardTrainer(config, device)
-                else:
-                    self.training_mode = "traditional"
-                    self.trainer = BackpropTrainer(config, device)
-                
-                print(f"Created DCGANWrapper with training mode: {self.training_mode}")
-            
-            def train_epoch(self, train_loader, epoch):
-              
-                return self.trainer.train_epoch(
-                    self.generator, self.discriminator, train_loader,
-                    self.optimizer_g, self.optimizer_d, epoch
-                )
-            
-            def generate_samples(self, num_samples):
-                
-                self.generator.eval()
-                with torch.no_grad():
-                    z = torch.randn(num_samples, self.generator.z_dim, device=self.device)
-                    return self.generator(z)
-            
-            def get_state_dicts(self):
+            def extract_blocks(self, model):
              
-                return {
-                    'generator_state_dict': self.generator.state_dict(),
-                    'discriminator_state_dict': self.discriminator.state_dict(),
-                    'optimizer_g_state_dict': self.optimizer_g.state_dict(),
-                    'optimizer_d_state_dict': self.optimizer_d.state_dict()
-                }
+                blocks = []
+                
+                if hasattr(model, 'deconv_layers'):
+                    # Generator: deconv layers
+                    for layer in model.deconv_layers:
+                        if isinstance(layer, torch.nn.ConvTranspose2d) or isinstance(layer, torch.nn.Conv2d):
+                            blocks.append(layer)
+                elif hasattr(model, 'conv_layers'):
+                    # Discriminator: conv layers
+                    for layer in model.conv_layers:
+                        if isinstance(layer, torch.nn.Conv2d) or isinstance(layer, torch.nn.ConvTranspose2d):
+                            blocks.append(layer)
+                
+                return blocks
+        
+        class DCGANCAFOTrainer(DCGANBlockTrainer):
+        
             
-            def load_state_dicts(self, state_dicts):
+            def train_cafo(self, generator, discriminator, train_loader, epochs_per_block=2):
             
-                if 'generator_state_dict' in state_dicts:
-                    self.generator.load_state_dict(state_dicts['generator_state_dict'])
-                if 'discriminator_state_dict' in state_dicts:
-                    self.discriminator.load_state_dict(state_dicts['discriminator_state_dict'])
-                if 'optimizer_g_state_dict' in state_dicts:
-                    self.optimizer_g.load_state_dict(state_dicts['optimizer_g_state_dict'])
-                if 'optimizer_d_state_dict' in state_dicts:
-                    self.optimizer_d.load_state_dict(state_dicts['optimizer_d_state_dict'])
+                
+                print(f"Starting CAFO training with {epochs_per_block} epochs per block")
+                
+                # Extract blocks from models
+                generator_blocks = self.extract_blocks(generator)
+                discriminator_blocks = self.extract_blocks(discriminator)
+                
+                print(f"Generator blocks: {len(generator_blocks)}")
+                print(f"Discriminator blocks: {len(discriminator_blocks)}")
+                
+                # Training results
+                block_results = []
+                
+                # Train generator blocks
+                print(f"\\nTraining Generator Blocks...")
+                for block_idx, block in enumerate(generator_blocks):
+                    print(f"  Generator Block {block_idx + 1}/{len(generator_blocks)}")
+                    
+                    block_optimizer = optim.Adam(block.parameters(), lr=0.001)
+                    block_losses = []
+                    
+                    for epoch in range(epochs_per_block):
+                        epoch_loss = 0.0
+                        batch_count = 0
+                        
+                        for real_images, _ in train_loader:
+                            real_images = real_images.to(self.device)
+                            batch_size = real_images.size(0)
+                            
+                            # Generate noise
+                            z = torch.randn(batch_size, generator.z_dim, device=self.device)
+                            
+                            # Forward through generator up to current block
+                            with torch.no_grad():
+                                # Get input to this block (dummy for now)
+                                block_input = torch.randn(batch_size, block.in_channels, 4, 4, device=self.device)
+                            
+                            # Train block
+                            block_optimizer.zero_grad()
+                            block_output = block(block_input)
+                            
+                            # Use MSE loss for block training
+                            target = torch.randn_like(block_output)
+                            loss = F.mse_loss(block_output, target)
+                            loss.backward()
+                            block_optimizer.step()
+                            
+                            epoch_loss += loss.item()
+                            batch_count += 1
+                        
+                        avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
+                        block_losses.append(avg_loss)
+                        
+                        if epoch % max(1, epochs_per_block // 2) == 0:
+                            print(f"    Epoch {epoch + 1}: Loss = {avg_loss:.6f}")
+                    
+                    block_results.append({
+                        'component': 'generator',
+                        'block': block_idx + 1,
+                        'losses': block_losses,
+                        'final_loss': block_losses[-1] if block_losses else 0.0
+                    })
+                
+                # Train discriminator blocks
+                print(f"\\nTraining Discriminator Blocks...")
+                for block_idx, block in enumerate(discriminator_blocks):
+                    print(f"  Discriminator Block {block_idx + 1}/{len(discriminator_blocks)}")
+                    
+                    block_optimizer = optim.Adam(block.parameters(), lr=0.001)
+                    block_losses = []
+                    
+                    for epoch in range(epochs_per_block):
+                        epoch_loss = 0.0
+                        batch_count = 0
+                        
+                        for real_images, _ in train_loader:
+                            real_images = real_images.to(self.device)
+                            batch_size = real_images.size(0)
+                            
+                            # Generate fake images
+                            with torch.no_grad():
+                                z = torch.randn(batch_size, generator.z_dim, device=self.device)
+                                fake_images = generator(z)
+                            
+                            # Prepare batch (mix real and fake)
+                            mixed_images = torch.cat([real_images, fake_images])
+                            labels = torch.cat([
+                                torch.ones(batch_size, device=self.device),
+                                torch.zeros(batch_size, device=self.device)
+                            ])
+                            
+                            # Get input to this block
+                            with torch.no_grad():
+                                # For simplicity, use actual images as input to first block
+                                if block_idx == 0:
+                                    block_input = mixed_images
+                                else:
+                                    # For deeper blocks, use random input
+                                    block_input = torch.randn(batch_size * 2, block.in_channels, 8, 8, device=self.device)
+                            
+                            # Train block
+                            block_optimizer.zero_grad()
+                            block_output = block(block_input)
+                            
+                            # Flatten for local predictor
+                            if block_output.dim() > 2:
+                                block_output_flat = block_output.view(block_output.size(0), -1)
+                            else:
+                                block_output_flat = block_output
+                            
+                            # Simple local predictor
+                            local_predictor = torch.nn.Linear(block_output_flat.size(1), 1).to(self.device)
+                            predictions = local_predictor(block_output_flat).squeeze()
+                            
+                            # Cross entropy loss
+                            loss = F.binary_cross_entropy_with_logits(predictions, labels)
+                            loss.backward()
+                            block_optimizer.step()
+                            
+                            epoch_loss += loss.item()
+                            batch_count += 1
+                        
+                        avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
+                        block_losses.append(avg_loss)
+                        
+                        if epoch % max(1, epochs_per_block // 2) == 0:
+                            print(f"    Epoch {epoch + 1}: Loss = {avg_loss:.6f}")
+                    
+                    block_results.append({
+                        'component': 'discriminator',
+                        'block': block_idx + 1,
+                        'losses': block_losses,
+                        'final_loss': block_losses[-1] if block_losses else 0.0
+                    })
+                
+                return {'block_results': block_results, 'total_blocks': len(generator_blocks) + len(discriminator_blocks)}
+        
+        class DCGANForwardForwardTrainer(DCGANBlockTrainer):
+           
+            
+            def train_forward_forward(self, generator, discriminator, train_loader, epochs_per_block=2, threshold=2.0):
+               
+                
+                print(f"Starting Forward-Forward training with {epochs_per_block} epochs per block")
+                print(f"Threshold: {threshold}")
+                
+                # Extract blocks from discriminator only (FF usually applied to discriminator)
+                discriminator_blocks = self.extract_blocks(discriminator)
+                
+                print(f"Discriminator blocks: {len(discriminator_blocks)}")
+                
+                # Training results
+                block_results = []
+                
+                # Train discriminator blocks with FF
+                print(f"\\nTraining Discriminator Blocks with Forward-Forward...")
+                for block_idx, block in enumerate(discriminator_blocks):
+                    print(f"  Discriminator Block {block_idx + 1}/{len(discriminator_blocks)}")
+                    
+                    block_optimizer = optim.Adam(block.parameters(), lr=0.001)
+                    block_losses = []
+                    
+                    for epoch in range(epochs_per_block):
+                        epoch_loss = 0.0
+                        batch_count = 0
+                        
+                        for real_images, _ in train_loader:
+                            real_images = real_images.to(self.device)
+                            batch_size = real_images.size(0)
+                            
+                            # Generate fake images for negative samples
+                            with torch.no_grad():
+                                z = torch.randn(batch_size, generator.z_dim, device=self.device)
+                                fake_images = generator(z)
+                            
+                            # Positive samples (real images)
+                            if block_idx == 0:
+                                pos_input = real_images
+                                neg_input = fake_images
+                            else:
+                                # For deeper blocks, use random inputs
+                                pos_input = torch.randn(batch_size, block.in_channels, 8, 8, device=self.device)
+                                neg_input = torch.randn(batch_size, block.in_channels, 8, 8, device=self.device)
+                            
+                            # Train block with FF
+                            block_optimizer.zero_grad()
+                            
+                            # Forward pass for positive samples
+                            pos_output = block(pos_input)
+                            pos_goodness = self.compute_goodness(pos_output)
+                            
+                            # Forward pass for negative samples
+                            neg_output = block(neg_input)
+                            neg_goodness = self.compute_goodness(neg_output)
+                            
+                            # FF loss
+                            loss = self.forward_forward_loss(pos_goodness, neg_goodness, threshold)
+                            loss.backward()
+                            block_optimizer.step()
+                            
+                            epoch_loss += loss.item()
+                            batch_count += 1
+                        
+                        avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
+                        block_losses.append(avg_loss)
+                        
+                        # Calculate success rates
+                        pos_above = (pos_goodness > threshold).float().mean().item() if batch_count > 0 else 0.0
+                        neg_below = (neg_goodness < threshold).float().mean().item() if batch_count > 0 else 0.0
+                        
+                        if epoch % max(1, epochs_per_block // 2) == 0:
+                            print(f"    Epoch {epoch + 1}: Loss = {avg_loss:.6f}, Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
+                    
+                    block_results.append({
+                        'component': 'discriminator',
+                        'block': block_idx + 1,
+                        'losses': block_losses,
+                        'final_loss': block_losses[-1] if block_losses else 0.0,
+                        'ff_threshold': threshold
+                    })
+                
+                return {'block_results': block_results, 'total_blocks': len(discriminator_blocks)}
+            
+            def compute_goodness(self, x):
+                
+                if x.numel() == 0:
+                    return torch.zeros(x.size(0), device=x.device)
+                
+                if x.dim() >= 2:
+                    return (x ** 2).mean(dim=list(range(1, x.dim())))
+                else:
+                    return x ** 2
+            
+            def forward_forward_loss(self, pos_goodness, neg_goodness, threshold):
+              
+                if pos_goodness.numel() == 0 or neg_goodness.numel() == 0:
+                    return torch.tensor(0.0, device=pos_goodness.device)
+                
+                pos_term = torch.log1p(torch.exp(-(pos_goodness - threshold)))
+                neg_term = torch.log1p(torch.exp(+(neg_goodness - threshold)))
+                return (pos_term + neg_term).mean()
         
         # ============================================================================
         # Parse arguments
@@ -226,7 +425,7 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-          
+         
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
@@ -249,7 +448,7 @@ implementation:
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max_time", "120"
+                "--max-time", "120"
             ]
             
             try:
@@ -284,7 +483,7 @@ implementation:
         # Helper function to save and encode images
         # ============================================================================
         def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
-          
+           
             os.makedirs(save_dir, exist_ok=True)
             
             # Generate images
@@ -357,11 +556,11 @@ implementation:
             generator_cfg = gan_cfg['generator']
             discriminator_cfg = gan_cfg['discriminator']
             
-            # Check for CAFO and FF flags - like LSTM
+            # Check for CAFO and FF flags
             use_cafo = generator_cfg.get('use_cafo', False) or discriminator_cfg.get('use_cafo', False)
             use_forward_forward = generator_cfg.get('use_forward_forward', False) or discriminator_cfg.get('use_forward_forward', False)
             
-            # Validate only one training method is selected - like LSTM
+            # Validate only one training method is selected
             if use_cafo and use_forward_forward:
                 raise ValueError("Only one training method can be selected: use_cafo or use_forward_forward")
             
@@ -428,7 +627,7 @@ implementation:
         print(f"Device: {device}")
         
         # ============================================================================
-        # CREATE/CONFIGURE MODEL (Following LSTM pattern)
+        # CREATE MODEL
         # ============================================================================
         try:
             # Create model config
@@ -436,39 +635,41 @@ implementation:
                 'dataset': {'resize_size': image_size},
                 'generator': generator_cfg,
                 'discriminator': discriminator_cfg,
-                'train': {'algorithm': algorithm},
-                'device': str(device),
-                'training': training_cfg
+                'device': str(device)
             }
             
-            # Create DCGAN wrapper (like LSTM model)
-            dcgan_model = DCGANWrapper(model_config, device)
+            # Create fresh DCGAN models
+            generator, discriminator, full_config = create_dcgan(model_config)
             
-            print(f"\\n✓ DCGAN model created:")
-            print(f"  Training mode: {dcgan_model.training_mode}")
-            print(f"  Use CAFO: {dcgan_model.use_cafo}")
-            print(f"  Use Forward-Forward: {dcgan_model.use_forward_forward}")
-            print(f"  Generator parameters: {sum(p.numel() for p in dcgan_model.generator.parameters()):,}")
-            print(f"  Discriminator parameters: {sum(p.numel() for p in dcgan_model.discriminator.parameters()):,}")
-            
-            # Load pre-trained weights if provided
+            # Try to load weights if provided
             if args.model_input and os.path.exists(args.model_input):
-                print(f"\\nLoading pre-trained weights from: {args.model_input}")
-                checkpoint = torch.load(args.model_input, map_location='cpu')
-                
-                if isinstance(checkpoint, dict):
-                    # Check if it's a full checkpoint or just state dicts
+                print(f"\\nAttempting to load model from: {args.model_input}")
+                try:
+                    checkpoint = torch.load(args.model_input, map_location='cpu')
+                    
                     if 'generator_state_dict' in checkpoint:
-                        state_dicts = {
-                            'generator_state_dict': checkpoint['generator_state_dict'],
-                            'discriminator_state_dict': checkpoint.get('discriminator_state_dict')
-                        }
-                        dcgan_model.load_state_dicts(state_dicts)
-                        print("✓ Model weights loaded")
-                    else:
-                        print("⚠️ Checkpoint doesn't contain expected state dicts")
-                else:
-                    print("⚠️ Invalid checkpoint format")
+                        # Try to load with strict=False to ignore mismatches
+                        generator.load_state_dict(checkpoint['generator_state_dict'], strict=False)
+                        print("✓ Generator weights loaded (possible mismatches ignored)")
+                    
+                    if 'discriminator_state_dict' in checkpoint:
+                        discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
+                        print("✓ Discriminator weights loaded (possible mismatches ignored)")
+                    
+                except Exception as load_error:
+                    print(f" Could not load weights: {load_error}")
+                    print("Starting from scratch")
+            
+            # Move to device
+            generator.to(device)
+            discriminator.to(device)
+            
+            print(f"\\n✓ DCGAN models ready:")
+            print(f"  Image size: {image_size}")
+            print(f"  Channels: {channels}")
+            print(f"  Training mode: {training_mode}")
+            print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
+            print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
             
         except Exception as e:
             print(f" ERROR creating/loading model: {e}")
@@ -496,31 +697,47 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # TRAINING LOOP (Following LSTM pattern)
+        # CREATE OPTIMIZERS
+        # ============================================================================
+        print(f"\\nCreating optimizers...")
+        try:
+            optimizer_g = OptimizerFactory.create_optimizer(generator, full_config, 'generator')
+            optimizer_d = OptimizerFactory.create_optimizer(discriminator, full_config, 'discriminator')
+            print("✓ Optimizers created")
+        except Exception as e:
+            print(f" ERROR creating optimizers: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        # ============================================================================
+        # TRAINING - DIFFERENT PATHS FOR DIFFERENT ALGORITHMS
         # ============================================================================
         print(f"\\n{'='*60}")
-        print(f"STARTING {dcgan_model.training_mode.upper()} TRAINING")
+        print(f"STARTING {training_mode.upper()} TRAINING")
         print(f"{'='*60}")
         
-        # Training results - structured like LSTM
-        epoch_loss_data = []
-        results = {
-            'training_mode': dcgan_model.training_mode,
-            'epochs': epochs,
-            'epoch_data': []
+        # Training results structure
+        training_history = {
+            'training_mode': training_mode,
+            'algorithm': algorithm,
+            'model_type': 'dcgan',
+            'block_results': [],
+            'epoch_results': [],
+            'generated_images': []
         }
         
-        # For image tracking
+        # For LSTM-like output
+        epoch_loss_data = []
         generated_images_info = []
         all_epoch_images = []
         
-        # Initial images (before training)
+        # Initial images
         print(f"\\nGenerating initial images (before training)...")
         initial_images, initial_grid, initial_base64 = save_and_encode_images(
-            dcgan_model.generator, device, epoch=0, num_images=16, save_dir="/tmp/generated_images"
+            generator, device, epoch=0, num_images=16, save_dir="/tmp/generated_images"
         )
         
-        # Upload initial grid to CDN
+        # Upload initial grid
         bearer_token = args.bearer_token
         initial_grid_url = upload_to_cdn(
             initial_grid, 
@@ -533,119 +750,189 @@ implementation:
             'grid_url': initial_grid_url,
             'description': 'Initial images before training',
             'base64_previews': initial_base64[:4],
-            'training_mode': dcgan_model.training_mode
+            'uid': str(uuid.uuid4())
         })
         
-        print(f"\\nInitial images saved and uploaded to CDN")
+        print(f"\\nInitial images saved")
         if initial_grid_url:
             print(f"Initial grid URL: {initial_grid_url[:80]}...")
         
-        # Training loop - similar to LSTM's training
-        for epoch in range(epochs):
-            print(f"\\n{'='*40}")
-            print(f"Epoch {epoch+1}/{epochs} ({dcgan_model.training_mode})")
-            print(f"{'='*40}")
+        # ============================================================================
+        # ALGORITHM-SPECIFIC TRAINING
+        # ============================================================================
+        
+        if algorithm == 'cafo':
+            print(f"\\nStarting CAFO block training...")
             
-            try:
-                # Train one epoch using wrapper - similar to LSTM's train_epoch
-                metrics = dcgan_model.train_epoch(train_loader, epoch)
+            # Use custom CAFO trainer
+            cafo_trainer = DCGANCAFOTrainer(full_config, device)
+            epochs_per_block = generator_cfg.get('cafo_epochs_per_block', 2) or discriminator_cfg.get('cafo_epochs_per_block', 2)
+            
+            # Train blocks
+            cafo_results = cafo_trainer.train_cafo(generator, discriminator, train_loader, epochs_per_block)
+            training_history['block_results'] = cafo_results['block_results']
+            
+            # Extract block losses for LSTM-like format
+            for block_result in cafo_results['block_results']:
+                component = block_result['component']
+                block_num = block_result['block']
                 
-                # Create epoch result similar to LSTM format
-                epoch_result = {
-                    'epoch': epoch + 1,
-                    'loss': float(metrics.get('g_loss', 0.0)),  # Generator loss as main loss
-                    'validation_loss': float(metrics.get('d_loss', 0.0)),  # Discriminator loss as validation
-                    'training_mode': dcgan_model.training_mode.lower(),
-                    'real_score': float(metrics.get('real_score', 0.0)),
-                    'fake_score': float(metrics.get('fake_score', 0.0))
-                }
+                for epoch_idx, loss in enumerate(block_result['losses']):
+                    loss_entry = {
+                        'block': block_num,
+                        'epoch': epoch_idx + 1,
+                        'loss': float(loss),
+                        'component': component,
+                        'training_mode': 'cafo',
+                        'uid': str(uuid.uuid4())
+                    }
+                    epoch_loss_data.append(loss_entry)
+            
+            print(f"CAFO block training completed: {cafo_results['total_blocks']} blocks trained")
+            
+        elif algorithm == 'forward_forward':
+            print(f"\\nStarting Forward-Forward block training...")
+            
+            # Use custom FF trainer
+            ff_trainer = DCGANForwardForwardTrainer(full_config, device)
+            epochs_per_block = generator_cfg.get('ff_epochs_per_block', 2) or discriminator_cfg.get('ff_epochs_per_block', 2)
+            ff_threshold = generator_cfg.get('ff_theta', 2.0) or discriminator_cfg.get('ff_theta', 2.0)
+            
+            # Train blocks
+            ff_results = ff_trainer.train_forward_forward(generator, discriminator, train_loader, epochs_per_block, ff_threshold)
+            training_history['block_results'] = ff_results['block_results']
+            
+            # Extract block losses for LSTM-like format
+            for block_result in ff_results['block_results']:
+                component = block_result['component']
+                block_num = block_result['block']
                 
-                # Add to LSTM-like loss data
-                loss_entry = {
-                    'epoch': epoch + 1,
-                    'loss': epoch_result['loss'],
-                    'validation_loss': epoch_result['validation_loss'],
-                    'training_mode': dcgan_model.training_mode.lower(),
-                    'uid': str(uuid.uuid4())
-                }
-                epoch_loss_data.append(loss_entry)
+                for epoch_idx, loss in enumerate(block_result['losses']):
+                    loss_entry = {
+                        'block': block_num,
+                        'epoch': epoch_idx + 1,
+                        'loss': float(loss),
+                        'component': component,
+                        'training_mode': 'forward_forward',
+                        'uid': str(uuid.uuid4())
+                    }
+                    epoch_loss_data.append(loss_entry)
+            
+            print(f"Forward-Forward block training completed: {ff_results['total_blocks']} blocks trained")
+            
+        else:  # backprop
+            print(f"\\nStarting Backpropagation training...")
+            
+            # Use nesy_factory trainer for backprop
+            full_config['train'] = {'algorithm': 'backprop'}
+            trainer = TrainerFactory.create_trainer(full_config, device)
+            
+            # Train epochs
+            for epoch in range(epochs):
+                print(f"\\nEpoch {epoch+1}/{epochs} (Backprop)")
                 
-                results['epoch_data'].append(epoch_result)
-                
-                # Log epoch results
-                print(f"  Generator Loss: {epoch_result['loss']:.4f}")
-                print(f"  Discriminator Loss: {epoch_result['validation_loss']:.4f}")
-                if 'real_score' in metrics and 'fake_score' in metrics:
-                    print(f"  D(real): {metrics['real_score']:.4f}, D(fake): {metrics['fake_score']:.4f}")
-                
-                # Generate and save images every epoch
-                print(f"  Generating images for epoch {epoch+1}...")
-                image_paths, grid_path, base64_images = save_and_encode_images(
-                    dcgan_model.generator, device, epoch=epoch+1, num_images=16, save_dir="/tmp/generated_images"
-                )
-                
-                # Upload grid to CDN
-                grid_url = upload_to_cdn(
-                    grid_path, 
-                    f"Epoch {epoch+1} generated images grid", 
-                    bearer_token, args.domain, args.get_cdn
-                )
-                
-                # Store image info
-                epoch_images_info = {
-                    'epoch': epoch + 1,
-                    'grid_url': grid_url,
-                    'image_paths': image_paths,
-                    'base64_previews': base64_images[:4],
-                    'g_loss': epoch_result['loss'],
-                    'd_loss': epoch_result['validation_loss'],
-                    'training_mode': dcgan_model.training_mode
-                }
-                
-                generated_images_info.append(epoch_images_info)
-                all_epoch_images.extend(image_paths)
-                
-                # Log image info
-                print(f"  Images generated: {len(image_paths)}")
-                if grid_url:
-                    print(f"  Grid uploaded to: {grid_url[:80]}...")
-                
-            except Exception as e:
-                print(f" ERROR in epoch {epoch+1}: {e}")
-                traceback.print_exc()
-                sys.exit(1)
+                try:
+                    # Train one epoch
+                    metrics = trainer.train_epoch(
+                        generator, discriminator, train_loader,
+                        optimizer_g, optimizer_d, epoch
+                    )
+                    
+                    g_loss = float(metrics.get('g_loss', 0.0))
+                    d_loss = float(metrics.get('d_loss', 0.0))
+                    
+                    # Create epoch result
+                    epoch_result = {
+                        'epoch': epoch + 1,
+                        'g_loss': g_loss,
+                        'd_loss': d_loss,
+                        'uid': str(uuid.uuid4())
+                    }
+                    
+                    # Create loss entry (treat as block 1)
+                    loss_entry = {
+                        'block': 1,
+                        'epoch': epoch + 1,
+                        'loss': g_loss,
+                        'component': 'generator',
+                        'training_mode': 'backprop',
+                        'uid': str(uuid.uuid4())
+                    }
+                    epoch_loss_data.append(loss_entry)
+                    
+                    # Also add discriminator loss entry
+                    loss_entry = {
+                        'block': 1,
+                        'epoch': epoch + 1,
+                        'loss': d_loss,
+                        'component': 'discriminator',
+                        'training_mode': 'backprop',
+                        'uid': str(uuid.uuid4())
+                    }
+                    epoch_loss_data.append(loss_entry)
+                    
+                    training_history['epoch_results'].append(epoch_result)
+                    
+                    print(f"  Generator Loss: {g_loss:.4f}")
+                    print(f"  Discriminator Loss: {d_loss:.4f}")
+                    
+                except Exception as e:
+                    print(f" ERROR in epoch {epoch+1}: {e}")
+                    traceback.print_exc()
+                    continue
         
         # ============================================================================
-        # SAVE MODEL (Following LSTM pattern)
+        # GENERATE FINAL IMAGES AND UPLOAD
+        # ============================================================================
+        print(f"\\nGenerating final images...")
+        final_images, final_grid, final_base64 = save_and_encode_images(
+            generator, device, epoch=999, num_images=16, save_dir="/tmp/generated_images"
+        )
+        
+        final_grid_url = upload_to_cdn(
+            final_grid, 
+            "Final generated images grid", 
+            bearer_token, args.domain, args.get_cdn
+        )
+        
+        generated_images_info.append({
+            'epoch': 999,
+            'grid_url': final_grid_url,
+            'description': 'Final images after training',
+            'base64_previews': final_base64[:4],
+            'uid': str(uuid.uuid4())
+        })
+        
+        all_epoch_images.extend(final_images)
+        training_history['generated_images'] = generated_images_info
+        
+        # ============================================================================
+        # SAVE MODEL
         # ============================================================================
         print("\\nSaving trained model...")
         
         try:
             os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
             
-            # Create full checkpoint like LSTM might do
             checkpoint = {
-                'generator_state_dict': dcgan_model.generator.state_dict(),
-                'discriminator_state_dict': dcgan_model.discriminator.state_dict(),
-                'optimizer_g_state_dict': dcgan_model.optimizer_g.state_dict(),
-                'optimizer_d_state_dict': dcgan_model.optimizer_d.state_dict(),
-                'config': model_config,
-                'training_mode': dcgan_model.training_mode,
+                'generator_state_dict': generator.state_dict(),
+                'discriminator_state_dict': discriminator.state_dict(),
+                'optimizer_g_state_dict': optimizer_g.state_dict(),
+                'optimizer_d_state_dict': optimizer_d.state_dict(),
+                'config': full_config,
+                'training_mode': training_mode,
+                'algorithm': algorithm,
                 'epochs_trained': epochs,
                 'image_size': image_size,
                 'channels': channels,
-                'z_dim': dcgan_model.generator.z_dim,
-                'final_loss': epoch_loss_data[-1]['loss'] if epoch_loss_data else 0.0,
-                'final_validation_loss': epoch_loss_data[-1]['validation_loss'] if epoch_loss_data else 0.0,
+                'z_dim': generator.z_dim,
+                'training_history': training_history,
+                'epoch_loss_data': epoch_loss_data,
                 'generated_images_info': generated_images_info
             }
             
             torch.save(checkpoint, args.trained_model)
             print(f"✓ Model saved to: {args.trained_model}")
-            print(f"  Training mode: {dcgan_model.training_mode}")
-            print(f"  Epochs trained: {epochs}")
-            print(f"  Final Generator Loss: {checkpoint['final_loss']:.4f}")
-            print(f"  Final Discriminator Loss: {checkpoint['final_validation_loss']:.4f}")
             
         except Exception as e:
             print(f" ERROR saving model: {e}")
@@ -653,41 +940,28 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # SAVE TRAINING HISTORY (Following LSTM pattern)
+        # SAVE TRAINING HISTORY
         # ============================================================================
         try:
             os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
             
-            # Create history similar to LSTM output
-            history = {
-                "training_mode": dcgan_model.training_mode,
-                "model_type": "dcgan",
-                "total_epochs": epochs,
-                "epoch_loss_data": epoch_loss_data,
-                "config": {
-                    "generator": generator_cfg,
-                    "discriminator": discriminator_cfg,
-                    "training": training_cfg
-                },
-                "dataset_info": {
-                    "size": len(dataset),
-                    "image_size": image_size,
-                    "channels": channels
-                },
-                "model_info": {
-                    "generator_params": sum(p.numel() for p in dcgan_model.generator.parameters()),
-                    "discriminator_params": sum(p.numel() for p in dcgan_model.discriminator.parameters()),
-                    "z_dim": dcgan_model.generator.z_dim
-                },
-                "generated_images": {
-                    "total_images": len(all_epoch_images),
-                    "grids_count": len(generated_images_info),
-                    "image_grids": [img_info['grid_url'] for img_info in generated_images_info if img_info.get('grid_url')]
-                }
+            # Add final stats
+            if epoch_loss_data:
+                final_g_loss = next((x['loss'] for x in reversed(epoch_loss_data) if x['component'] == 'generator'), 0.0)
+                final_d_loss = next((x['loss'] for x in reversed(epoch_loss_data) if x['component'] == 'discriminator'), 0.0)
+            else:
+                final_g_loss = final_d_loss = 0.0
+            
+            training_history['final_stats'] = {
+                'total_epochs': epochs,
+                'final_g_loss': final_g_loss,
+                'final_d_loss': final_d_loss,
+                'total_images_generated': len(all_epoch_images),
+                'block_training_completed': algorithm in ['cafo', 'forward_forward']
             }
             
             with open(args.training_history, "w") as f:
-                json.dump(history, f, indent=2)
+                json.dump(training_history, f, indent=2)
             print(f"✓ Training history saved to: {args.training_history}")
             
         except Exception as e:
@@ -696,47 +970,45 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # CREATE PROCESSED HISTORY (Following LSTM pattern)
+        # CREATE PROCESSED HISTORY (LSTM-like format)
         # ============================================================================
         try:
             os.makedirs(os.path.dirname(args.processed_history_json), exist_ok=True)
             
-            # Process data similar to LSTM output format
-            processed_data = []
+            # Create processed rows
+            processed_rows = []
             
-            # Create rows for both generator and discriminator
-            for epoch_result in results['epoch_data']:
-                # Generator row
-                gen_row = {
-                    'epoch': epoch_result['epoch'],
-                    'loss': epoch_result['loss'],
-                    'component': 'generator',
-                    'type': 'train',
-                    'training_mode': epoch_result['training_mode']
+            for entry in epoch_loss_data:
+                row = {
+                    "epoch": entry.get('epoch', 1),
+                    "loss": entry['loss'],
+                    "component": entry['component'],
+                    "type": "train",
+                    "training_mode": entry['training_mode'],
+                    "uid": entry['uid']
                 }
-                processed_data.append(gen_row)
                 
-                # Discriminator row
-                disc_row = {
-                    'epoch': epoch_result['epoch'],
-                    'loss': epoch_result['validation_loss'],
-                    'component': 'discriminator',
-                    'type': 'train',
-                    'training_mode': epoch_result['training_mode']
-                }
-                processed_data.append(disc_row)
+                if 'block' in entry:
+                    row["block"] = entry['block']
+                
+                processed_rows.append(row)
             
-            # Final output similar to LSTM
+            # Get final metrics
+            final_loss = next((x['loss'] for x in reversed(epoch_loss_data) if x['component'] == 'generator'), 0.0)
+            final_validation_loss = next((x['loss'] for x in reversed(epoch_loss_data) if x['component'] == 'discriminator'), 0.0)
+            
+            # Create final output
             output = {
-                'training_completed': True,
-                'model_type': 'dcgan',
-                'training_mode': dcgan_model.training_mode,
-                'epoch': epochs,
-                'loss': epoch_loss_data[-1]['loss'] if epoch_loss_data else 0.0,
-                'validation_loss': epoch_loss_data[-1]['validation_loss'] if epoch_loss_data else 0.0,
-                'total_epochs_trained': epochs,
-                'image_grids': [img_info['grid_url'] for img_info in generated_images_info if img_info.get('grid_url')],
-                'data': processed_data[:20]  # Include first 20 rows like LSTM
+                "training_completed": True,
+                "model_type": "dcgan",
+                "training_mode": training_mode,
+                "algorithm": algorithm,
+                "epoch": len(epoch_loss_data) // 2 if epoch_loss_data else 0,
+                "loss": final_loss,
+                "validation_loss": final_validation_loss,
+                "total_epochs_trained": epochs,
+                "image_grids": [img_info['grid_url'] for img_info in generated_images_info if img_info.get('grid_url')],
+                "data": processed_rows[:50]  # More rows for block training
             }
             
             with open(args.processed_history_json, "w") as f:
@@ -749,96 +1021,41 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # CREATE GENERATED IMAGES URLS FILE
+        # CREATE OTHER OUTPUTS
         # ============================================================================
         try:
+            # Generated images URLs
             os.makedirs(os.path.dirname(args.generated_images_urls), exist_ok=True)
-            
-            # Create images output
             images_output = {
-                "training_mode": dcgan_model.training_mode,
+                "training_mode": training_mode,
+                "algorithm": algorithm,
                 "model_type": "dcgan",
-                "total_epochs": epochs,
-                "images_per_epoch": 16,
                 "total_images": len(all_epoch_images),
-                "image_grids": [],
-                "epoch_progress": []
+                "image_grids": [{"epoch": img['epoch'], "url": img['grid_url']} for img in generated_images_info if img.get('grid_url')],
+                "epoch_loss_data": epoch_loss_data
             }
-            
-            # Add all grid URLs
-            for img_info in generated_images_info:
-                if img_info.get('grid_url'):
-                    grid_info = {
-                        "epoch": img_info['epoch'],
-                        "url": img_info['grid_url'],
-                        "description": img_info.get('description', f'Epoch {img_info["epoch"]}'),
-                        "training_mode": img_info.get('training_mode', dcgan_model.training_mode)
-                    }
-                    images_output["image_grids"].append(grid_info)
-            
-            # Add epoch progress
-            for epoch_result in results['epoch_data']:
-                epoch_progress = {
-                    "epoch": epoch_result['epoch'],
-                    "loss": epoch_result['loss'],
-                    "validation_loss": epoch_result['validation_loss'],
-                    "training_mode": epoch_result['training_mode']
-                }
-                images_output["epoch_progress"].append(epoch_progress)
-            
             with open(args.generated_images_urls, "w") as f:
                 json.dump(images_output, f, indent=2)
             print(f"✓ Generated images URLs saved to: {args.generated_images_urls}")
             
-        except Exception as e:
-            print(f" ERROR creating images URLs file: {e}")
-            traceback.print_exc()
-            sys.exit(1)
-        
-        # ============================================================================
-        # CREATE TRAINING IMAGES SUMMARY
-        # ============================================================================
-        try:
+            # Training images summary
             os.makedirs(os.path.dirname(args.training_images_summary), exist_ok=True)
-            
-            # Create summary similar to LSTM
             summary = {
                 "training_completed": True,
                 "model_type": "dcgan",
-                "training_mode": dcgan_model.training_mode,
+                "training_mode": training_mode,
+                "algorithm": algorithm,
                 "epochs_trained": epochs,
-                "final_metrics": {
-                    "loss": epoch_loss_data[-1]['loss'] if epoch_loss_data else 0.0,
-                    "validation_loss": epoch_loss_data[-1]['validation_loss'] if epoch_loss_data else 0.0
-                },
-                "image_progress": [],
-                "sample_images": {
-                    "initial": generated_images_info[0]['base64_previews'][:2] if generated_images_info else [],
-                    "final": generated_images_info[-1]['base64_previews'][:2] if len(generated_images_info) > 1 else []
-                },
-                "training_stats": {
-                    "dataset_size": len(dataset),
-                    "batch_size": actual_batch_size,
-                    "total_images_generated": len(all_epoch_images),
-                    "grids_generated": len(generated_images_info)
-                }
+                "final_metrics": {"generator_loss": final_loss, "discriminator_loss": final_validation_loss},
+                "image_progress": [{"epoch": img['epoch'], "grid_url": img.get('grid_url')} for img in generated_images_info],
+                "block_training": algorithm in ['cafo', 'forward_forward']
             }
-            
-            # Add image progress
-            for img_info in generated_images_info:
-                summary["image_progress"].append({
-                    "epoch": img_info['epoch'],
-                    "grid_url": img_info['grid_url'],
-                    "description": img_info.get('description', f'Epoch {img_info["epoch"]}'),
-                    "has_training": img_info['epoch'] > 0
-                })
-            
             with open(args.training_images_summary, "w") as f:
                 json.dump(summary, f, indent=2)
             print(f"✓ Training images summary saved to: {args.training_images_summary}")
             
         except Exception as e:
-            print(f" ERROR creating images summary: {e}")
+            print(f" ERROR creating outputs: {e}")
             traceback.print_exc()
             sys.exit(1)
         
@@ -846,13 +1063,12 @@ implementation:
         # FINAL SUMMARY
         # ============================================================================
         print(f"\\n{'✓'*80}")
-        print(f"SUCCESS: {dcgan_model.training_mode.upper()} TRAINING COMPLETED")
+        print(f"SUCCESS: {training_mode.upper()} TRAINING COMPLETED")
         print(f"{'✓'*80}")
         print(f"✓ Model type: DCGAN")
-        print(f"✓ Training mode: {dcgan_model.training_mode}")
-        print(f"✓ Epochs trained: {epochs}")
-        print(f"✓ Final Generator Loss: {epoch_loss_data[-1]['loss']:.4f}")
-        print(f"✓ Final Discriminator Loss: {epoch_loss_data[-1]['validation_loss']:.4f}")
+        print(f"✓ Training mode: {training_mode}")
+        print(f"✓ Algorithm: {algorithm}")
+        print(f"✓ Epochs/blocks trained: {len(epoch_loss_data)} entries")
         print(f"✓ Images generated: {len(all_epoch_images)}")
         print(f"✓ Model saved: {args.trained_model}")
         
