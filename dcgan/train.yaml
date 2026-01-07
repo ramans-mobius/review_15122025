@@ -1,4 +1,4 @@
-name: Train v11
+name: Train DCGAN All Algorithms with Image Upload
 description: Trains DCGAN using nesy_factory with CAFO, FF, or Backprop and uploads generated images to CDN
 inputs:
   - name: data_path
@@ -150,7 +150,7 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-         
+           
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
@@ -208,7 +208,7 @@ implementation:
         # Helper function to save and encode images
         # ============================================================================
         def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
-          
+           
             os.makedirs(save_dir, exist_ok=True)
             
             # Generate images
@@ -468,20 +468,188 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
+        # CREATE FIXED TRAINERS (to fix BatchNorm and input issues)
+        # ============================================================================
+        print(f"\\nCreating trainer for {training_mode}...")
+        
+        if algorithm == 'cafo':
+            print(f"⚠️ Creating FixedCAFOTrainer to handle BatchNorm issue...")
+            
+            class FixedCAFOTrainer:
+               
+                
+                def __init__(self, config, device):
+                    self.original_trainer = CAFOTrainer(config, device)
+                    self.config = config
+                    self.device = device
+                
+                def train_epoch(self, generator, discriminator, train_loader,
+                              optimizer_g, optimizer_d, epoch):
+                  
+                    
+                   
+                    if hasattr(generator, 'cafo_module'):
+                        original_cafo_method = generator.cafo_module.train_cafo_block
+                        
+                        def fixed_generator_cafo_block(block_module, input_data, target_data=None,
+                                                     optimizer=None, epochs=None, device='cpu', is_discriminator=True):
+                            # For generator, always use noise, not images
+                            if block_module == generator and input_data.dim() == 4:
+                                # This is images, convert to noise
+                                batch_size = input_data.size(0)
+                                print(f"    FixedCAFOTrainer: Converting images to noise for generator CAFO (batch_size={batch_size})")
+                                input_data = torch.randn(batch_size, generator.z_dim, device=device)
+                            
+                            # Ensure batch size > 1 for BatchNorm
+                            if input_data.size(0) < 2:
+                                print(f"    FixedCAFOTrainer: Batch size {input_data.size(0)} too small, skipping")
+                                return []
+                            
+                            # Temporarily set BatchNorm to eval mode for small batches
+                            if input_data.size(0) < 4:
+                                for module in block_module.modules():
+                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
+                                        module.eval()
+                            
+                            # Call original method
+                            result = original_cafo_method(block_module, input_data, target_data,
+                                                         optimizer, epochs, device, is_discriminator)
+                            
+                            # Restore BatchNorm to train mode
+                            if input_data.size(0) < 4:
+                                for module in block_module.modules():
+                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
+                                        module.train()
+                            
+                            return result
+                        
+                        # Apply the patch
+                        generator.cafo_module.train_cafo_block = fixed_generator_cafo_block
+                    
+                    # Also patch discriminator's CAFO module for small batches
+                    if hasattr(discriminator, 'cafo_module'):
+                        original_disc_cafo_method = discriminator.cafo_module.train_cafo_block
+                        
+                        def fixed_discriminator_cafo_block(block_module, input_data, target_data=None,
+                                                          optimizer=None, epochs=None, device='cpu', is_discriminator=True):
+                            # Ensure batch size > 1 for BatchNorm
+                            if input_data.size(0) < 2:
+                                print(f"    FixedCAFOTrainer: Discriminator batch size {input_data.size(0)} too small, skipping")
+                                return []
+                            
+                            # Temporarily set BatchNorm to eval mode for small batches
+                            if input_data.size(0) < 4:
+                                for module in block_module.modules():
+                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
+                                        module.eval()
+                            
+                            # Call original method
+                            result = original_disc_cafo_method(block_module, input_data, target_data,
+                                                              optimizer, epochs, device, is_discriminator)
+                            
+                            # Restore BatchNorm to train mode
+                            if input_data.size(0) < 4:
+                                for module in block_module.modules():
+                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
+                                        module.train()
+                            
+                            return result
+                        
+                        # Apply the patch
+                        discriminator.cafo_module.train_cafo_block = fixed_discriminator_cafo_block
+                    
+                    try:
+                        # Call original trainer
+                        print(f"    FixedCAFOTrainer: Starting epoch {epoch} training...")
+                        return self.original_trainer.train_epoch(
+                            generator, discriminator, train_loader,
+                            optimizer_g, optimizer_d, epoch
+                        )
+                    finally:
+                        # Restore original methods
+                        if hasattr(generator, 'cafo_module') and 'original_cafo_method' in locals():
+                            generator.cafo_module.train_cafo_block = original_cafo_method
+                        
+                        if hasattr(discriminator, 'cafo_module') and 'original_disc_cafo_method' in locals():
+                            discriminator.cafo_module.train_cafo_block = original_disc_cafo_method
+            
+            # Create fixed trainer
+            trainer = FixedCAFOTrainer(full_config, device)
+            print(f"✓ FixedCAFOTrainer created")
+        
+        elif algorithm == 'forward_forward':
+            print(f" Creating FixedForwardForwardTrainer to handle BatchNorm issue...")
+            
+            class FixedForwardForwardTrainer:
+               
+                def __init__(self, config, device):
+                    self.original_trainer = ForwardForwardTrainer(config, device)
+                    self.config = config
+                    self.device = device
+                
+                def train_epoch(self, generator, discriminator, train_loader,
+                              optimizer_g, optimizer_d, epoch):
+                 
+                    
+                    
+                    if hasattr(discriminator, 'ff_module'):
+                        original_ff_method = discriminator.ff_module.train_forward_forward_block
+                        
+                        def fixed_ff_block(block_module, positive_data, negative_data=None,
+                                         optimizer=None, epochs=None, device='cpu'):
+                            # Ensure batch size > 1 for BatchNorm
+                            if positive_data.size(0) < 2:
+                                print(f"    FixedFFTrainer: Batch size {positive_data.size(0)} too small, skipping")
+                                return []
+                            
+                            # Temporarily set BatchNorm to eval mode for small batches
+                            if positive_data.size(0) < 4:
+                                for module in block_module.modules():
+                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
+                                        module.eval()
+                            
+                            # Call original method
+                            result = original_ff_method(block_module, positive_data, negative_data,
+                                                       optimizer, epochs, device)
+                            
+                            # Restore BatchNorm to train mode
+                            if positive_data.size(0) < 4:
+                                for module in block_module.modules():
+                                    if isinstance(module, torch.nn.BatchNorm1d) or isinstance(module, torch.nn.BatchNorm2d):
+                                        module.train()
+                            
+                            return result
+                        
+                        # Apply the patch
+                        discriminator.ff_module.train_forward_forward_block = fixed_ff_block
+                    
+                    try:
+                        # Call original trainer
+                        print(f"    FixedForwardForwardTrainer: Starting epoch {epoch} training...")
+                        return self.original_trainer.train_epoch(
+                            generator, discriminator, train_loader,
+                            optimizer_g, optimizer_d, epoch
+                        )
+                    finally:
+                        # Restore original method
+                        if hasattr(discriminator, 'ff_module') and 'original_ff_method' in locals():
+                            discriminator.ff_module.train_forward_forward_block = original_ff_method
+            
+            # Create fixed trainer
+            trainer = FixedForwardForwardTrainer(full_config, device)
+            print(f"✓ FixedForwardForwardTrainer created")
+        
+        else:
+            print(f"Creating BackpropTrainer...")
+            trainer = BackpropTrainer(full_config, device)
+            print(f"✓ BackpropTrainer created")
+        
+        # ============================================================================
         # TRAINING WITH ALL ALGORITHMS
         # ============================================================================
         print(f"\\n{'='*60}")
         print(f"STARTING {training_mode.upper()} TRAINING")
         print(f"{'='*60}")
-        
-        # Create appropriate trainer
-        try:
-            trainer = TrainerFactory.create_trainer(full_config, device)
-            print(f"✓ Trainer created: {type(trainer).__name__}")
-        except Exception as e:
-            print(f" ERROR creating trainer: {e}")
-            traceback.print_exc()
-            sys.exit(1)
         
         # Training results
         results = {
@@ -531,7 +699,7 @@ implementation:
             print(f"{'='*40}")
             
             try:
-                # Train one epoch using nesy_factory trainer
+                # Train one epoch using trainer
                 metrics = trainer.train_epoch(
                     generator, discriminator, train_loader,
                     optimizer_g, optimizer_d, epoch
