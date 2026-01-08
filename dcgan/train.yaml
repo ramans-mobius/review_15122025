@@ -1,4 +1,4 @@
-name: Train v22
+name: Train v23
 description: Trains DCGAN using nesy_factory with Traditional, CAFO, or Forward-Forward methods with block-by-block pretraining
 inputs:
   - name: data_path
@@ -134,32 +134,65 @@ implementation:
         # BLOCK-BY-BLOCK TRAINING FUNCTIONS
         # ============================================================================
         
-        def extract_conv_layers(model, component='discriminator'):
-            
+        def extract_generator_layers(generator):
+          
             layers = []
             
-            if component == 'discriminator':
-                # Extract from discriminator
-                if hasattr(model, 'conv_layers'):
-                    for module in model.conv_layers:
-                        if isinstance(module, nn.Conv2d):
-                            layers.append(module)
-                        elif isinstance(module, nn.Sequential):
-                            for submodule in module:
-                                if isinstance(submodule, nn.Conv2d):
-                                    layers.append(submodule)
-            else:  # generator
-                # Extract from generator
-                if hasattr(model, 'deconv_layers'):
-                    for module in model.deconv_layers:
-                        if isinstance(module, nn.ConvTranspose2d):
-                            layers.append(module)
-                        elif isinstance(module, nn.Sequential):
-                            for submodule in module:
-                                if isinstance(submodule, nn.ConvTranspose2d):
-                                    layers.append(submodule)
+            # Helper function to recursively extract layers
+            def extract_from_module(module):
+                if isinstance(module, (nn.ConvTranspose2d, nn.Conv2d, nn.Linear, nn.BatchNorm2d)):
+                    layers.append(module)
+                elif isinstance(module, nn.Sequential):
+                    for submodule in module:
+                        extract_from_module(submodule)
+                elif hasattr(module, 'children'):
+                    for child in module.children():
+                        extract_from_module(child)
             
-            return layers
+            # Start extraction from the generator
+            extract_from_module(generator)
+            
+            # Filter only conv/deconv layers for block training
+            conv_layers = [layer for layer in layers if isinstance(layer, (nn.ConvTranspose2d, nn.Conv2d))]
+            
+            print(f"  Found {len(conv_layers)} conv/deconv layers in generator")
+            for i, layer in enumerate(conv_layers):
+                if isinstance(layer, nn.ConvTranspose2d):
+                    print(f"    Layer {i+1}: ConvTranspose2d(in={layer.in_channels}, out={layer.out_channels}, "
+                          f"kernel={layer.kernel_size}, stride={layer.stride})")
+                else:
+                    print(f"    Layer {i+1}: Conv2d(in={layer.in_channels}, out={layer.out_channels}, "
+                          f"kernel={layer.kernel_size}, stride={layer.stride})")
+            
+            return conv_layers
+        
+        def extract_discriminator_layers(discriminator):
+         
+            layers = []
+            
+            # Helper function to recursively extract layers
+            def extract_from_module(module):
+                if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear, nn.BatchNorm2d)):
+                    layers.append(module)
+                elif isinstance(module, nn.Sequential):
+                    for submodule in module:
+                        extract_from_module(submodule)
+                elif hasattr(module, 'children'):
+                    for child in module.children():
+                        extract_from_module(child)
+            
+            # Start extraction from the discriminator
+            extract_from_module(discriminator)
+            
+            # Filter only conv layers for block training
+            conv_layers = [layer for layer in layers if isinstance(layer, nn.Conv2d)]
+            
+            print(f"  Found {len(conv_layers)} conv layers in discriminator")
+            for i, layer in enumerate(conv_layers):
+                print(f"    Layer {i+1}: Conv2d(in={layer.in_channels}, out={layer.out_channels}, "
+                      f"kernel={layer.kernel_size}, stride={layer.stride})")
+            
+            return conv_layers
         
         def train_forward_forward_blocks(model, real_data, fake_data, 
                                         epochs_per_block=2, threshold=2.0, 
@@ -167,39 +200,53 @@ implementation:
            
             print(f"\\nTraining {component} with Forward-Forward (block-by-block)...")
             
-            # Extract trainable layers
-            layers = extract_conv_layers(model, component)
+            # Extract trainable layers based on component
+            if component == 'discriminator':
+                layers = extract_discriminator_layers(model)
+            else:
+                layers = extract_generator_layers(model)
+                
             if not layers:
                 print(f"  No convolutional layers found in {component}")
                 return {'layer_results': [], 'loss_entries': [], 'total_layers': 0}
             
-            print(f"  Found {len(layers)} trainable layers")
+            print(f"  Training {len(layers)} layers")
             
             results = []
             loss_entries = []
             
             # Prepare positive and negative data
-            pos_data = real_data.to(device)
-            
             if component == 'discriminator':
-                # For discriminator: negative data = fake images
+                # For discriminator: positive = real images, negative = fake images
+                pos_data = real_data.to(device)
                 neg_data = fake_data.to(device)
             else:
-                # For generator: create negative data by corrupting noise
+                # For generator: positive = noise, negative = corrupted noise
+                batch_size = real_data.size(0)
+                pos_data = real_data.to(device)  # This should be noise
+                
+                # Create negative data by corrupting noise
                 neg_data = pos_data.clone()
-                B, C, H, W = neg_data.shape
-                neg_data_flat = neg_data.view(B, -1)
-                for b in range(B):
-                    perm = torch.randperm(neg_data_flat.size(1), device=device)
-                    neg_data_flat[b] = neg_data_flat[b, perm]
-                neg_data = neg_data_flat.view(B, C, H, W).to(device)
+                if neg_data.dim() == 4:  # [B, C, H, W]
+                    B, C, H, W = neg_data.shape
+                    neg_data_flat = neg_data.view(B, -1)
+                    for b in range(B):
+                        perm = torch.randperm(neg_data_flat.size(1), device=device)
+                        neg_data_flat[b] = neg_data_flat[b, perm]
+                    neg_data = neg_data_flat.view(B, C, H, W).to(device)
+                else:  # [B, C]
+                    B, C = neg_data.shape
+                    for b in range(B):
+                        perm = torch.randperm(C, device=device)
+                        neg_data[b] = neg_data[b, perm]
             
             # Train each layer sequentially
             current_pos = pos_data
             current_neg = neg_data
             
             for layer_idx, layer in enumerate(layers):
-                print(f"  Layer {layer_idx + 1}/{len(layers)}")
+                print(f"\\n  Training Layer {layer_idx + 1}/{len(layers)}")
+                print(f"    Input shape: {current_pos.shape}")
                 
                 # Create optimizer for this layer
                 layer_optimizer = optim.Adam(layer.parameters(), lr=lr)
@@ -217,8 +264,11 @@ implementation:
                         # Calculate goodness (sum of squares normalized)
                         if pos_output.dim() == 4:
                             pos_goodness = (pos_output ** 2).mean(dim=[1, 2, 3])
-                        else:
+                        elif pos_output.dim() == 2:
                             pos_goodness = (pos_output ** 2).mean(dim=1)
+                        else:
+                            # For other dimensions, flatten
+                            pos_goodness = (pos_output.view(pos_output.size(0), -1) ** 2).mean(dim=1)
                         
                         # Forward pass for negative samples
                         neg_output = layer(current_neg)
@@ -226,8 +276,10 @@ implementation:
                         # Calculate goodness for negative
                         if neg_output.dim() == 4:
                             neg_goodness = (neg_output ** 2).mean(dim=[1, 2, 3])
-                        else:
+                        elif neg_output.dim() == 2:
                             neg_goodness = (neg_output ** 2).mean(dim=1)
+                        else:
+                            neg_goodness = (neg_output.view(neg_output.size(0), -1) ** 2).mean(dim=1)
                         
                         # Forward-Forward loss
                         pos_loss = torch.log(1 + torch.exp(-(pos_goodness - threshold))).mean()
@@ -257,26 +309,30 @@ implementation:
                             'pos_goodness': pos_goodness.mean().item(),
                             'neg_goodness': neg_goodness.mean().item(),
                             'pos_above_threshold': pos_above,
-                            'neg_below_threshold': neg_below
+                            'neg_below_threshold': neg_below,
+                            'input_shape': str(list(current_pos.shape)),
+                            'output_shape': str(list(pos_output.shape))
                         }
                         loss_entries.append(loss_entry)
                         
-                        if epoch == 0 or epoch == epochs_per_block - 1:
-                            print(f"    Epoch {epoch + 1}: Loss = {epoch_loss:.6f}, "
+                        if epoch == 0 or epoch == epochs_per_block - 1 or epochs_per_block <= 5:
+                            print(f"    Epoch {epoch + 1}/{epochs_per_block}: Loss = {epoch_loss:.6f}, "
                                   f"Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
                     
                     except Exception as e:
                         print(f"    Error in layer {layer_idx + 1}, epoch {epoch + 1}: {e}")
+                        traceback.print_exc()
                         layer_losses.append(0.0)
                         continue
                 
                 results.append({
                     'layer': layer_idx + 1,
                     'losses': layer_losses,
-                    'final_loss': layer_losses[-1] if layer_losses else 0.0
+                    'final_loss': layer_losses[-1] if layer_losses else 0.0,
+                    'layer_type': str(type(layer).__name__)
                 })
                 
-                # Prepare input for next layer
+                # Prepare input for next layer (detach to avoid inplace issues)
                 with torch.no_grad():
                     current_pos = layer(current_pos).detach()
                     current_neg = layer(current_neg).detach()
@@ -293,13 +349,17 @@ implementation:
           
             print(f"\\nTraining {component} with CAFO (block-by-block)...")
             
-            # Extract trainable layers
-            layers = extract_conv_layers(model, component)
+            # Extract trainable layers based on component
+            if component == 'discriminator':
+                layers = extract_discriminator_layers(model)
+            else:
+                layers = extract_generator_layers(model)
+                
             if not layers:
                 print(f"  No convolutional layers found in {component}")
                 return {'layer_results': [], 'loss_entries': [], 'total_layers': 0}
             
-            print(f"  Found {len(layers)} trainable layers")
+            print(f"  Training {len(layers)} layers")
             
             results = []
             loss_entries = []
@@ -314,8 +374,8 @@ implementation:
                     torch.zeros(batch_size, device=device)  # Fake = 0
                 ]).float()
             else:
-                # For generator: use noise, target high quality
-                all_data = real_data.to(device)  # Noise input
+                # For generator: use noise input, target high quality
+                all_data = real_data.to(device)  # This should be noise
                 all_labels = torch.ones(real_data.size(0), device=device).float()  # Target high quality
             
             # Train each layer sequentially
@@ -323,7 +383,8 @@ implementation:
             current_labels = all_labels
             
             for layer_idx, layer in enumerate(layers):
-                print(f"  Layer {layer_idx + 1}/{len(layers)}")
+                print(f"\\n  Training Layer {layer_idx + 1}/{len(layers)}")
+                print(f"    Input shape: {current_data.shape}")
                 
                 # Create optimizer for this layer
                 layer_optimizer = optim.Adam(layer.parameters(), lr=lr, weight_decay=1e-4)
@@ -343,17 +404,20 @@ implementation:
                             # Conv output: use adaptive pooling and linear
                             pooled = F.adaptive_avg_pool2d(features, (1, 1))
                             flattened = pooled.view(pooled.size(0), -1)
-                            predictor = nn.Linear(flattened.size(1), 1).to(device)
-                            predictions = predictor(flattened).squeeze()
+                            predictor_input_dim = flattened.size(1)
                         else:
-                            # Already flattened
-                            predictor = nn.Linear(features.size(1), 1).to(device)
-                            predictions = predictor(features).squeeze()
+                            # Already flattened or other shape
+                            flattened = features.view(features.size(0), -1)
+                            predictor_input_dim = flattened.size(1)
                         
-                        # Initialize predictor
+                        # Create predictor
+                        predictor = nn.Linear(predictor_input_dim, 1).to(device)
                         nn.init.normal_(predictor.weight, 0.0, 0.02)
                         if predictor.bias is not None:
                             nn.init.constant_(predictor.bias, 0.0)
+                        
+                        # Make predictions
+                        predictions = predictor(flattened).squeeze()
                         
                         # Compute loss
                         if component == 'discriminator':
@@ -392,26 +456,30 @@ implementation:
                             'component': component,
                             'training_mode': 'cafo',
                             'uid': str(uuid.uuid4()),
-                            'accuracy': accuracy
+                            'accuracy': accuracy,
+                            'input_shape': str(list(current_data.shape)),
+                            'features_shape': str(list(features.shape))
                         }
                         loss_entries.append(loss_entry)
                         
-                        if epoch == 0 or epoch == epochs_per_block - 1:
+                        if epoch == 0 or epoch == epochs_per_block - 1 or epochs_per_block <= 5:
                             acc_str = f", Accuracy: {accuracy:.4f}" if component == 'discriminator' else ""
-                            print(f"    Epoch {epoch + 1}: Loss = {epoch_loss:.6f}{acc_str}")
+                            print(f"    Epoch {epoch + 1}/{epochs_per_block}: Loss = {epoch_loss:.6f}{acc_str}")
                     
                     except Exception as e:
                         print(f"    Error in layer {layer_idx + 1}, epoch {epoch + 1}: {e}")
+                        traceback.print_exc()
                         layer_losses.append(0.0)
                         continue
                 
                 results.append({
                     'layer': layer_idx + 1,
                     'losses': layer_losses,
-                    'final_loss': layer_losses[-1] if layer_losses else 0.0
+                    'final_loss': layer_losses[-1] if layer_losses else 0.0,
+                    'layer_type': str(type(layer).__name__)
                 })
                 
-                # Prepare input for next layer
+                # Prepare input for next layer (detach to avoid inplace issues)
                 with torch.no_grad():
                     current_data = layer(current_data).detach()
                     # Labels stay the same for next layer
@@ -425,7 +493,7 @@ implementation:
         def train_backprop_adversarial(generator, discriminator, train_loader, 
                                       optimizer_g, optimizer_d, device, epochs=1,
                                       n_critic=1, algorithm='backprop'):
-           
+            
             print(f"\\nStarting adversarial training for {epochs} epochs")
             print(f"Algorithm: {algorithm}, Discriminator steps per generator step: {n_critic}")
             
@@ -453,7 +521,7 @@ implementation:
                     
                     # ============= Train Discriminator =============
                     d_loss_total = 0.0
-                    for _ in range(n_critic):
+                    for critic_step in range(n_critic):
                         optimizer_d.zero_grad()
                         
                         # Real images
@@ -471,6 +539,10 @@ implementation:
                         optimizer_d.step()
                         
                         d_loss_total += d_loss.item()
+                        
+                        if n_critic > 1 and (critic_step == 0 or critic_step == n_critic - 1):
+                            print(f"    D-Step {critic_step + 1}/{n_critic}: "
+                                  f"Real Loss: {real_loss.item():.4f}, Fake Loss: {fake_loss.item():.4f}")
                     
                     # ============= Train Generator =============
                     optimizer_g.zero_grad()
@@ -487,8 +559,9 @@ implementation:
                     epoch_d_loss += d_loss_total / n_critic
                     batch_count += 1
                     
-                    if batch_idx % 10 == 0:
-                        print(f"  Batch {batch_idx}: G Loss = {g_loss.item():.4f}, D Loss = {d_loss_total/n_critic:.4f}")
+                    # Log every batch for detailed monitoring
+                    print(f"  Batch {batch_idx + 1}/{len(train_loader)}: "
+                          f"G Loss = {g_loss.item():.4f}, D Loss = {d_loss_total/n_critic:.4f}")
                 
                 if batch_count > 0:
                     avg_g_loss = epoch_g_loss / batch_count
@@ -501,7 +574,8 @@ implementation:
                         'loss': avg_g_loss,
                         'component': 'generator',
                         'training_mode': algorithm,
-                        'uid': str(uuid.uuid4())
+                        'uid': str(uuid.uuid4()),
+                        'note': f'{batch_count} batches'
                     }
                     loss_entries.append(loss_entry_g)
                     
@@ -511,14 +585,16 @@ implementation:
                         'loss': avg_d_loss,
                         'component': 'discriminator',
                         'training_mode': algorithm,
-                        'uid': str(uuid.uuid4())
+                        'uid': str(uuid.uuid4()),
+                        'note': f'{batch_count} batches'
                     }
                     loss_entries.append(loss_entry_d)
                     
-                    print(f"  Average Generator Loss: {avg_g_loss:.4f}")
-                    print(f"  Average Discriminator Loss: {avg_d_loss:.4f}")
+                    print(f"  Epoch Summary: Average Generator Loss: {avg_g_loss:.4f}")
+                    print(f"                 Average Discriminator Loss: {avg_d_loss:.4f}")
+                    print(f"                 Total batches processed: {batch_count}")
                 else:
-                    print("  No batches processed!")
+                    print("  ERROR: No valid batches processed in this epoch!")
                     return {'loss_entries': []}
             
             return {'loss_entries': loss_entries}
@@ -548,7 +624,7 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-           
+        
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
@@ -601,7 +677,7 @@ implementation:
         # Helper function to save and encode images
         # ============================================================================
         def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
-           
+         
             os.makedirs(save_dir, exist_ok=True)
             
             # Generate images
@@ -812,6 +888,11 @@ implementation:
             print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
             print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
             
+            # Print generator architecture for debugging
+            print("\\nGenerator Architecture:")
+            print(generator)
+            print(f"\\nGenerator z_dim: {generator.z_dim}")
+            
         except Exception as e:
             print(f" ERROR loading model: {e}")
             traceback.print_exc()
@@ -945,10 +1026,9 @@ implementation:
             if use_cafo_generator:
                 print(f"\\n2. Pre-training Generator with CAFO...")
                 
-                # For generator CAFO, we need appropriate input
-                # Generator expects noise, so we create random noise
+                # For generator CAFO, create proper noise input
+                # Generator expects noise of shape (batch_size, z_dim, 1, 1)
                 noise = torch.randn(batch_size_actual, generator.z_dim, device=device)
-                # Reshape noise to match generator's expected input shape
                 noise = noise.view(batch_size_actual, generator.z_dim, 1, 1)
                 
                 cafo_results_g = train_cafo_blocks(
@@ -1028,8 +1108,8 @@ implementation:
             if use_ff_generator:
                 print(f"\\n2. Pre-training Generator with Forward-Forward...")
                 
-                # For generator FF, we need appropriate input
-                # Generator expects noise, so we create random noise
+                # For generator FF, create proper noise input
+                # Generator expects noise of shape (batch_size, z_dim, 1, 1)
                 noise = torch.randn(batch_size_actual, generator.z_dim, device=device)
                 noise = noise.view(batch_size_actual, generator.z_dim, 1, 1)
                 
@@ -1168,6 +1248,10 @@ implementation:
                     row.update({
                         'accuracy': entry.get('accuracy', 0.0)
                     })
+                if 'note' in entry:
+                    row['note'] = entry['note']
+                if 'input_shape' in entry:
+                    row['input_shape'] = entry['input_shape']
                 processed_data.append(row)
             
             # Get final losses
@@ -1281,6 +1365,7 @@ implementation:
             print(f"  - CAFO epochs per block: {cafo_epochs_per_block}")
         print(f"✓ Epochs trained: {epochs}")
         print(f"✓ Loss entries recorded: {len(training_history['loss_entries'])}")
+        print(f"✓ Block results: {len(training_history['block_results'])}")
         print(f"✓ Images generated: {len(all_epoch_images)}")
         print(f"✓ Model saved: {args.trained_model}")
         if initial_grid_url:
