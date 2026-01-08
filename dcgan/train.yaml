@@ -1,4 +1,4 @@
-name: Train v21
+name: Train v22
 description: Trains DCGAN using nesy_factory with Traditional, CAFO, or Forward-Forward methods with block-by-block pretraining
 inputs:
   - name: data_path
@@ -852,7 +852,7 @@ implementation:
         # ============================================================================
         # TRAINING - DIFFERENT PATHS FOR DIFFERENT ALGORITHMS
         # ============================================================================
-        print(f"\n{'='*60}")
+        print(f"\\n{'='*60}")
         print(f"STARTING {training_mode.upper()} TRAINING")
         print(f"{'='*60}")
         
