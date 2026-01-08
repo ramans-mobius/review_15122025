@@ -1,4 +1,4 @@
-name: Train v17
+name: Train v18
 description: Trains DCGAN using nesy_factory with Traditional, CAFO, or Forward-Forward methods
 inputs:
   - name: data_path
@@ -77,8 +77,6 @@ implementation:
             OptimizerFactory = dcgan_module.OptimizerFactory
             TrainerFactory = dcgan_module.TrainerFactory
             BackpropTrainer = dcgan_module.BackpropTrainer
-            ForwardForwardTrainer = dcgan_module.ForwardForwardTrainer
-            CAFOTrainer = dcgan_module.CAFOTrainer
             
             print("✓ Successfully imported all nesy_factory components")
             
@@ -134,276 +132,271 @@ implementation:
                 self.timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ')
         
         # ============================================================================
-        # CUSTOM TRAINING METHODS THAT ACTUALLY WORK
+        # HELPER FUNCTIONS FOR BLOCK TRAINING
         # ============================================================================
         
-        def train_cafo_real(generator, discriminator, train_loader, device, epochs_per_block=2):
+        def extract_conv_layers(model):
            
-            print(f"Starting real CAFO training with {epochs_per_block} epochs per block")
+            layers = []
+            for module in model.modules():
+                if isinstance(module, torch.nn.Conv2d):
+                    layers.append(module)
+                elif isinstance(module, torch.nn.ConvTranspose2d):
+                    layers.append(module)
+            return layers
+        
+        def train_forward_forward_blocks(model, real_data, fake_data, 
+                                        epochs_per_block=2, threshold=2.0, 
+                                        lr=0.01, device='cpu', component='discriminator'):
             
-            # Training results
-            block_results = []
+            print(f"Training {component} with Forward-Forward...")
+            
+            # Extract trainable layers
+            layers = extract_conv_layers(model)
+            print(f"  Found {len(layers)} trainable layers")
+            
+            results = []
             loss_entries = []
             
-            # Train discriminator with CAFO approach
-            print(f"\\nTraining Discriminator with CAFO...")
+            # Prepare positive and negative data
+            pos_data = real_data.to(device)
             
-            for block in range(3):  # Train 3 blocks
-                print(f"  Discriminator Block {block + 1}/3")
+            # For discriminator: negative data = fake images
+            # For generator: negative data = corrupted noise
+            if component == 'discriminator':
+                neg_data = fake_data.to(device)
+            else:
+                # Corrupt noise for generator negative samples
+                neg_data = real_data.clone().to(device)
+                B, C, H, W = neg_data.shape
+                neg_data_flat = neg_data.view(B, -1)
+                for b in range(B):
+                    perm = torch.randperm(neg_data_flat.size(1), device=device)
+                    neg_data_flat[b] = neg_data_flat[b, perm]
+                neg_data = neg_data_flat.view(B, C, H, W)
+            
+            # Train each layer sequentially
+            current_pos = pos_data
+            current_neg = neg_data
+            
+            for layer_idx, layer in enumerate(layers):
+                print(f"  Layer {layer_idx + 1}/{len(layers)}")
                 
-                block_losses = []
+                # Create optimizer for this layer
+                layer_optimizer = optim.Adam(layer.parameters(), lr=lr)
+                layer.train()
+                
+                layer_losses = []
                 
                 for epoch in range(epochs_per_block):
                     epoch_loss = 0.0
-                    batch_count = 0
                     
-                    for batch_data in train_loader:
-                        # Handle both (images, labels) and images-only formats
-                        if isinstance(batch_data, (list, tuple)):
-                            real_images = batch_data[0]
-                        else:
-                            real_images = batch_data
-                        
-                        real_images = real_images.to(device)
-                        batch_size = real_images.size(0)
-                        
-                        # Generate fake images
-                        generator.eval()
-                        with torch.no_grad():
-                            z = torch.randn(batch_size, generator.z_dim, device=device)
-                            fake_images = generator(z)
-                        
-                        # Train discriminator
-                        discriminator.train()
-                        
-                        # Get discriminator outputs
-                        real_output = discriminator(real_images)
-                        fake_output = discriminator(fake_images)
-                        
-                        # CAFO-inspired loss: discriminator should output 1 for real, 0 for fake
-                        real_loss = F.binary_cross_entropy_with_logits(real_output, torch.ones_like(real_output))
-                        fake_loss = F.binary_cross_entropy_with_logits(fake_output, torch.zeros_like(fake_output))
-                        loss = (real_loss + fake_loss) / 2
-                        
-                        # Backward pass
-                        optimizer_d.zero_grad()
-                        loss.backward()
-                        optimizer_d.step()
-                        
-                        epoch_loss += loss.item()
-                        batch_count += 1
+                    # Forward pass for positive samples
+                    pos_output = layer(current_pos)
                     
-                    avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
-                    block_losses.append(avg_loss)
+                    # Calculate goodness
+                    if pos_output.dim() == 4:
+                        pos_goodness = (pos_output ** 2).mean(dim=[1, 2, 3])
+                    else:
+                        pos_goodness = (pos_output ** 2).mean(dim=1)
+                    
+                    # Forward pass for negative samples
+                    neg_output = layer(current_neg)
+                    
+                    # Calculate goodness for negative
+                    if neg_output.dim() == 4:
+                        neg_goodness = (neg_output ** 2).mean(dim=[1, 2, 3])
+                    else:
+                        neg_goodness = (neg_output ** 2).mean(dim=1)
+                    
+                    # Forward-Forward loss
+                    pos_loss = torch.log(1 + torch.exp(-(pos_goodness - threshold))).mean()
+                    neg_loss = torch.log(1 + torch.exp(neg_goodness - threshold)).mean()
+                    loss = (pos_loss + neg_loss) / 2
+                    
+                    # Backward pass
+                    layer_optimizer.zero_grad()
+                    loss.backward()
+                    layer_optimizer.step()
+                    
+                    epoch_loss = loss.item()
+                    layer_losses.append(epoch_loss)
+                    
+                    # Calculate success rates
+                    pos_above = (pos_goodness > threshold).float().mean().item()
+                    neg_below = (neg_goodness < threshold).float().mean().item()
                     
                     # Create loss entry
                     loss_entry = {
-                        'block': block + 1,
+                        'layer': layer_idx + 1,
                         'epoch': epoch + 1,
-                        'loss': avg_loss,
-                        'component': 'discriminator',
-                        'training_mode': 'cafo',
-                        'uid': str(uuid.uuid4())
+                        'loss': epoch_loss,
+                        'component': component,
+                        'training_mode': 'forward_forward',
+                        'uid': str(uuid.uuid4()),
+                        'pos_goodness': pos_goodness.mean().item(),
+                        'neg_goodness': neg_goodness.mean().item(),
+                        'pos_above_threshold': pos_above,
+                        'neg_below_threshold': neg_below
                     }
                     loss_entries.append(loss_entry)
                     
-                    print(f"    Epoch {epoch + 1}: Loss = {avg_loss:.6f}")
+                    if epoch % max(1, epochs_per_block // 2) == 0:
+                        print(f"    Epoch {epoch + 1}: Loss = {epoch_loss:.6f}, "
+                              f"Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
                 
-                block_results.append({
-                    'component': 'discriminator',
-                    'block': block + 1,
-                    'losses': block_losses,
-                    'final_loss': block_losses[-1] if block_losses else 0.0
+                results.append({
+                    'layer': layer_idx + 1,
+                    'losses': layer_losses,
+                    'final_loss': layer_losses[-1] if layer_losses else 0.0
                 })
+                
+                # Prepare input for next layer
+                with torch.no_grad():
+                    current_pos = layer(current_pos).detach()
+                    current_neg = layer(current_neg).detach()
             
             return {
-                'block_results': block_results,
-                'total_blocks': 3,
-                'loss_entries': loss_entries
+                'layer_results': results,
+                'loss_entries': loss_entries,
+                'total_layers': len(layers)
             }
         
-        def train_forward_forward_real(generator, discriminator, train_loader, device, epochs_per_block=2, threshold=2.0):
-        
-            print(f"Starting real Forward-Forward training")
-            print(f"Threshold: {threshold}")
+        def train_cafo_blocks(model, real_data, fake_data, labels=None,
+                             epochs_per_block=2, lr=0.001, device='cpu', 
+                             component='discriminator'):
+           
+            print(f"Training {component} with CAFO...")
             
-            # Training results
-            block_results = []
+            # Extract trainable layers
+            layers = extract_conv_layers(model)
+            print(f"  Found {len(layers)} trainable layers")
+            
+            results = []
             loss_entries = []
             
-            # Put discriminator in train mode
-            discriminator.train()
+            # Prepare data
+            if component == 'discriminator':
+                # For discriminator: combine real and fake, create labels
+                batch_size = real_data.size(0)
+                all_data = torch.cat([real_data, fake_data]).to(device)
+                all_labels = torch.cat([
+                    torch.ones(batch_size, device=device),  # Real = 1
+                    torch.zeros(batch_size, device=device)  # Fake = 0
+                ]).float()
+            else:
+                # For generator: use noise, target high quality
+                all_data = real_data.to(device)  # Noise input
+                all_labels = torch.ones(real_data.size(0), device=device).float()  # Target high quality
             
-            # Get the convolutional layers from discriminator's conv_layers Sequential
-            conv_layers = []
-            if hasattr(discriminator, 'conv_layers'):
-                # Extract Conv2d layers from the Sequential module
-                for module in discriminator.conv_layers:
-                    if isinstance(module, torch.nn.Conv2d):
-                        conv_layers.append(module)
-                    elif isinstance(module, torch.nn.Sequential):
-                        # If there are nested Sequential modules, extract from them
-                        for submodule in module:
-                            if isinstance(submodule, torch.nn.Conv2d):
-                                conv_layers.append(submodule)
+            # Train each layer sequentially
+            current_data = all_data
+            current_labels = all_labels
             
-            print(f"Found {len(conv_layers)} convolutional layers in discriminator")
-            
-            if len(conv_layers) == 0:
-                print(" No convolutional layers found for FF training, using simplified approach")
-                # Fall back to training the whole discriminator
-                conv_layers = [discriminator]
-            
-            # Train blocks (up to 3 or number of conv layers)
-            num_blocks = min(3, len(conv_layers))
-            print(f"\\nTraining Discriminator with Forward-Forward ({num_blocks} blocks)...")
-            
-            for block_idx in range(num_blocks):
-                print(f"  Discriminator Block {block_idx + 1}/{num_blocks}")
-                
-                block_losses = []
-                layer = conv_layers[block_idx]
+            for layer_idx, layer in enumerate(layers):
+                print(f"  Layer {layer_idx + 1}/{len(layers)}")
                 
                 # Create optimizer for this layer
-                layer_optimizer = optim.Adam(layer.parameters(), lr=0.001)
+                layer_optimizer = optim.Adam(layer.parameters(), lr=lr, weight_decay=1e-4)
+                layer.train()
+                
+                layer_losses = []
                 
                 for epoch in range(epochs_per_block):
                     epoch_loss = 0.0
-                    epoch_pos_goodness = 0.0
-                    epoch_neg_goodness = 0.0
-                    batch_count = 0
                     
-                    for batch_data in train_loader:
-                        # Handle both (images, labels) and images-only formats
-                        if isinstance(batch_data, (list, tuple)):
-                            real_images = batch_data[0]
-                        else:
-                            real_images = batch_data
-                        
-                        real_images = real_images.to(device)
-                        batch_size = real_images.size(0)
-                        
-                        # Generate fake images for negative samples
-                        generator.eval()
-                        with torch.no_grad():
-                            z = torch.randn(batch_size, generator.z_dim, device=device)
-                            fake_images = generator(z)
-                        
-                        # Prepare inputs
-                        pos_input = real_images
-                        neg_input = fake_images.detach()  # Detach from generator
-                        
-                        # For layers beyond the first, we need to process through previous layers
-                        if block_idx > 0:
-                            with torch.no_grad():
-                                for i in range(block_idx):
-                                    prev_layer = conv_layers[i]
-                                    pos_input = prev_layer(pos_input)
-                                    neg_input = prev_layer(neg_input)
-                        
-                        # Zero gradients
-                        layer_optimizer.zero_grad()
-                        
-                        # Forward pass for positive samples
-                        pos_output = layer(pos_input)
-                        
-                        # Calculate goodness (sum of squares)
-                        if pos_output.dim() == 4:  # Conv2d output
-                            pos_goodness = (pos_output ** 2).mean(dim=[1, 2, 3])
-                        elif pos_output.dim() == 2:  # Linear output
-                            pos_goodness = (pos_output ** 2).mean(dim=1)
-                        else:
-                            pos_goodness = (pos_output ** 2).mean()
-                        
-                        # Forward pass for negative samples
-                        neg_output = layer(neg_input)
-                        
-                        # Calculate goodness for negative samples
-                        if neg_output.dim() == 4:
-                            neg_goodness = (neg_output ** 2).mean(dim=[1, 2, 3])
-                        elif neg_output.dim() == 2:
-                            neg_goodness = (neg_output ** 2).mean(dim=1)
-                        else:
-                            neg_goodness = (neg_output ** 2).mean()
-                        
-                        # Forward-Forward loss
-                        pos_loss = torch.log(1 + torch.exp(-(pos_goodness - threshold))).mean()
-                        neg_loss = torch.log(1 + torch.exp(neg_goodness - threshold)).mean()
-                        loss = (pos_loss + neg_loss) / 2
-                        
-                        # Backward pass - check if loss requires grad
-                        if loss.requires_grad:
-                            loss.backward()
-                            layer_optimizer.step()
-                        
-                        epoch_loss += loss.item()
-                        epoch_pos_goodness += pos_goodness.mean().item()
-                        epoch_neg_goodness += neg_goodness.mean().item()
-                        batch_count += 1
+                    # Forward pass
+                    features = layer(current_data)
                     
-                    if batch_count > 0:
-                        avg_loss = epoch_loss / batch_count
-                        avg_pos_goodness = epoch_pos_goodness / batch_count
-                        avg_neg_goodness = epoch_neg_goodness / batch_count
-                        block_losses.append(avg_loss)
-                        
-                        # Calculate success rates
-                        pos_above = (pos_goodness > threshold).float().mean().item() if batch_count > 0 else 0.0
-                        neg_below = (neg_goodness < threshold).float().mean().item() if batch_count > 0 else 0.0
-                        
-                        # Create loss entry
-                        loss_entry = {
-                            'block': block_idx + 1,
-                            'epoch': epoch + 1,
-                            'loss': avg_loss,
-                            'component': 'discriminator',
-                            'training_mode': 'forward_forward',
-                            'uid': str(uuid.uuid4()),
-                            'pos_goodness': avg_pos_goodness,
-                            'neg_goodness': avg_neg_goodness,
-                            'pos_above_threshold': pos_above,
-                            'neg_below_threshold': neg_below
-                        }
-                        loss_entries.append(loss_entry)
-                        
-                        print(f"    Epoch {epoch + 1}: Loss = {avg_loss:.6f}, "
-                              f"PosG = {avg_pos_goodness:.3f}, NegG = {avg_neg_goodness:.3f}, "
-                              f"Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
+                    # Create simple predictor for this layer's features
+                    if features.dim() == 4:
+                        # Conv output: use adaptive pooling and linear
+                        pooled = F.adaptive_avg_pool2d(features, (1, 1))
+                        flattened = pooled.view(pooled.size(0), -1)
+                        predictor = nn.Linear(flattened.size(1), 1).to(device)
+                        predictions = predictor(flattened).squeeze()
                     else:
-                        print(f"    Epoch {epoch + 1}: No batches processed!")
+                        # Already flattened
+                        predictor = nn.Linear(features.size(1), 1).to(device)
+                        predictions = predictor(features).squeeze()
+                    
+                    # Initialize predictor
+                    nn.init.normal_(predictor.weight, 0.0, 0.02)
+                    nn.init.constant_(predictor.bias, 0.0)
+                    
+                    # Compute loss
+                    if component == 'discriminator':
+                        # Binary classification loss
+                        loss = F.binary_cross_entropy_with_logits(predictions, current_labels)
+                    else:
+                        # For generator: MSE loss to encourage good features
+                        target_quality = torch.ones_like(predictions)
+                        loss = F.mse_loss(predictions, target_quality)
+                    
+                    # Backward pass (both layer and predictor)
+                    layer_optimizer.zero_grad()
+                    predictor_optimizer = optim.Adam(predictor.parameters(), lr=lr)
+                    predictor_optimizer.zero_grad()
+                    
+                    loss.backward()
+                    layer_optimizer.step()
+                    predictor_optimizer.step()
+                    
+                    epoch_loss = loss.item()
+                    layer_losses.append(epoch_loss)
+                    
+                    # Calculate accuracy for discriminator
+                    if component == 'discriminator':
+                        with torch.no_grad():
+                            pred_labels = (torch.sigmoid(predictions) > 0.5).float()
+                            accuracy = (pred_labels == current_labels).float().mean().item()
+                    else:
+                        accuracy = 0.0
+                    
+                    # Create loss entry
+                    loss_entry = {
+                        'layer': layer_idx + 1,
+                        'epoch': epoch + 1,
+                        'loss': epoch_loss,
+                        'component': component,
+                        'training_mode': 'cafo',
+                        'uid': str(uuid.uuid4()),
+                        'accuracy': accuracy
+                    }
+                    loss_entries.append(loss_entry)
+                    
+                    if epoch % max(1, epochs_per_block // 2) == 0:
+                        acc_str = f", Accuracy: {accuracy:.4f}" if component == 'discriminator' else ""
+                        print(f"    Epoch {epoch + 1}: Loss = {epoch_loss:.6f}{acc_str}")
                 
-                if block_losses:
-                    block_results.append({
-                        'component': 'discriminator',
-                        'block': block_idx + 1,
-                        'losses': block_losses,
-                        'final_loss': block_losses[-1],
-                        'ff_threshold': threshold
-                    })
-                else:
-                    block_results.append({
-                        'component': 'discriminator',
-                        'block': block_idx + 1,
-                        'losses': [],
-                        'final_loss': 0.0,
-                        'ff_threshold': threshold
-                    })
+                results.append({
+                    'layer': layer_idx + 1,
+                    'losses': layer_losses,
+                    'final_loss': layer_losses[-1] if layer_losses else 0.0
+                })
+                
+                # Prepare input for next layer
+                with torch.no_grad():
+                    current_data = layer(current_data).detach()
+                    # Labels stay the same for next layer
             
             return {
-                'block_results': block_results,
-                'total_blocks': len(block_results),
-                'loss_entries': loss_entries
+                'layer_results': results,
+                'loss_entries': loss_entries,
+                'total_layers': len(layers)
             }
         
-        def train_backprop_real(generator, discriminator, train_loader, optimizer_g, optimizer_d, device, epochs=1):
-           
-            print(f"Starting real Backprop training for {epochs} epochs")
+        def train_backprop_adversarial(generator, discriminator, train_loader, 
+                                      optimizer_g, optimizer_d, device, epochs=1,
+                                      n_critic=1):
+          
+            print(f"Starting adversarial training for {epochs} epochs")
+            print(f"Discriminator steps per generator step: {n_critic}")
             
-            # Training results
             loss_entries = []
             
             for epoch in range(epochs):
-                print(f"\\nEpoch {epoch + 1}/{epochs} (Backprop)")
+                print(f"\\nEpoch {epoch + 1}/{epochs} (Adversarial)")
                 
                 generator.train()
                 discriminator.train()
@@ -423,21 +416,25 @@ implementation:
                     batch_size = real_images.size(0)
                     
                     # ============= Train Discriminator =============
-                    optimizer_d.zero_grad()
-                    
-                    # Real images
-                    real_output = discriminator(real_images)
-                    real_loss = F.binary_cross_entropy_with_logits(real_output, torch.ones_like(real_output))
-                    
-                    # Fake images
-                    z = torch.randn(batch_size, generator.z_dim, device=device)
-                    fake_images = generator(z).detach()
-                    fake_output = discriminator(fake_images)
-                    fake_loss = F.binary_cross_entropy_with_logits(fake_output, torch.zeros_like(fake_output))
-                    
-                    d_loss = (real_loss + fake_loss) / 2
-                    d_loss.backward()
-                    optimizer_d.step()
+                    d_loss_total = 0.0
+                    for _ in range(n_critic):
+                        optimizer_d.zero_grad()
+                        
+                        # Real images
+                        real_output = discriminator(real_images)
+                        real_loss = F.binary_cross_entropy_with_logits(real_output, torch.ones_like(real_output))
+                        
+                        # Fake images
+                        z = torch.randn(batch_size, generator.z_dim, device=device)
+                        fake_images = generator(z).detach()
+                        fake_output = discriminator(fake_images)
+                        fake_loss = F.binary_cross_entropy_with_logits(fake_output, torch.zeros_like(fake_output))
+                        
+                        d_loss = (real_loss + fake_loss) / 2
+                        d_loss.backward()
+                        optimizer_d.step()
+                        
+                        d_loss_total += d_loss.item()
                     
                     # ============= Train Generator =============
                     optimizer_g.zero_grad()
@@ -451,11 +448,11 @@ implementation:
                     optimizer_g.step()
                     
                     epoch_g_loss += g_loss.item()
-                    epoch_d_loss += d_loss.item()
+                    epoch_d_loss += d_loss_total / n_critic
                     batch_count += 1
                     
                     if batch_idx % 10 == 0:
-                        print(f"  Batch {batch_idx}: G Loss = {g_loss.item():.4f}, D Loss = {d_loss.item():.4f}")
+                        print(f"  Batch {batch_idx}: G Loss = {g_loss.item():.4f}, D Loss = {d_loss_total/n_critic:.4f}")
                 
                 if batch_count > 0:
                     avg_g_loss = epoch_g_loss / batch_count
@@ -463,6 +460,7 @@ implementation:
                     
                     # Create loss entries
                     loss_entry_g = {
+                        'phase': 'adversarial',
                         'epoch': epoch + 1,
                         'loss': avg_g_loss,
                         'component': 'generator',
@@ -472,6 +470,7 @@ implementation:
                     loss_entries.append(loss_entry_g)
                     
                     loss_entry_d = {
+                        'phase': 'adversarial',
                         'epoch': epoch + 1,
                         'loss': avg_d_loss,
                         'component': 'discriminator',
@@ -484,7 +483,6 @@ implementation:
                     print(f"  Average Discriminator Loss: {avg_d_loss:.4f}")
                 else:
                     print("  No batches processed!")
-                    return {'loss_entries': []}
             
             return {'loss_entries': loss_entries}
         
@@ -513,18 +511,13 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-         
+          
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
             
             file_size = os.path.getsize(file_path)
             print(f"   Uploading {description} ({file_size:,} bytes)...")
-            
-            # Generate unique filename
-            unique_id = str(uuid.uuid4())[:8]
-            original_name = os.path.basename(file_path)
-            cdn_filename = f"dcgan_{file_type}_{unique_id}_{original_name}"
             
             upload_url = f"{domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fbottle%2Flimka%2Fsoda%2F"
             
@@ -571,7 +564,7 @@ implementation:
         # Helper function to save and encode images
         # ============================================================================
         def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
-         
+           
             os.makedirs(save_dir, exist_ok=True)
             
             # Generate images
@@ -655,9 +648,33 @@ implementation:
                 algorithm = "backprop"
                 print(f"✓ Using Backpropagation training")
             
-            # Get epochs from training config
+            # Get common training parameters
             epochs = training_cfg.get('epochs', 1)
+            batch_size = training_cfg.get('batch_size', 32)
+            n_critic = training_cfg.get('n_critic', 1)
+            
+            # Get algorithm-specific parameters (with fallbacks to common)
+            ff_epochs_per_block = training_cfg.get('ff_epochs_per_block', 
+                                                 gan_cfg.get('generator', {}).get('ff_epochs_per_block', 2))
+            ff_threshold = training_cfg.get('ff_threshold', 
+                                          gan_cfg.get('discriminator', {}).get('ff_theta', 2.0))
+            ff_lr = training_cfg.get('ff_lr', 0.01)
+            
+            cafo_epochs_per_block = training_cfg.get('cafo_epochs_per_block', 
+                                                   gan_cfg.get('generator', {}).get('cafo_epochs_per_block', 2))
+            cafo_lr = training_cfg.get('cafo_lr', 0.001)
+            
             print(f"✓ Training for {epochs} epoch(s)")
+            print(f"✓ Batch size: {batch_size}")
+            print(f"✓ Discriminator steps per generator step: {n_critic}")
+            
+            if algorithm == 'forward_forward':
+                print(f"✓ FF epochs per block: {ff_epochs_per_block}")
+                print(f"✓ FF threshold: {ff_threshold}")
+                print(f"✓ FF learning rate: {ff_lr}")
+            elif algorithm == 'cafo':
+                print(f"✓ CAFO epochs per block: {cafo_epochs_per_block}")
+                print(f"✓ CAFO learning rate: {cafo_lr}")
             
         except Exception as e:
             print(f" ERROR parsing master_config: {e}")
@@ -762,7 +779,6 @@ implementation:
         # CREATE DATA LOADER
         # ============================================================================
         try:
-            batch_size = training_cfg.get('batch_size', 32)
             actual_batch_size = min(batch_size, max(1, len(dataset)))
             train_loader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=False)
             
@@ -827,7 +843,7 @@ implementation:
         )
         
         generated_images_info.append({
-            'epoch': 0,
+            'phase': 'initial',
             'grid_url': initial_grid_url,
             'description': 'Initial images before training',
             'base64_previews': initial_base64[:4],
@@ -843,49 +859,168 @@ implementation:
         # ============================================================================
         
         if algorithm == 'cafo':
-            print(f"\\nStarting CAFO training...")
+            print(f"\\n{'='*60}")
+            print(f"PHASE 1: CAFO BLOCK PRE-TRAINING")
+            print(f"{'='*60}")
             
-            # Use real CAFO training
-            epochs_per_block = gan_cfg['generator'].get('cafo_epochs_per_block', 2)
-            results = train_cafo_real(generator, discriminator, train_loader, device, epochs_per_block)
+            # Get a batch of real data for training
+            real_batch = next(iter(train_loader))
+            if isinstance(real_batch, (list, tuple)):
+                real_images = real_batch[0]
+            else:
+                real_images = real_batch
             
-            if not results['loss_entries']:
-                print("ERROR: CAFO training failed - no loss entries recorded")
-                sys.exit(1)
-                
-            training_history['block_results'] = results.get('block_results', [])
-            training_history['loss_entries'] = results['loss_entries']
+            real_images = real_images.to(device)
+            batch_size_actual = real_images.size(0)
             
-            print(f"CAFO training completed: {results.get('total_blocks', 0)} blocks trained")
+            # Generate fake images for discriminator training
+            with torch.no_grad():
+                z = torch.randn(batch_size_actual, generator.z_dim, device=device)
+                fake_images = generator(z)
+            
+            # 1. Pre-train discriminator blocks with CAFO
+            print(f"\\n1. Pre-training Discriminator with CAFO...")
+            cafo_results_d = train_cafo_blocks(
+                model=discriminator,
+                real_data=real_images,
+                fake_data=fake_images,
+                epochs_per_block=cafo_epochs_per_block,
+                lr=cafo_lr,
+                device=device,
+                component='discriminator'
+            )
+            
+            # 2. Pre-train generator blocks with CAFO
+            print(f"\\n2. Pre-training Generator with CAFO...")
+            
+            # For generator CAFO, we use noise as input
+            noise = torch.randn(batch_size_actual, generator.z_dim, device=device)
+            # Reshape noise to match expected input shape for layers
+            noise_reshaped = noise.view(batch_size_actual, generator.z_dim, 1, 1)
+            noise_reshaped = noise_reshaped.expand(-1, -1, 4, 4)  # Expand to 4x4
+            
+            cafo_results_g = train_cafo_blocks(
+                model=generator,
+                real_data=noise_reshaped,  # Noise input for generator
+                fake_data=fake_images,  # Not used for generator CAFO
+                epochs_per_block=cafo_epochs_per_block,
+                lr=cafo_lr,
+                device=device,
+                component='generator'
+            )
+            
+            # Combine results
+            training_history['block_results'].extend(cafo_results_d.get('layer_results', []))
+            training_history['block_results'].extend(cafo_results_g.get('layer_results', []))
+            training_history['loss_entries'].extend(cafo_results_d.get('loss_entries', []))
+            training_history['loss_entries'].extend(cafo_results_g.get('loss_entries', []))
+            
+            print(f"\\n✓ CAFO block pre-training completed:")
+            print(f"  Discriminator layers trained: {cafo_results_d.get('total_layers', 0)}")
+            print(f"  Generator layers trained: {cafo_results_g.get('total_layers', 0)}")
+            
+            print(f"\\n{'='*60}")
+            print(f"PHASE 2: ADVERSARIAL TRAINING")
+            print(f"{'='*60}")
+            
+            # 3. Traditional adversarial training with pre-trained blocks
+            adv_results = train_backprop_adversarial(
+                generator, discriminator, train_loader,
+                optimizer_g, optimizer_d, device, epochs,
+                n_critic
+            )
+            
+            training_history['loss_entries'].extend(adv_results['loss_entries'])
             
         elif algorithm == 'forward_forward':
-            print(f"\\nStarting Forward-Forward training...")
+            print(f"\\n{'='*60}")
+            print(f"PHASE 1: FORWARD-FORWARD BLOCK PRE-TRAINING")
+            print(f"{'='*60}")
             
-            # Use real FF training
-            epochs_per_block = gan_cfg['discriminator'].get('ff_epochs_per_block', 2)
-            ff_threshold = gan_cfg['discriminator'].get('ff_theta', 2.0)
+            # Get a batch of real data for training
+            real_batch = next(iter(train_loader))
+            if isinstance(real_batch, (list, tuple)):
+                real_images = real_batch[0]
+            else:
+                real_images = real_batch
             
-            results = train_forward_forward_real(generator, discriminator, train_loader, device, epochs_per_block, ff_threshold)
+            real_images = real_images.to(device)
+            batch_size_actual = real_images.size(0)
             
-            if not results['loss_entries']:
-                print("ERROR: Forward-Forward training failed - no loss entries recorded")
-                sys.exit(1)
-                
-            training_history['block_results'] = results.get('block_results', [])
-            training_history['loss_entries'] = results['loss_entries']
+            # Generate fake images for discriminator training
+            with torch.no_grad():
+                z = torch.randn(batch_size_actual, generator.z_dim, device=device)
+                fake_images = generator(z)
             
-            print(f"Forward-Forward training completed: {results.get('total_blocks', 0)} blocks trained")
+            # 1. Pre-train discriminator blocks with Forward-Forward
+            print(f"\\n1. Pre-training Discriminator with Forward-Forward...")
+            ff_results_d = train_forward_forward_blocks(
+                model=discriminator,
+                real_data=real_images,
+                fake_data=fake_images,
+                epochs_per_block=ff_epochs_per_block,
+                threshold=ff_threshold,
+                lr=ff_lr,
+                device=device,
+                component='discriminator'
+            )
             
-        else:  # backprop
-            print(f"\\nStarting Backpropagation training...")
+            # 2. Pre-train generator blocks with Forward-Forward
+            print(f"\\n2. Pre-training Generator with Forward-Forward...")
             
-            # Use real backprop training
-            results = train_backprop_real(generator, discriminator, train_loader, optimizer_g, optimizer_d, device, epochs)
+            # For generator FF, we need appropriate input shape
+            # Generator expects noise as input, so we create noise in image shape
+            noise = torch.randn(batch_size_actual, generator.z_dim, device=device)
+            # Reshape noise to match expected input shape for layers
+            noise_reshaped = noise.view(batch_size_actual, generator.z_dim, 1, 1)
+            noise_reshaped = noise_reshaped.expand(-1, -1, 4, 4)  # Expand to 4x4
             
-            if not results['loss_entries']:
-                print("ERROR: Backprop training failed - no loss entries recorded")
-                sys.exit(1)
-                
+            ff_results_g = train_forward_forward_blocks(
+                model=generator,
+                real_data=noise_reshaped,  # "Good" noise input
+                fake_data=fake_images,  # Use fake images as negative for generator
+                epochs_per_block=ff_epochs_per_block,
+                threshold=ff_threshold,
+                lr=ff_lr,
+                device=device,
+                component='generator'
+            )
+            
+            # Combine results
+            training_history['block_results'].extend(ff_results_d.get('layer_results', []))
+            training_history['block_results'].extend(ff_results_g.get('layer_results', []))
+            training_history['loss_entries'].extend(ff_results_d.get('loss_entries', []))
+            training_history['loss_entries'].extend(ff_results_g.get('loss_entries', []))
+            
+            print(f"\\n✓ Forward-Forward block pre-training completed:")
+            print(f"  Discriminator layers trained: {ff_results_d.get('total_layers', 0)}")
+            print(f"  Generator layers trained: {ff_results_g.get('total_layers', 0)}")
+            
+            print(f"\\n{'='*60}")
+            print(f"PHASE 2: ADVERSARIAL TRAINING")
+            print(f"{'='*60}")
+            
+            # 3. Traditional adversarial training with pre-trained blocks
+            adv_results = train_backprop_adversarial(
+                generator, discriminator, train_loader,
+                optimizer_g, optimizer_d, device, epochs,
+                n_critic
+            )
+            
+            training_history['loss_entries'].extend(adv_results['loss_entries'])
+            
+        else:  # backprop only
+            print(f"\\n{'='*60}")
+            print(f"TRADITIONAL ADVERSARIAL TRAINING")
+            print(f"{'='*60}")
+            
+            # Direct adversarial training without pre-training
+            results = train_backprop_adversarial(
+                generator, discriminator, train_loader,
+                optimizer_g, optimizer_d, device, epochs,
+                n_critic
+            )
+            
             training_history['loss_entries'] = results['loss_entries']
             
             print(f"Backprop training completed: {len(results['loss_entries'])} loss entries recorded")
@@ -905,7 +1040,7 @@ implementation:
         )
         
         generated_images_info.append({
-            'epoch': 999,
+            'phase': 'final',
             'grid_url': final_grid_url,
             'description': 'Final images after training',
             'base64_previews': final_base64[:4],
@@ -959,6 +1094,7 @@ implementation:
             processed_data = []
             for entry in training_history['loss_entries']:
                 row = {
+                    "phase": entry.get('phase', 'block_pre_training'),
                     "epoch": entry.get('epoch', 1),
                     "loss": entry['loss'],
                     "component": entry['component'],
@@ -966,20 +1102,27 @@ implementation:
                     "training_mode": entry['training_mode'],
                     "uid": entry['uid']
                 }
-                if 'block' in entry:
-                    row["block"] = entry['block']
+                if 'layer' in entry:
+                    row["layer"] = entry['layer']
+                if 'pos_goodness' in entry:
+                    row["pos_goodness"] = entry['pos_goodness']
+                if 'neg_goodness' in entry:
+                    row["neg_goodness"] = entry['neg_goodness']
                 processed_data.append(row)
             
             # Get final losses
-            final_g_loss = next((x['loss'] for x in reversed(training_history['loss_entries']) if x['component'] == 'generator'), 0.0)
-            final_d_loss = next((x['loss'] for x in reversed(training_history['loss_entries']) if x['component'] == 'discriminator'), 0.0)
+            final_g_loss = next((x['loss'] for x in reversed(training_history['loss_entries']) 
+                               if x['component'] == 'generator' and x.get('phase') == 'adversarial'), 0.0)
+            final_d_loss = next((x['loss'] for x in reversed(training_history['loss_entries']) 
+                               if x['component'] == 'discriminator' and x.get('phase') == 'adversarial'), 0.0)
             
             output = {
                 "training_completed": True,
                 "model_type": "dcgan",
                 "training_mode": training_mode,
                 "algorithm": algorithm,
-                "epoch": len(training_history['loss_entries']) // 2 if training_history['loss_entries'] else 0,
+                "phases_completed": ["block_pre_training", "adversarial"] if algorithm in ['cafo', 'forward_forward'] else ["adversarial"],
+                "epoch": epochs,
                 "loss": final_g_loss,
                 "validation_loss": final_d_loss,
                 "total_epochs_trained": epochs,
@@ -998,7 +1141,8 @@ implementation:
                 "algorithm": algorithm,
                 "model_type": "dcgan",
                 "total_images": len(all_epoch_images),
-                "image_grids": [{"epoch": img['epoch'], "url": img['grid_url']} for img in generated_images_info if img.get('grid_url')]
+                "image_grids": [{"phase": img['phase'], "url": img['grid_url']} 
+                              for img in generated_images_info if img.get('grid_url')]
             }
             with open(args.generated_images_urls, "w") as f:
                 json.dump(images_output, f, indent=2)
@@ -1011,14 +1155,21 @@ implementation:
                 "model_type": "dcgan",
                 "training_mode": training_mode,
                 "algorithm": algorithm,
+                "phases_completed": ["block_pre_training", "adversarial"] if algorithm in ['cafo', 'forward_forward'] else ["adversarial"],
                 "epochs_trained": epochs,
-                "total_blocks_trained": training_history.get('total_blocks', 0),
+                "batch_size": batch_size,
+                "n_critic": n_critic,
+                "algorithm_params": {
+                    "ff_epochs_per_block": ff_epochs_per_block if algorithm == 'forward_forward' else None,
+                    "ff_threshold": ff_threshold if algorithm == 'forward_forward' else None,
+                    "cafo_epochs_per_block": cafo_epochs_per_block if algorithm == 'cafo' else None,
+                },
                 "final_metrics": {
-                    "generator_loss": next((x['loss'] for x in reversed(training_history['loss_entries']) if x['component'] == 'generator'), 0.0),
-                    "discriminator_loss": next((x['loss'] for x in reversed(training_history['loss_entries']) if x['component'] == 'discriminator'), 0.0)
+                    "generator_loss": final_g_loss,
+                    "discriminator_loss": final_d_loss
                 },
                 "image_progress": [{
-                    "epoch": img['epoch'], 
+                    "phase": img['phase'], 
                     "grid_url": img.get('grid_url'),
                     "description": img.get('description', ''),
                     "uid": img.get('uid', '')
@@ -1050,8 +1201,18 @@ implementation:
         print(f"✓ Model type: DCGAN")
         print(f"✓ Training mode: {training_mode}")
         print(f"✓ Algorithm: {algorithm}")
-        print(f"✓ Epochs/Blocks trained: {epochs}")
-        print(f"✓ Loss entries recorded: {len(training_history['loss_entries'])}")
+        
+        if algorithm in ['cafo', 'forward_forward']:
+            print(f"✓ Phases completed: Block pre-training + Adversarial training")
+            block_entries = [x for x in training_history['loss_entries'] if x.get('phase') != 'adversarial']
+            adv_entries = [x for x in training_history['loss_entries'] if x.get('phase') == 'adversarial']
+            print(f"✓ Block pre-training entries: {len(block_entries)}")
+            print(f"✓ Adversarial training entries: {len(adv_entries)}")
+        else:
+            print(f"✓ Phases completed: Adversarial training")
+            print(f"✓ Training entries recorded: {len(training_history['loss_entries'])}")
+        
+        print(f"✓ Epochs trained: {epochs}")
         print(f"✓ Images generated: {len(all_epoch_images)}")
         print(f"✓ Model saved: {args.trained_model}")
         print(f"✓ Initial images URL: {initial_grid_url}")
@@ -1059,8 +1220,10 @@ implementation:
         
         # Print final metrics
         if training_history['loss_entries']:
-            last_g_loss = next((x['loss'] for x in reversed(training_history['loss_entries']) if x['component'] == 'generator'), 0.0)
-            last_d_loss = next((x['loss'] for x in reversed(training_history['loss_entries']) if x['component'] == 'discriminator'), 0.0)
+            last_g_loss = next((x['loss'] for x in reversed(training_history['loss_entries']) 
+                              if x['component'] == 'generator' and x.get('phase') == 'adversarial'), 0.0)
+            last_d_loss = next((x['loss'] for x in reversed(training_history['loss_entries']) 
+                              if x['component'] == 'discriminator' and x.get('phase') == 'adversarial'), 0.0)
             print(f"✓ Final Generator Loss: {last_g_loss:.6f}")
             print(f"✓ Final Discriminator Loss: {last_d_loss:.6f}")
         
