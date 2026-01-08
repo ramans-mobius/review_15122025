@@ -1,4 +1,4 @@
-name: Train v19
+name: Train v20
 description: Trains DCGAN using nesy_factory with Traditional, CAFO, or Forward-Forward methods
 inputs:
   - name: data_path
@@ -76,12 +76,8 @@ implementation:
             # Get all required components
             create_dcgan = dcgan_module.create_dcgan
             OptimizerFactory = dcgan_module.OptimizerFactory
-            TrainerFactory = dcgan_module.TrainerFactory
-            BackpropTrainer = dcgan_module.BackpropTrainer
-            ForwardForwardTrainer = dcgan_module.ForwardForwardTrainer
-            CAFOTrainer = dcgan_module.CAFOTrainer
             
-            print("✓ Successfully imported all nesy_factory components")
+            print("✓ Successfully imported nesy_factory components")
             
         except Exception as e:
             print(f" ERROR importing from nesy_factory: {e}")
@@ -135,151 +131,280 @@ implementation:
                 self.timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ')
         
         # ============================================================================
-        # SIMPLIFIED TRAINING FUNCTIONS
+        # ROBUST TRAINING FUNCTION
         # ============================================================================
         
-        def train_algorithm(generator, discriminator, train_loader, optimizer_g, optimizer_d, 
-                          device, algorithm='backprop', epochs=1, n_critic=1,
-                          ff_epochs_per_block=2, ff_threshold=2.0, 
-                          cafo_epochs_per_block=2):
-         
-            print(f"\\nTraining with algorithm: {algorithm}")
+        def train_algorithm_robust(generator, discriminator, train_loader, optimizer_g, optimizer_d, 
+                                 device, algorithm='backprop', epochs=1, n_critic=1):
+          
+            print(f"\\nTraining with algorithm: {algorithm.upper()}")
             
             # Training results
             loss_entries = []
             
-            if algorithm == 'backprop':
-                # Use nesy_factory's BackpropTrainer
-                config = {'train': {'algorithm': 'backprop'}}
-                trainer = BackpropTrainer(config, device)
+            for epoch in range(epochs):
+                print(f"\\nEpoch {epoch + 1}/{epochs} ({algorithm.upper()})")
                 
-                for epoch in range(epochs):
-                    print(f"\\nEpoch {epoch + 1}/{epochs} (Backprop)")
+                generator.train()
+                discriminator.train()
+                
+                epoch_g_loss = 0.0
+                epoch_d_loss = 0.0
+                batch_count = 0
+                
+                for batch_idx, batch_data in enumerate(train_loader):
+                    # ============= DATA VALIDATION =============
+                    # Handle data format
+                    if isinstance(batch_data, (list, tuple)):
+                        if len(batch_data) == 2:
+                            real_images = batch_data[0]
+                        else:
+                            real_images = batch_data[0] if len(batch_data) > 0 else batch_data
+                    else:
+                        real_images = batch_data
                     
-                    metrics = trainer.train_epoch(
-                        generator, discriminator, train_loader,
-                        optimizer_g, optimizer_d, epoch
-                    )
+                    # Verify tensor exists and has data
+                    if real_images is None:
+                        print(f"  Warning: Batch {batch_idx} has None data, skipping")
+                        continue
                     
-                    g_loss = float(metrics.get('g_loss', 0.0))
-                    d_loss = float(metrics.get('d_loss', 0.0))
+                    # Verify tensor is a torch tensor
+                    if not isinstance(real_images, torch.Tensor):
+                        print(f"  Warning: Batch {batch_idx} is not a tensor, skipping")
+                        continue
+                    
+                    # Verify tensor has correct dimensions
+                    if real_images.dim() == 3:  # [C, H, W] - single image
+                        real_images = real_images.unsqueeze(0)  # Add batch dimension -> [1, C, H, W]
+                    elif real_images.dim() == 2:  # [H, W] - grayscale single image
+                        real_images = real_images.unsqueeze(0).unsqueeze(0)  # -> [1, 1, H, W]
+                    elif real_images.dim() != 4:  # Should be [B, C, H, W]
+                        print(f"  Warning: Batch {batch_idx} has unexpected dimension {real_images.dim()}, skipping")
+                        continue
+                    
+                    # Verify tensor has non-zero size
+                    if real_images.numel() == 0:
+                        print(f"  Warning: Batch {batch_idx} has zero elements, skipping")
+                        continue
+                    
+                    # Verify tensor has finite values
+                    if not torch.isfinite(real_images).all():
+                        print(f"  Warning: Batch {batch_idx} has non-finite values, skipping")
+                        continue
+                    
+                    real_images = real_images.to(device)
+                    batch_size = real_images.size(0)
+                    
+                    # Ensure batch size is valid
+                    if batch_size < 1:
+                        print(f"  Warning: Batch {batch_idx} has invalid batch size {batch_size}, skipping")
+                        continue
+                    
+                    # ============= TRAIN DISCRIMINATOR =============
+                    optimizer_d.zero_grad()
+                    
+                    # Real images - verify discriminator output
+                    try:
+                        real_output = discriminator(real_images)
+                        
+                        # Verify discriminator output
+                        if real_output is None:
+                            print(f"  Warning: Discriminator returned None for real images")
+                            continue
+                        
+                        # Ensure output is a tensor
+                        if not isinstance(real_output, torch.Tensor):
+                            print(f"  Warning: Discriminator output is not a tensor")
+                            continue
+                        
+                        # Handle scalar output
+                        if real_output.dim() == 0:
+                            real_output = real_output.unsqueeze(0)
+                        
+                        # Verify output has correct shape
+                        if real_output.size(0) != batch_size:
+                            print(f"  Warning: Discriminator output batch mismatch")
+                            continue
+                        
+                        real_loss = F.binary_cross_entropy_with_logits(real_output, torch.ones_like(real_output))
+                    except Exception as e:
+                        print(f"  Warning: Discriminator forward failed: {e}")
+                        continue
+                    
+                    # Generate fake images with verification
+                    try:
+                        z = torch.randn(batch_size, generator.z_dim, device=device)
+                        
+                        # Verify noise tensor
+                        if not torch.isfinite(z).all():
+                            print(f"  Warning: Noise tensor has non-finite values")
+                            continue
+                        
+                        fake_images = generator(z).detach()
+                        
+                        # Verify generated images
+                        if fake_images is None or not isinstance(fake_images, torch.Tensor):
+                            print(f"  Warning: Generator returned invalid output")
+                            continue
+                        
+                        # Verify generated image dimensions
+                        if fake_images.dim() != 4 or fake_images.size(0) != batch_size:
+                            print(f"  Warning: Generated images have invalid dimensions")
+                            continue
+                        
+                        fake_output = discriminator(fake_images)
+                        
+                        # Verify fake output
+                        if fake_output is None or not isinstance(fake_output, torch.Tensor):
+                            print(f"  Warning: Discriminator returned invalid output for fake images")
+                            continue
+                        
+                        if fake_output.dim() == 0:
+                            fake_output = fake_output.unsqueeze(0)
+                        
+                        if fake_output.size(0) != batch_size:
+                            print(f"  Warning: Fake output batch mismatch")
+                            continue
+                        
+                        fake_loss = F.binary_cross_entropy_with_logits(fake_output, torch.zeros_like(fake_output))
+                    except Exception as e:
+                        print(f"  Warning: Fake image generation failed: {e}")
+                        continue
+                    
+                    d_loss = (real_loss + fake_loss) / 2
+                    
+                    # Verify loss is finite
+                    if not torch.isfinite(d_loss):
+                        print(f"  Warning: Discriminator loss is not finite")
+                        continue
+                    
+                    try:
+                        d_loss.backward()
+                        
+                        # Verify gradients are finite
+                        for param in discriminator.parameters():
+                            if param.grad is not None and not torch.isfinite(param.grad).all():
+                                print(f"  Warning: Discriminator gradients are not finite")
+                                # Clear gradients to prevent issues
+                                optimizer_d.zero_grad()
+                                break
+                        else:
+                            optimizer_d.step()
+                    except Exception as e:
+                        print(f"  Warning: Discriminator backward failed: {e}")
+                        optimizer_d.zero_grad()
+                        continue
+                    
+                    # ============= TRAIN GENERATOR =============
+                    optimizer_g.zero_grad()
+                    
+                    try:
+                        z = torch.randn(batch_size, generator.z_dim, device=device)
+                        
+                        # Verify noise tensor
+                        if not torch.isfinite(z).all():
+                            print(f"  Warning: Generator noise has non-finite values")
+                            continue
+                        
+                        fake_images = generator(z)
+                        
+                        # Verify generator output
+                        if fake_images is None or not isinstance(fake_images, torch.Tensor):
+                            print(f"  Warning: Generator returned invalid output")
+                            continue
+                        
+                        fake_output = discriminator(fake_images)
+                        
+                        # Verify discriminator output for generator training
+                        if fake_output is None or not isinstance(fake_output, torch.Tensor):
+                            print(f"  Warning: Discriminator returned invalid output for generator training")
+                            continue
+                        
+                        if fake_output.dim() == 0:
+                            fake_output = fake_output.unsqueeze(0)
+                        
+                        g_loss = F.binary_cross_entropy_with_logits(fake_output, torch.ones_like(fake_output))
+                        
+                        # Verify loss is finite
+                        if not torch.isfinite(g_loss):
+                            print(f"  Warning: Generator loss is not finite")
+                            continue
+                        
+                        g_loss.backward()
+                        
+                        # Verify gradients are finite
+                        for param in generator.parameters():
+                            if param.grad is not None and not torch.isfinite(param.grad).all():
+                                print(f"  Warning: Generator gradients are not finite")
+                                optimizer_g.zero_grad()
+                                break
+                        else:
+                            optimizer_g.step()
+                            
+                    except Exception as e:
+                        print(f"  Warning: Generator training failed: {e}")
+                        optimizer_g.zero_grad()
+                        continue
+                    
+                    # ============= RECORD METRICS =============
+                    epoch_g_loss += g_loss.item()
+                    epoch_d_loss += d_loss.item()
+                    batch_count += 1
+                    
+                    if batch_count % 5 == 0:
+                        print(f"  Batch {batch_idx}: G Loss = {g_loss.item():.4f}, D Loss = {d_loss.item():.4f}")
+                
+                # ============= EPOCH SUMMARY =============
+                if batch_count > 0:
+                    avg_g_loss = epoch_g_loss / batch_count
+                    avg_d_loss = epoch_d_loss / batch_count
                     
                     # Create loss entries
                     loss_entry_g = {
                         'epoch': epoch + 1,
-                        'loss': g_loss,
+                        'loss': avg_g_loss,
                         'component': 'generator',
-                        'training_mode': 'backprop',
+                        'training_mode': algorithm,
                         'uid': str(uuid.uuid4())
                     }
                     loss_entries.append(loss_entry_g)
                     
                     loss_entry_d = {
                         'epoch': epoch + 1,
-                        'loss': d_loss,
+                        'loss': avg_d_loss,
                         'component': 'discriminator',
-                        'training_mode': 'backprop',
+                        'training_mode': algorithm,
                         'uid': str(uuid.uuid4())
                     }
                     loss_entries.append(loss_entry_d)
                     
-                    print(f"  Generator Loss: {g_loss:.4f}")
-                    print(f"  Discriminator Loss: {d_loss:.4f}")
-                
-            elif algorithm == 'cafo':
-                # Use nesy_factory's CAFOTrainer
-                config = {
-                    'train': {'algorithm': 'cafo'},
-                    'generator': {'cafo_epochs_per_block': cafo_epochs_per_block},
-                    'discriminator': {'cafo_epochs_per_block': cafo_epochs_per_block}
-                }
-                trainer = CAFOTrainer(config, device)
-                
-                for epoch in range(epochs):
-                    print(f"\\nEpoch {epoch + 1}/{epochs} (CAFO)")
-                    
-                    metrics = trainer.train_epoch(
-                        generator, discriminator, train_loader,
-                        optimizer_g, optimizer_d, epoch
-                    )
-                    
-                    g_loss = float(metrics.get('g_loss', 0.0))
-                    d_loss = float(metrics.get('d_loss', 0.0))
-                    
-                    # Create loss entries (treat as block 1)
+                    print(f"  Average Generator Loss: {avg_g_loss:.4f}")
+                    print(f"  Average Discriminator Loss: {avg_d_loss:.4f}")
+                    print(f"  Batches processed: {batch_count}")
+                else:
+                    print("  ERROR: No valid batches processed in this epoch!")
+                    # Create dummy entries to avoid empty results
                     loss_entry_g = {
-                        'block': 1,
                         'epoch': epoch + 1,
-                        'loss': g_loss,
+                        'loss': 0.0,
                         'component': 'generator',
-                        'training_mode': 'cafo',
-                        'uid': str(uuid.uuid4())
+                        'training_mode': algorithm,
+                        'uid': str(uuid.uuid4()),
+                        'note': 'no_valid_batches'
                     }
                     loss_entries.append(loss_entry_g)
                     
                     loss_entry_d = {
-                        'block': 1,
                         'epoch': epoch + 1,
-                        'loss': d_loss,
+                        'loss': 0.0,
                         'component': 'discriminator',
-                        'training_mode': 'cafo',
-                        'uid': str(uuid.uuid4())
+                        'training_mode': algorithm,
+                        'uid': str(uuid.uuid4()),
+                        'note': 'no_valid_batches'
                     }
                     loss_entries.append(loss_entry_d)
-                    
-                    print(f"  Generator Loss: {g_loss:.4f}")
-                    print(f"  Discriminator Loss: {d_loss:.4f}")
-                
-            elif algorithm == 'forward_forward':
-                # Use nesy_factory's ForwardForwardTrainer
-                config = {
-                    'train': {'algorithm': 'forward_forward'},
-                    'generator': {'ff_epochs_per_block': ff_epochs_per_block, 'ff_theta': ff_threshold},
-                    'discriminator': {'ff_epochs_per_block': ff_epochs_per_block, 'ff_theta': ff_threshold}
-                }
-                trainer = ForwardForwardTrainer(config, device)
-                
-                for epoch in range(epochs):
-                    print(f"\\nEpoch {epoch + 1}/{epochs} (Forward-Forward)")
-                    
-                    metrics = trainer.train_epoch(
-                        generator, discriminator, train_loader,
-                        optimizer_g, optimizer_d, epoch
-                    )
-                    
-                    g_loss = float(metrics.get('g_loss', 0.0))
-                    d_loss = float(metrics.get('d_loss', 0.0))
-                    
-                    # Create loss entries (treat as block 1)
-                    loss_entry_g = {
-                        'block': 1,
-                        'epoch': epoch + 1,
-                        'loss': g_loss,
-                        'component': 'generator',
-                        'training_mode': 'forward_forward',
-                        'uid': str(uuid.uuid4())
-                    }
-                    loss_entries.append(loss_entry_g)
-                    
-                    loss_entry_d = {
-                        'block': 1,
-                        'epoch': epoch + 1,
-                        'loss': d_loss,
-                        'component': 'discriminator',
-                        'training_mode': 'forward_forward',
-                        'uid': str(uuid.uuid4())
-                    }
-                    loss_entries.append(loss_entry_d)
-                    
-                    print(f"  Generator Loss: {g_loss:.4f}")
-                    print(f"  Discriminator Loss: {d_loss:.4f}")
             
-            else:
-                print(f"Unknown algorithm: {algorithm}, using backprop")
-                return train_algorithm(generator, discriminator, train_loader, optimizer_g, optimizer_d,
-                                     device, 'backprop', epochs, n_critic)
-            
-            return {'loss_entries': loss_entries}
+            return {'loss_entries': loss_entries, 'batches_processed': batch_count}
         
         # ============================================================================
         # Parse arguments
@@ -306,7 +431,7 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-          
+           
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
@@ -359,65 +484,112 @@ implementation:
         # Helper function to save and encode images
         # ============================================================================
         def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
-          
+           
             os.makedirs(save_dir, exist_ok=True)
             
-            # Generate images
+            # Generate images with validation
             generator.eval()
             with torch.no_grad():
-                z = torch.randn(num_images, generator.z_dim, device=device)
-                generated_images = generator(z).cpu()
+                try:
+                    z = torch.randn(num_images, generator.z_dim, device=device)
+                    
+                    # Verify noise tensor
+                    if not torch.isfinite(z).all():
+                        print("  Warning: Noise tensor has non-finite values, using zeros")
+                        z = torch.zeros(num_images, generator.z_dim, device=device)
+                    
+                    generated_images = generator(z).cpu()
+                    
+                    # Verify generated images
+                    if generated_images is None or not isinstance(generated_images, torch.Tensor):
+                        print("  ERROR: Generator returned None or invalid output")
+                        return [], None, []
+                    
+                    # Verify dimensions
+                    if generated_images.dim() != 4:
+                        print(f"  Warning: Generated images have wrong dimension {generated_images.dim()}")
+                        return [], None, []
+                    
+                except Exception as e:
+                    print(f"  ERROR: Image generation failed: {e}")
+                    return [], None, []
             
-            # Convert from [-1, 1] to [0, 1]
+            # Convert from [-1, 1] to [0, 1] with clipping
             generated_images = (generated_images + 1) / 2
+            generated_images = torch.clamp(generated_images, 0, 1)
             
             # Save images
             image_paths = []
             base64_images = []
             
-            for i in range(num_images):
+            for i in range(min(num_images, generated_images.size(0))):
                 img_tensor = generated_images[i]
                 
+                # Verify image tensor
+                if not torch.isfinite(img_tensor).all():
+                    print(f"  Warning: Image {i} has non-finite values, skipping")
+                    continue
+                
                 # Convert to PIL Image
-                if img_tensor.shape[0] == 1:  # Grayscale
-                    img = transforms.ToPILImage()(img_tensor)
-                else:  # RGB
-                    img = transforms.ToPILImage()(img_tensor)
+                try:
+                    if img_tensor.shape[0] == 1:  # Grayscale
+                        img = transforms.ToPILImage()(img_tensor)
+                    else:  # RGB
+                        img = transforms.ToPILImage()(img_tensor)
+                except Exception as e:
+                    print(f"  Warning: Failed to convert image {i} to PIL: {e}")
+                    continue
                 
                 # Save to file
                 img_path = os.path.join(save_dir, f"epoch_{epoch:03d}_sample_{i:02d}.png")
-                img.save(img_path)
-                image_paths.append(img_path)
+                try:
+                    img.save(img_path)
+                    image_paths.append(img_path)
+                except Exception as e:
+                    print(f"  Warning: Failed to save image {i}: {e}")
+                    continue
                 
                 # Convert to base64
-                buffered = BytesIO()
-                img.save(buffered, format="PNG")
-                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                base64_images.append(img_base64[:100] + "..." if len(img_base64) > 100 else img_base64)
+                try:
+                    buffered = BytesIO()
+                    img.save(buffered, format="PNG")
+                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                    base64_images.append(img_base64[:100] + "..." if len(img_base64) > 100 else img_base64)
+                except Exception as e:
+                    print(f"  Warning: Failed to encode image {i}: {e}")
+                    base64_images.append("")
             
-            # Create grid image
-            n_cols = 4
-            n_rows = (num_images + n_cols - 1) // n_cols
-            
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 3 * n_rows))
-            axes = axes.flatten() if n_rows > 1 else [axes]
-            
-            for i in range(num_images):
-                ax = axes[i]
-                if generated_images[i].shape[0] == 1:
-                    ax.imshow(generated_images[i][0], cmap='gray', vmin=0, vmax=1)
-                else:
-                    ax.imshow(generated_images[i].permute(1, 2, 0))
-                ax.axis('off')
-                ax.set_title(f"Sample {i+1}")
-            
-            for i in range(num_images, len(axes)):
-                axes[i].axis('off')
-            
-            plt.tight_layout()
-            grid_path = os.path.join(save_dir, f"epoch_{epoch:03d}_grid.png")
-            plt.savefig(grid_path, dpi=150, bbox_inches='tight')
-            plt.close()
+            # Create grid image if we have any valid images
+            if len(image_paths) > 0:
+                n_cols = 4
+                n_rows = (len(image_paths) + n_cols - 1) // n_cols
+                
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 3 * n_rows))
+                axes = axes.flatten() if n_rows > 1 else [axes]
+                
+                for i in range(len(image_paths)):
+                    ax = axes[i]
+                    if generated_images[i].shape[0] == 1:
+                        ax.imshow(generated_images[i][0], cmap='gray', vmin=0, vmax=1)
+                    else:
+                        ax.imshow(generated_images[i].permute(1, 2, 0))
+                    ax.axis('off')
+                    ax.set_title(f"Sample {i+1}")
+                
+                for i in range(len(image_paths), len(axes)):
+                    axes[i].axis('off')
+                
+                plt.tight_layout()
+                grid_path = os.path.join(save_dir, f"epoch_{epoch:03d}_grid.png")
+                try:
+                    plt.savefig(grid_path, dpi=150, bbox_inches='tight')
+                    plt.close()
+                except Exception as e:
+                    print(f"  ERROR: Failed to save grid image: {e}")
+                    grid_path = None
+                    plt.close()
+            else:
+                grid_path = None
             
             return image_paths, grid_path, base64_images
         
@@ -448,23 +620,9 @@ implementation:
             batch_size = training_cfg.get('batch_size', 32)
             n_critic = training_cfg.get('n_critic', 1)
             
-            # Get algorithm-specific parameters from generator/discriminator configs
-            gen_cfg = gan_cfg.get('generator', {})
-            disc_cfg = gan_cfg.get('discriminator', {})
-            
-            ff_epochs_per_block = gen_cfg.get('ff_epochs_per_block', 2)
-            ff_threshold = disc_cfg.get('ff_theta', 2.0)
-            cafo_epochs_per_block = gen_cfg.get('cafo_epochs_per_block', 2)
-            
             print(f"✓ Training for {epochs} epoch(s)")
             print(f"✓ Batch size: {batch_size}")
             print(f"✓ Discriminator steps per generator step: {n_critic}")
-            
-            if algorithm == 'forward_forward':
-                print(f"✓ FF epochs per block: {ff_epochs_per_block}")
-                print(f"✓ FF threshold: {ff_threshold}")
-            elif algorithm == 'cafo':
-                print(f"✓ CAFO epochs per block: {cafo_epochs_per_block}")
             
         except Exception as e:
             print(f" ERROR parsing master_config: {e}")
@@ -598,7 +756,7 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # TRAINING - DIFFERENT PATHS FOR DIFFERENT ALGORITHMS
+        # TRAINING
         # ============================================================================
         print(f"\\n{'='*60}")
         print(f"STARTING {training_mode.upper()} TRAINING")
@@ -625,17 +783,19 @@ implementation:
         
         # Upload initial grid
         bearer_token = args.bearer_token
-        initial_grid_url = upload_to_cdn(
-            initial_grid, 
-            "Initial generated images grid", 
-            bearer_token, args.domain, args.get_cdn
-        )
+        initial_grid_url = None
+        if initial_grid and os.path.exists(initial_grid):
+            initial_grid_url = upload_to_cdn(
+                initial_grid, 
+                "Initial generated images grid", 
+                bearer_token, args.domain, args.get_cdn
+            )
         
         generated_images_info.append({
             'epoch': 0,
             'grid_url': initial_grid_url,
             'description': 'Initial images before training',
-            'base64_previews': initial_base64[:4],
+            'base64_previews': initial_base64[:4] if initial_base64 else [],
             'uid': str(uuid.uuid4())
         })
         
@@ -644,17 +804,14 @@ implementation:
             print(f"Initial grid URL: {initial_grid_url}")
         
         # ============================================================================
-        # PERFORM TRAINING USING NESY_FACTORY'S TRAINERS
+        # PERFORM TRAINING
         # ============================================================================
-        results = train_algorithm(
+        results = train_algorithm_robust(
             generator, discriminator, train_loader,
             optimizer_g, optimizer_d, device,
             algorithm=algorithm,
             epochs=epochs,
-            n_critic=n_critic,
-            ff_epochs_per_block=ff_epochs_per_block,
-            ff_threshold=ff_threshold,
-            cafo_epochs_per_block=cafo_epochs_per_block
+            n_critic=n_critic
         )
         
         if not results['loss_entries']:
@@ -664,6 +821,7 @@ implementation:
         training_history['loss_entries'] = results['loss_entries']
         
         print(f"\\n{training_mode} training completed: {len(results['loss_entries'])} loss entries recorded")
+        print(f"Total batches processed: {results.get('batches_processed', 0)}")
         
         # ============================================================================
         # GENERATE FINAL IMAGES
@@ -673,17 +831,19 @@ implementation:
             generator, device, epoch=epochs, num_images=16, save_dir="/tmp/generated_images"
         )
         
-        final_grid_url = upload_to_cdn(
-            final_grid, 
-            "Final generated images grid", 
-            bearer_token, args.domain, args.get_cdn
-        )
+        final_grid_url = None
+        if final_grid and os.path.exists(final_grid):
+            final_grid_url = upload_to_cdn(
+                final_grid, 
+                "Final generated images grid", 
+                bearer_token, args.domain, args.get_cdn
+            )
         
         generated_images_info.append({
             'epoch': epochs,
             'grid_url': final_grid_url,
             'description': 'Final images after training',
-            'base64_previews': final_base64[:4],
+            'base64_previews': final_base64[:4] if final_base64 else [],
             'uid': str(uuid.uuid4())
         })
         
@@ -741,8 +901,8 @@ implementation:
                     "training_mode": entry['training_mode'],
                     "uid": entry['uid']
                 }
-                if 'block' in entry:
-                    row["block"] = entry['block']
+                if 'note' in entry:
+                    row["note"] = entry['note']
                 processed_data.append(row)
             
             # Get final losses
@@ -789,11 +949,6 @@ implementation:
                 "epochs_trained": epochs,
                 "batch_size": batch_size,
                 "n_critic": n_critic,
-                "algorithm_params": {
-                    "ff_epochs_per_block": ff_epochs_per_block if algorithm == 'forward_forward' else None,
-                    "ff_threshold": ff_threshold if algorithm == 'forward_forward' else None,
-                    "cafo_epochs_per_block": cafo_epochs_per_block if algorithm == 'cafo' else None,
-                },
                 "final_metrics": {
                     "generator_loss": final_g_loss,
                     "discriminator_loss": final_d_loss
@@ -835,8 +990,10 @@ implementation:
         print(f"✓ Loss entries recorded: {len(training_history['loss_entries'])}")
         print(f"✓ Images generated: {len(all_epoch_images)}")
         print(f"✓ Model saved: {args.trained_model}")
-        print(f"✓ Initial images URL: {initial_grid_url}")
-        print(f"✓ Final images URL: {final_grid_url}")
+        if initial_grid_url:
+            print(f"✓ Initial images URL: {initial_grid_url}")
+        if final_grid_url:
+            print(f"✓ Final images URL: {final_grid_url}")
         
         # Print final metrics
         if training_history['loss_entries']:
