@@ -1,4 +1,4 @@
-name: Train v16
+name: Train v17
 description: Trains DCGAN using nesy_factory with Traditional, CAFO, or Forward-Forward methods
 inputs:
   - name: data_path
@@ -223,7 +223,7 @@ implementation:
             }
         
         def train_forward_forward_real(generator, discriminator, train_loader, device, epochs_per_block=2, threshold=2.0):
-         
+        
             print(f"Starting real Forward-Forward training")
             print(f"Threshold: {threshold}")
             
@@ -234,16 +234,43 @@ implementation:
             # Put discriminator in train mode
             discriminator.train()
             
-            # Train 3 blocks (simplified)
-            print(f"\\nTraining Discriminator with Forward-Forward...")
+            # Get the convolutional layers from discriminator's conv_layers Sequential
+            conv_layers = []
+            if hasattr(discriminator, 'conv_layers'):
+                # Extract Conv2d layers from the Sequential module
+                for module in discriminator.conv_layers:
+                    if isinstance(module, torch.nn.Conv2d):
+                        conv_layers.append(module)
+                    elif isinstance(module, torch.nn.Sequential):
+                        # If there are nested Sequential modules, extract from them
+                        for submodule in module:
+                            if isinstance(submodule, torch.nn.Conv2d):
+                                conv_layers.append(submodule)
             
-            for block in range(3):
-                print(f"  Discriminator Block {block + 1}/3")
+            print(f"Found {len(conv_layers)} convolutional layers in discriminator")
+            
+            if len(conv_layers) == 0:
+                print(" No convolutional layers found for FF training, using simplified approach")
+                # Fall back to training the whole discriminator
+                conv_layers = [discriminator]
+            
+            # Train blocks (up to 3 or number of conv layers)
+            num_blocks = min(3, len(conv_layers))
+            print(f"\\nTraining Discriminator with Forward-Forward ({num_blocks} blocks)...")
+            
+            for block_idx in range(num_blocks):
+                print(f"  Discriminator Block {block_idx + 1}/{num_blocks}")
                 
                 block_losses = []
+                layer = conv_layers[block_idx]
+                
+                # Create optimizer for this layer
+                layer_optimizer = optim.Adam(layer.parameters(), lr=0.001)
                 
                 for epoch in range(epochs_per_block):
                     epoch_loss = 0.0
+                    epoch_pos_goodness = 0.0
+                    epoch_neg_goodness = 0.0
                     batch_count = 0
                     
                     for batch_data in train_loader:
@@ -262,71 +289,109 @@ implementation:
                             z = torch.randn(batch_size, generator.z_dim, device=device)
                             fake_images = generator(z)
                         
-                        # Calculate features for real and fake images
-                        with torch.no_grad():
-                            # Extract features from discriminator's conv layers
-                            real_features = real_images
-                            fake_features = fake_images
-                            
-                            # Pass through conv layers
-                            for layer in discriminator.conv_layers:
-                                real_features = layer(real_features)
-                                fake_features = layer(fake_features)
-                                if isinstance(layer, torch.nn.Conv2d):
-                                    # Calculate goodness at this conv layer
-                                    real_goodness = (real_features ** 2).mean(dim=[1, 2, 3])
-                                    fake_goodness = (fake_features ** 2).mean(dim=[1, 2, 3])
+                        # Prepare inputs
+                        pos_input = real_images
+                        neg_input = fake_images.detach()  # Detach from generator
+                        
+                        # For layers beyond the first, we need to process through previous layers
+                        if block_idx > 0:
+                            with torch.no_grad():
+                                for i in range(block_idx):
+                                    prev_layer = conv_layers[i]
+                                    pos_input = prev_layer(pos_input)
+                                    neg_input = prev_layer(neg_input)
+                        
+                        # Zero gradients
+                        layer_optimizer.zero_grad()
+                        
+                        # Forward pass for positive samples
+                        pos_output = layer(pos_input)
+                        
+                        # Calculate goodness (sum of squares)
+                        if pos_output.dim() == 4:  # Conv2d output
+                            pos_goodness = (pos_output ** 2).mean(dim=[1, 2, 3])
+                        elif pos_output.dim() == 2:  # Linear output
+                            pos_goodness = (pos_output ** 2).mean(dim=1)
+                        else:
+                            pos_goodness = (pos_output ** 2).mean()
+                        
+                        # Forward pass for negative samples
+                        neg_output = layer(neg_input)
+                        
+                        # Calculate goodness for negative samples
+                        if neg_output.dim() == 4:
+                            neg_goodness = (neg_output ** 2).mean(dim=[1, 2, 3])
+                        elif neg_output.dim() == 2:
+                            neg_goodness = (neg_output ** 2).mean(dim=1)
+                        else:
+                            neg_goodness = (neg_output ** 2).mean()
                         
                         # Forward-Forward loss
-                        pos_loss = torch.log(1 + torch.exp(-(real_goodness - threshold)))
-                        neg_loss = torch.log(1 + torch.exp(fake_goodness - threshold))
-                        loss = (pos_loss + neg_loss).mean()
+                        pos_loss = torch.log(1 + torch.exp(-(pos_goodness - threshold))).mean()
+                        neg_loss = torch.log(1 + torch.exp(neg_goodness - threshold)).mean()
+                        loss = (pos_loss + neg_loss) / 2
                         
-                        # Update discriminator
-                        optimizer_d.zero_grad()
-                        loss.backward()
-                        optimizer_d.step()
+                        # Backward pass - check if loss requires grad
+                        if loss.requires_grad:
+                            loss.backward()
+                            layer_optimizer.step()
                         
                         epoch_loss += loss.item()
+                        epoch_pos_goodness += pos_goodness.mean().item()
+                        epoch_neg_goodness += neg_goodness.mean().item()
                         batch_count += 1
                     
-                    avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
-                    block_losses.append(avg_loss)
-                    
-                    # Calculate success rates
-                    real_goodness_val = real_goodness.mean().item() if batch_count > 0 else 0.0
-                    fake_goodness_val = fake_goodness.mean().item() if batch_count > 0 else 0.0
-                    pos_above = (real_goodness > threshold).float().mean().item() if batch_count > 0 else 0.0
-                    neg_below = (fake_goodness < threshold).float().mean().item() if batch_count > 0 else 0.0
-                    
-                    # Create loss entry
-                    loss_entry = {
-                        'block': block + 1,
-                        'epoch': epoch + 1,
-                        'loss': avg_loss,
-                        'component': 'discriminator',
-                        'training_mode': 'forward_forward',
-                        'uid': str(uuid.uuid4()),
-                        'real_goodness': real_goodness_val,
-                        'fake_goodness': fake_goodness_val
-                    }
-                    loss_entries.append(loss_entry)
-                    
-                    print(f"    Epoch {epoch + 1}: Loss = {avg_loss:.6f}, "
-                          f"RealG = {real_goodness_val:.3f}, FakeG = {fake_goodness_val:.3f}, "
-                          f"Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
+                    if batch_count > 0:
+                        avg_loss = epoch_loss / batch_count
+                        avg_pos_goodness = epoch_pos_goodness / batch_count
+                        avg_neg_goodness = epoch_neg_goodness / batch_count
+                        block_losses.append(avg_loss)
+                        
+                        # Calculate success rates
+                        pos_above = (pos_goodness > threshold).float().mean().item() if batch_count > 0 else 0.0
+                        neg_below = (neg_goodness < threshold).float().mean().item() if batch_count > 0 else 0.0
+                        
+                        # Create loss entry
+                        loss_entry = {
+                            'block': block_idx + 1,
+                            'epoch': epoch + 1,
+                            'loss': avg_loss,
+                            'component': 'discriminator',
+                            'training_mode': 'forward_forward',
+                            'uid': str(uuid.uuid4()),
+                            'pos_goodness': avg_pos_goodness,
+                            'neg_goodness': avg_neg_goodness,
+                            'pos_above_threshold': pos_above,
+                            'neg_below_threshold': neg_below
+                        }
+                        loss_entries.append(loss_entry)
+                        
+                        print(f"    Epoch {epoch + 1}: Loss = {avg_loss:.6f}, "
+                              f"PosG = {avg_pos_goodness:.3f}, NegG = {avg_neg_goodness:.3f}, "
+                              f"Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
+                    else:
+                        print(f"    Epoch {epoch + 1}: No batches processed!")
                 
-                block_results.append({
-                    'component': 'discriminator',
-                    'block': block + 1,
-                    'losses': block_losses,
-                    'final_loss': block_losses[-1] if block_losses else 0.0,
-                    'ff_threshold': threshold
-                })
+                if block_losses:
+                    block_results.append({
+                        'component': 'discriminator',
+                        'block': block_idx + 1,
+                        'losses': block_losses,
+                        'final_loss': block_losses[-1],
+                        'ff_threshold': threshold
+                    })
+                else:
+                    block_results.append({
+                        'component': 'discriminator',
+                        'block': block_idx + 1,
+                        'losses': [],
+                        'final_loss': 0.0,
+                        'ff_threshold': threshold
+                    })
             
             return {
                 'block_results': block_results,
-                'total_blocks': 3,
+                'total_blocks': len(block_results),
                 'loss_entries': loss_entries
             }
         
@@ -448,7 +513,7 @@ implementation:
         # Helper function for CDN upload
         # ============================================================================
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
-           
+         
             if not os.path.exists(file_path):
                 print(f"   Warning: File not found: {file_path}")
                 return None
@@ -506,7 +571,7 @@ implementation:
         # Helper function to save and encode images
         # ============================================================================
         def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
-            
+         
             os.makedirs(save_dir, exist_ok=True)
             
             # Generate images
@@ -940,7 +1005,6 @@ implementation:
             print(f"✓ Generated images URLs saved to: {args.generated_images_urls}")
             
             # Training images summary
-                        # Training images summary
             os.makedirs(os.path.dirname(args.training_images_summary), exist_ok=True)
             summary = {
                 "training_completed": True,
