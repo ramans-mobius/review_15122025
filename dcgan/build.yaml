@@ -1,4 +1,4 @@
-name: Build Model v4
+name: Build Model v5
 description: Builds DCGAN model using single master config
 inputs:
   - name: master_config
@@ -39,13 +39,27 @@ implementation:
         from pathlib import Path
         
         def get_file_size(file_path):
-          
+            
             size_bytes = os.path.getsize(file_path)
             for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
                 if size_bytes < 1024.0:
                     return f"{size_bytes:.2f} {unit}"
                 size_bytes /= 1024.0
             return f"{size_bytes:.2f} PB"
+        
+        def deep_merge(base_dict, override_dict):
+           
+            result = base_dict.copy()
+            
+            for key, value in override_dict.items():
+                if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                    # Recursively merge nested dictionaries
+                    result[key] = deep_merge(result[key], value)
+                else:
+                    # Override the value
+                    result[key] = value
+            
+            return result
         
         # Import the module dynamically to handle any import issues
         print("Importing nesy_factory.GANs.dcgan...")
@@ -84,89 +98,124 @@ implementation:
         
         load_from_cdn = args.load_from_cdn.lower() == 'true'
         
-        # MINIMAL DCGAN CONFIG FOR TESTING
+        # BARE MINIMUM DCGAN CONFIG FOR FAST TESTING
         MINIMAL_DCGAN_CONFIG = {
             "model_type": "dcgan",
             "dataset": {
-                "image_size": 64,
-                "channels": 3,
+                "resize_size": 64,
                 "name": "minimal_test"
             },
             "gan": {
                 "z_dim": 100,
                 "training": {
                     "algorithm": "standard",
-                    "batch_size": 64,
-                    "epochs": 10,
-                    "sample_interval": 100
+                    "batch_size": 32,
+                    "epochs": 5,
+                    "sample_interval": 50
                 },
                 "generator": {
-                    "hidden_dims": [256, 128, 64],
+                    "hidden_dims": [64, 32],
+                    "image_channels": 3,
+                    "use_batchnorm": True,
+                    "activation": "relu",
+                    "output_activation": "tanh",
                     "learning_rate": 0.0002,
-                    "loss_type": "standard",
-                    "ff_epochs_per_block": 2,
-                    "cafo_epochs_per_block": 2
+                    "loss_type": "bce_with_logits",
+                    
+                    # DCGAN-specific parameters
+                    "kernel_sizes": [4, 4, 4],  # One for each layer: [hidden_dims[0], hidden_dims[1], image_channels]
+                    "strides": [1, 2, 2],        # Based on dcgan.py defaults
+                    "paddings": [0, 1, 1],       # Based on dcgan.py defaults
+                    "output_paddings": [0, 0, 0], # Based on dcgan.py defaults
+                    
+                    # FF/CAFO settings
+                    "use_forward_forward": False,
+                    "ff_epochs_per_block": 1,
+                    "ff_theta": 2.0,
+                    "use_cafo": False,
+                    "cafo_epochs_per_block": 1
                 },
                 "discriminator": {
-                    "hidden_dims": [64, 128, 256],
+                    "hidden_dims": [32, 64],
+                    "image_channels": 3,
+                    "use_batchnorm": False,
+                    "activation": "leaky_relu",
+                    "output_activation": "sigmoid",
                     "learning_rate": 0.0002,
-                    "loss_type": "standard",
-                    "dropout": 0.3,
+                    "loss_type": "bce_with_logits",
+                    "dropout": 0.2,
                     "label_smoothing": 0.0,
-                    "ff_epochs_per_block": 2,
-                    "cafo_epochs_per_block": 2
+                    "n_critic": 1,
+                    
+                    # DCGAN-specific parameters
+                    "kernel_sizes": [4, 4],      # One for each hidden_dim
+                    "strides": [2, 1],           # Based on dcgan.py defaults
+                    "paddings": [1, 0],          # Based on dcgan.py defaults
+                    "output_dim": 1,
+                    
+                    # FF/CAFO settings
+                    "use_forward_forward": False,
+                    "ff_epochs_per_block": 1,
+                    "ff_theta": 2.0,
+                    "use_cafo": False,
+                    "cafo_epochs_per_block": 1
                 }
             },
-            "model_source": "minimal_dcgan_config"
+            "model_source": "bare_minimum_dcgan_test_config"
         }
         
-        # Parse or use minimal config
+        # Parse and merge config
         if args.master_config and args.master_config.strip():
             try:
-                config = json.loads(args.master_config)
+                provided_config = json.loads(args.master_config)
                 print("Using provided master config")
-                config['model_source'] = 'user_provided'
+                
+                # Merge provided config with minimal defaults
+                config = deep_merge(MINIMAL_DCGAN_CONFIG, provided_config)
+                config['model_source'] = 'user_provided_merged'
+                
+                # Log what was overridden
+                print("Config merging summary:")
+                if 'dataset' in provided_config:
+                    print("  ✓ Dataset config overridden")
+                if 'gan' in provided_config:
+                    print("  ✓ GAN config overridden")
+                    if 'generator' in provided_config.get('gan', {}):
+                        print("    - Generator config overridden")
+                    if 'discriminator' in provided_config.get('gan', {}):
+                        print("    - Discriminator config overridden")
+                    if 'training' in provided_config.get('gan', {}):
+                        print("    - Training config overridden")
+                
             except json.JSONDecodeError as e:
                 print(f"ERROR: Invalid JSON in master_config: {e}")
-                print("Falling back to minimal DCGAN config")
+                print("Falling back to bare minimum DCGAN config")
                 config = MINIMAL_DCGAN_CONFIG
         else:
             config = MINIMAL_DCGAN_CONFIG
-            print("Using minimal DCGAN config for quick testing")
-        
-        # Validate config has required sections
-        if 'gan' not in config:
-            print("WARNING: 'gan' section missing in config, using minimal defaults")
-            config['gan'] = MINIMAL_DCGAN_CONFIG['gan']
-        
-        if 'dataset' not in config:
-            print("WARNING: 'dataset' section missing in config, using minimal defaults")
-            config['dataset'] = MINIMAL_DCGAN_CONFIG['dataset']
+            print("Using bare minimum DCGAN config for fast testing")
         
         # Get config sections
         gan_cfg = config['gan']
         dataset_cfg = config['dataset']
-        
-        # Set defaults if missing
-        if 'training' not in gan_cfg:
-            gan_cfg['training'] = {'algorithm': 'standard'}
-        
-        if 'generator' not in gan_cfg:
-            gan_cfg['generator'] = MINIMAL_DCGAN_CONFIG['gan']['generator']
-        
-        if 'discriminator' not in gan_cfg:
-            gan_cfg['discriminator'] = MINIMAL_DCGAN_CONFIG['gan']['discriminator']
+        gen_cfg = gan_cfg['generator']
+        disc_cfg = gan_cfg['discriminator']
         
         # Print config summary
-        print(f"\\nCONFIG SUMMARY:")
+        print(f"\\nFINAL CONFIG SUMMARY:")
         print(f"  Model source: {config.get('model_source', 'unknown')}")
         print(f"  Model type: {config.get('model_type', 'dcgan')}")
-        print(f"  Image size: {dataset_cfg.get('image_size', 64)}")
-        print(f"  Channels: {dataset_cfg.get('channels', 3)}")
-        print(f"  z_dim: {gan_cfg.get('z_dim', 100)}")
+        print(f"  Image size: {dataset_cfg.get('resize_size', 64)}")
+        print(f"  Generator:")
+        print(f"    - z_dim: {gen_cfg.get('z_dim', 100)}")
+        print(f"    - hidden_dims: {gen_cfg.get('hidden_dims', [64, 32])}")
+        print(f"    - image_channels: {gen_cfg.get('image_channels', 3)}")
+        print(f"    - layers: {len(gen_cfg.get('hidden_dims', [64, 32])) + 1}")
+        print(f"  Discriminator:")
+        print(f"    - hidden_dims: {disc_cfg.get('hidden_dims', [32, 64])}")
+        print(f"    - image_channels: {disc_cfg.get('image_channels', 3)}")
+        print(f"    - layers: {len(disc_cfg.get('hidden_dims', [32, 64]))}")
         print(f"  Algorithm: {gan_cfg['training'].get('algorithm', 'standard')}")
-        print(f"  Generator layers: {len(gan_cfg['generator'].get('hidden_dims', [256, 128, 64]))}")
-        print(f"  Discriminator layers: {len(gan_cfg['discriminator'].get('hidden_dims', [64, 128, 256]))}")
         
         # Create output directories
         os.makedirs(os.path.dirname(args.model_out), exist_ok=True)
@@ -222,7 +271,7 @@ implementation:
                 
         else:
             # MODE 2: Build new DCGAN model using config
-            print(f"\\nBuilding new DCGAN model...")
+            print(f"\\nBuilding DCGAN model...")
             
             try:
                 # Set algorithm-specific flags based on training.algorithm
@@ -234,69 +283,80 @@ implementation:
                 print(f"  use_forward_forward: {use_ff}")
                 print(f"  use_cafo: {use_cafo}")
                 
-                # Get generator and discriminator configs
-                gen_cfg = gan_cfg['generator']
-                disc_cfg = gan_cfg['discriminator']
+                # Update generator config with algorithm flags
+                gen_cfg['use_forward_forward'] = use_ff
+                gen_cfg['use_cafo'] = use_cafo
+                
+                # Update discriminator config with algorithm flags
+                disc_cfg['use_forward_forward'] = use_ff
+                disc_cfg['use_cafo'] = use_cafo
                 
                 # Convert config to DCGAN library format
                 dcgan_config = {
                     'dataset': {
-                        'resize_size': dataset_cfg.get('image_size', 64)
+                        'resize_size': dataset_cfg.get('resize_size', 64)
                     },
                     'generator': {
-                        'z_dim': gan_cfg.get('z_dim', 100),
-                        'hidden_dims': gen_cfg.get('hidden_dims', [256, 128, 64]),
-                        'image_channels': dataset_cfg.get('channels', 3),
-                        'use_batchnorm': True,
-                        'activation': 'relu',
-                        'output_activation': 'tanh',
+                        'z_dim': gen_cfg.get('z_dim', 100),
+                        'hidden_dims': gen_cfg.get('hidden_dims', [64, 32]),
+                        'image_channels': gen_cfg.get('image_channels', 3),
+                        'use_batchnorm': gen_cfg.get('use_batchnorm', True),
+                        'activation': gen_cfg.get('activation', 'relu'),
+                        'output_activation': gen_cfg.get('output_activation', 'tanh'),
                         'learning_rate': gen_cfg.get('learning_rate', 0.0002),
-                        'loss_type': gen_cfg.get('loss_type', 'standard'),
+                        'loss_type': gen_cfg.get('loss_type', 'bce_with_logits'),
                         
-                        # Layer configurations
-                        'kernel_sizes': [4] * (len(gen_cfg.get('hidden_dims', [256, 128, 64])) + 1),
-                        'strides': [1] + [2] * len(gen_cfg.get('hidden_dims', [256, 128, 64])),
-                        'paddings': [0] * (len(gen_cfg.get('hidden_dims', [256, 128, 64])) + 1),
-                        'output_paddings': [0] * (len(gen_cfg.get('hidden_dims', [256, 128, 64])) + 1),
+                        # DCGAN-specific parameters
+                        'kernel_sizes': gen_cfg.get('kernel_sizes', [4, 4, 4]),
+                        'strides': gen_cfg.get('strides', [1, 2, 2]),
+                        'paddings': gen_cfg.get('paddings', [0, 1, 1]),
+                        'output_paddings': gen_cfg.get('output_paddings', [0, 0, 0]),
                         
-                        # FF/CAFO settings - set based on algorithm
+                        # FF/CAFO settings
                         'use_forward_forward': use_ff,
                         'use_cafo': use_cafo,
-                        'ff_epochs_per_block': gen_cfg.get('ff_epochs_per_block', 2),
-                        'cafo_epochs_per_block': gen_cfg.get('cafo_epochs_per_block', 2)
+                        'ff_epochs_per_block': gen_cfg.get('ff_epochs_per_block', 1),
+                        'cafo_epochs_per_block': gen_cfg.get('cafo_epochs_per_block', 1)
                     },
                     'discriminator': {
-                        'hidden_dims': disc_cfg.get('hidden_dims', [64, 128, 256]),
-                        'image_channels': dataset_cfg.get('channels', 3),
-                        'use_batchnorm': False,
-                        'activation': 'leaky_relu',
-                        'output_activation': 'sigmoid',
+                        'hidden_dims': disc_cfg.get('hidden_dims', [32, 64]),
+                        'image_channels': disc_cfg.get('image_channels', 3),
+                        'use_batchnorm': disc_cfg.get('use_batchnorm', False),
+                        'activation': disc_cfg.get('activation', 'leaky_relu'),
+                        'output_activation': disc_cfg.get('output_activation', 'sigmoid'),
                         'learning_rate': disc_cfg.get('learning_rate', 0.0002),
-                        'loss_type': disc_cfg.get('loss_type', 'standard'),
-                        'dropout': disc_cfg.get('dropout', 0.3),
+                        'loss_type': disc_cfg.get('loss_type', 'bce_with_logits'),
+                        'dropout': disc_cfg.get('dropout', 0.2),
                         'label_smoothing': disc_cfg.get('label_smoothing', 0.0),
-                        'n_critic': 1,
+                        'n_critic': disc_cfg.get('n_critic', 1),
                         
-                        # Layer configurations
-                        'kernel_sizes': [4] * len(disc_cfg.get('hidden_dims', [64, 128, 256])),
-                        'strides': [2] * (len(disc_cfg.get('hidden_dims', [64, 128, 256])) - 1) + [1],
-                        'paddings': [1] * (len(disc_cfg.get('hidden_dims', [64, 128, 256])) - 1) + [0],
-                        'output_dim': 1,
+                        # DCGAN-specific parameters
+                        'kernel_sizes': disc_cfg.get('kernel_sizes', [4, 4]),
+                        'strides': disc_cfg.get('strides', [2, 1]),
+                        'paddings': disc_cfg.get('paddings', [1, 0]),
+                        'output_dim': disc_cfg.get('output_dim', 1),
                         
-                        # FF/CAFO settings - set based on algorithm
+                        # FF/CAFO settings
                         'use_forward_forward': use_ff,
                         'use_cafo': use_cafo,
-                        'ff_epochs_per_block': disc_cfg.get('ff_epochs_per_block', 2),
-                        'cafo_epochs_per_block': disc_cfg.get('cafo_epochs_per_block', 2)
+                        'ff_epochs_per_block': disc_cfg.get('ff_epochs_per_block', 1),
+                        'cafo_epochs_per_block': disc_cfg.get('cafo_epochs_per_block', 1)
                     }
                 }
                 
-                print(f"\\n  DCGAN CONFIG SUMMARY:")
+                print(f"\\n  DCGAN CONFIG DETAILS:")
                 print(f"  Image Size: {dcgan_config['dataset']['resize_size']}x{dcgan_config['dataset']['resize_size']}")
-                print(f"  Channels: {dataset_cfg.get('channels', 3)}")
-                print(f"  Generator z_dim: {dcgan_config['generator']['z_dim']}")
-                print(f"  Generator layers: {len(dcgan_config['generator']['hidden_dims'])}")
-                print(f"  Discriminator layers: {len(dcgan_config['discriminator']['hidden_dims'])}")
+                print(f"  Generator:")
+                print(f"    - z_dim: {dcgan_config['generator']['z_dim']}")
+                print(f"    - layers: {len(dcgan_config['generator']['hidden_dims']) + 1}")
+                print(f"    - kernel_sizes: {dcgan_config['generator']['kernel_sizes']}")
+                print(f"    - strides: {dcgan_config['generator']['strides']}")
+                print(f"    - paddings: {dcgan_config['generator']['paddings']}")
+                print(f"  Discriminator:")
+                print(f"    - layers: {len(dcgan_config['discriminator']['hidden_dims'])}")
+                print(f"    - kernel_sizes: {dcgan_config['discriminator']['kernel_sizes']}")
+                print(f"    - strides: {dcgan_config['discriminator']['strides']}")
+                print(f"    - paddings: {dcgan_config['discriminator']['paddings']}")
                 
                 # Create DCGAN models using the imported function
                 generator, discriminator, full_config = create_dcgan(dcgan_config)
@@ -318,7 +378,9 @@ implementation:
                     'z_dim': generator.z_dim,
                     'image_channels': generator.image_channels,
                     'image_size': generator.image_size,
-                    'config_source': config.get('model_source', 'unknown')
+                    'config_source': config.get('model_source', 'unknown'),
+                    'generator_layers': len(dcgan_config['generator']['hidden_dims']) + 1,
+                    'discriminator_layers': len(dcgan_config['discriminator']['hidden_dims'])
                 }
                 
                 # Save both models in a checkpoint
@@ -329,7 +391,7 @@ implementation:
                     'model_info': model_info,
                     'model_type': 'dcgan',
                     'training_algorithm': algorithm,
-                    'master_config': config  # Keep original master config
+                    'master_config': config
                 }
                 
                 torch.save(checkpoint, args.model_out)
