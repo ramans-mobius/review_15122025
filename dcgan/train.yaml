@@ -1,4 +1,4 @@
-name: Train DCGAN v28
+name: Train DCGAN v29
 description: Trains DCGAN using block-by-block training similar to LSTM approach
 inputs:
   - name: data_path
@@ -88,7 +88,7 @@ implementation:
         # ============================================================================
         
         class DCGANGeneratorBlock(nn.Module):
-            """A single generator block for block-by-block training."""
+          
             
             def __init__(self, layer_type, layer_config, block_idx, total_blocks):
                 super().__init__()
@@ -128,21 +128,21 @@ implementation:
                 self._init_weights()
             
             def _init_weights(self):
-                """Initialize layer weights."""
+              
                 if isinstance(self.layer, (nn.Linear, nn.ConvTranspose2d)):
                     nn.init.normal_(self.layer.weight, 0.0, 0.02)
                     if hasattr(self.layer, 'bias') and self.layer.bias is not None:
                         nn.init.constant_(self.layer.bias, 0.0)
             
             def forward(self, x):
-                """Forward pass through the block."""
+               
                 x = self.layer(x)
                 x = self.bn(x)
                 x = self.act(x)
                 return x
             
             def compute_goodness(self, x):
-                """Compute goodness score for Forward-Forward training."""
+              
                 if x.numel() == 0:
                     return torch.zeros(x.size(0), device=x.device)
                 
@@ -153,7 +153,7 @@ implementation:
                     return x ** 2
             
             def forward_forward_loss(self, pos_goodness, neg_goodness):
-                """Compute Forward-Forward loss."""
+               
                 if pos_goodness.numel() == 0 or neg_goodness.numel() == 0:
                     return torch.tensor(0.0, device=pos_goodness.device)
                 
@@ -162,7 +162,7 @@ implementation:
                 return (pos_term + neg_term).mean()
         
         class DCGANDiscriminatorBlock(nn.Module):
-            """A single discriminator block for block-by-block training."""
+          
             
             def __init__(self, layer_type, layer_config, block_idx, total_blocks):
                 super().__init__()
@@ -199,14 +199,14 @@ implementation:
                 self._init_weights()
             
             def _init_weights(self):
-                """Initialize layer weights."""
+              
                 if isinstance(self.layer, (nn.Linear, nn.Conv2d)):
                     nn.init.normal_(self.layer.weight, 0.0, 0.02)
                     if hasattr(self.layer, 'bias') and self.layer.bias is not None:
                         nn.init.constant_(self.layer.bias, 0.0)
             
             def forward(self, x):
-                """Forward pass through the block."""
+            
                 x = self.layer(x)
                 x = self.bn(x)
                 x = self.act(x)
@@ -214,7 +214,7 @@ implementation:
                 return x
             
             def compute_goodness(self, x):
-                """Compute goodness score for Forward-Forward training."""
+              
                 if x.numel() == 0:
                     return torch.zeros(x.size(0), device=x.device)
                 
@@ -225,7 +225,7 @@ implementation:
                     return x ** 2
             
             def forward_forward_loss(self, pos_goodness, neg_goodness):
-                """Compute Forward-Forward loss."""
+               
                 if pos_goodness.numel() == 0 or neg_goodness.numel() == 0:
                     return torch.tensor(0.0, device=pos_goodness.device)
                 
@@ -238,7 +238,7 @@ implementation:
         # ============================================================================
         
         def calculate_generator_dimensions(config):
-            """Calculate generator dimensions for proper reshaping."""
+          
             gen_config = config['generator']
             dataset_config = config['dataset']
             
@@ -287,7 +287,7 @@ implementation:
             }
         
         def verify_generator_dimensions(generator, dim_info):
-            """Verify generator dimensions match calculated ones."""
+         
             print(f"Verifying generator dimensions:")
             print(f"  Expected initial_size: {dim_info['initial_size']}")
             print(f"  Expected fc_output_size: {dim_info['fc_output_size']}")
@@ -326,7 +326,7 @@ implementation:
         # ============================================================================
         
         def train_forward_forward_blocks(model, train_loader, epochs_per_block, threshold, lr, device, component='discriminator'):
-            """Train model blocks using Forward-Forward method."""
+           
             print(f"Training {component} with Forward-Forward (block-by-block)...")
             
             # Extract trainable blocks
@@ -458,7 +458,7 @@ implementation:
             }
         
         def train_cafo_blocks(model, train_loader, epochs_per_block, lr, device, component='discriminator'):
-            """Train model blocks using CAFO method."""
+        
             print(f"Training {component} with CAFO (block-by-block)...")
             
             # Extract trainable blocks
@@ -645,7 +645,7 @@ implementation:
         train_loader = DataLoader(data_wrapper.dataset, batch_size=batch_size, shuffle=True)
         
         # Dimensional verification
-        print("\n" + "="*60)
+        print("\\n" + "="*60)
         print("DIMENSIONAL VERIFICATION")
         print("="*60)
         
@@ -674,7 +674,7 @@ implementation:
         
         # Training based on algorithm
         if algorithm == 'forward_forward':
-            print(f"\n{'='*60}")
+            print(f"\\n{'='*60}")
             print(f"FORWARD-FORWARD BLOCK TRAINING")
             print(f"{'='*60}")
             
@@ -716,7 +716,7 @@ implementation:
                 training_history['layer_logs'].extend(disc_results['loss_entries'])
             
         elif algorithm == 'cafo':
-            print(f"\n{'='*60}")
+            print(f"\\n{'='*60}")
             print(f"CAFO BLOCK TRAINING")
             print(f"{'='*60}")
             
@@ -756,7 +756,7 @@ implementation:
                 training_history['layer_logs'].extend(disc_results['loss_entries'])
         
         else:  # backprop
-            print(f"\n{'='*60}")
+            print(f"\\n{'='*60}")
             print(f"BACKPROPAGATION TRAINING")
             print(f"{'='*60}")
             
@@ -818,7 +818,7 @@ implementation:
                 # Fallback to manual training
         
         # Generate final images
-        print(f"\n{'='*60}")
+        print(f"\\n{'='*60}")
         print(f"GENERATING FINAL IMAGES")
         print(f"{'='*60}")
         
@@ -900,7 +900,7 @@ implementation:
             print(f"Warning: Could not generate images: {e}")
         
         # Save outputs
-        print(f"\n{'='*60}")
+        print(f"\\n{'='*60}")
         print(f"SAVING OUTPUTS")
         print(f"{'='*60}")
         
@@ -950,7 +950,7 @@ implementation:
             json.dump(summary, f, indent=2)
         print(f"✓ Training summary saved to: {args.training_summary}")
         
-        print(f"\n{'='*80}")
+        print(f"\\n{'='*80}")
         print(f"TRAINING COMPLETE - {algorithm.upper()} MODE")
         print(f"{'='*80}")
         print(f"✓ Training mode: {algorithm}")
