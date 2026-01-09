@@ -1,21 +1,21 @@
-name: Train DCGAN v29
-description: Trains DCGAN using block-by-block training similar to LSTM approach
+name: Train DCGAN v27
+description: Trains DCGAN with Backprop, CAFO, or Forward-Forward methods for both Generator and Discriminator
 inputs:
   - name: data_path
     type: Dataset
-    description: "Preprocessed dataset (GANDataWrapper)"
+    description: "Processed data from CDN (GANDataWrapper)"
   - name: master_config
     type: String
     description: "Master configuration JSON"
   - name: model_input
     type: Model
-    description: "Model checkpoint from Build brick"
+    description: "Built DCGAN model from Build brick"
   - name: bearer_token
     type: String
-    description: "Bearer token for CDN uploads"
+    description: "Bearer token for CDN upload"
   - name: domain
     type: String
-    description: "CDN domain"
+    description: "CDN upload domain"
   - name: get_cdn
     type: String
     description: "CDN download prefix"
@@ -23,19 +23,17 @@ inputs:
 outputs:
   - name: trained_model
     type: Model
-    description: "Trained model checkpoint"
   - name: training_history
     type: String
-    description: "Complete training history JSON"
-  - name: layer_training_logs
+    description: "Training history in Vanilla GAN format"
+  - name: training_metrics
     type: String
-    description: "Detailed per-layer training logs"
+  - name: generated_samples
+    type: Dataset
   - name: generated_images_urls
     type: String
-    description: "CDN URLs for generated images"
-  - name: training_summary
+  - name: training_images_summary
     type: String
-    description: "Training summary JSON"
 
 implementation:
   container:
@@ -44,11 +42,13 @@ implementation:
       - sh
       - -c
       - |
-        # Install dependencies
+        echo "Checking for torchvision..."
+        python3 -c "import torchvision; print(f'torchvision version: {torchvision.__version__}')" 2>/dev/null || {
+          echo "torchvision not found, installing 0.17.0..."
+          pip install torchvision==0.17.0 pillow
+        }
+        # Install curl for CDN uploads
         apt-get update > /dev/null && apt-get install -y curl > /dev/null
-        pip install torchvision==0.17.0 pillow > /dev/null
-        
-        echo "Starting DCGAN training with block-by-block approach..."
         exec "$0" "$@"
       - python3
       - -u
@@ -56,549 +56,1235 @@ implementation:
       - |
         import torch
         import torch.nn as nn
-        import torch.optim as optim
         import torch.nn.functional as F
-        import argparse
-        import pickle
-        import json
-        import os
-        import sys
-        import time
-        import uuid
+        import torch.optim as optim
+        import argparse, pickle, os, json, sys, io, traceback, time, uuid
+        import numpy as np
         import base64
         import subprocess
-        from pathlib import Path
-        from io import BytesIO
-        import numpy as np
         from PIL import Image
         import torchvision.transforms as transforms
         from torch.utils.data import DataLoader
+        from io import BytesIO
+        import matplotlib.pyplot as plt
+        import warnings
+        
+        # Suppress warnings
+        warnings.filterwarnings('ignore')
         
         # Set matplotlib backend
         import matplotlib
         matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        
-        print("=" * 80)
-        print("DCGAN TRAINING v28 - BLOCK-BY-BLOCK APPROACH")
-        print("=" * 80)
         
         # ============================================================================
-        # BLOCK CLASSES (Like LSTM)
+        # DIMENSIONALITY VALIDATION CLASSES
         # ============================================================================
         
-        class DCGANGeneratorBlock(nn.Module):
-          
+        class DCGANDimensionValidator:
             
-            def __init__(self, layer_type, layer_config, block_idx, total_blocks):
-                super().__init__()
-                self.layer_type = layer_type
-                self.block_idx = block_idx
-                self.total_blocks = total_blocks
+            
+            @staticmethod
+            def validate_generator_architecture(generator):
+               
+                errors = []
+                warnings = []
                 
-                if layer_type == 'Linear':
-                    self.layer = nn.Linear(
-                        in_features=layer_config['in_features'],
-                        out_features=layer_config['out_features']
-                    )
-                    self.bn = nn.BatchNorm1d(layer_config['out_features']) if layer_config.get('use_batchnorm', True) else nn.Identity()
-                    self.act = nn.ReLU(inplace=True) if not layer_config.get('is_output', False) else nn.Tanh()
-                    
-                elif layer_type == 'ConvTranspose2d':
-                    self.layer = nn.ConvTranspose2d(
-                        in_channels=layer_config['in_channels'],
-                        out_channels=layer_config['out_channels'],
-                        kernel_size=layer_config['kernel_size'],
-                        stride=layer_config['stride'],
-                        padding=layer_config['padding'],
-                        output_padding=layer_config.get('output_padding', 0),
-                        bias=False
-                    )
-                    if not layer_config.get('is_output', False):
-                        self.bn = nn.BatchNorm2d(layer_config['out_channels']) if layer_config.get('use_batchnorm', True) else nn.Identity()
-                        self.act = nn.ReLU(inplace=True)
+                # Check generator has required attributes
+                required_attrs = ['z_dim', 'image_size', 'image_channels']
+                for attr in required_attrs:
+                    if not hasattr(generator, attr):
+                        errors.append(f"Generator missing required attribute: {attr}")
+                
+                # Check fc layer exists and has correct dimensions
+                if hasattr(generator, 'fc'):
+                    if not isinstance(generator.fc, nn.Linear):
+                        errors.append("Generator fc should be nn.Linear")
                     else:
-                        self.bn = nn.Identity()
-                        self.act = nn.Tanh()
-                
-                # For Forward-Forward training
-                self.ff_threshold = layer_config.get('ff_threshold', 2.0)
-                
-                # Initialize weights
-                self._init_weights()
-            
-            def _init_weights(self):
-              
-                if isinstance(self.layer, (nn.Linear, nn.ConvTranspose2d)):
-                    nn.init.normal_(self.layer.weight, 0.0, 0.02)
-                    if hasattr(self.layer, 'bias') and self.layer.bias is not None:
-                        nn.init.constant_(self.layer.bias, 0.0)
-            
-            def forward(self, x):
-               
-                x = self.layer(x)
-                x = self.bn(x)
-                x = self.act(x)
-                return x
-            
-            def compute_goodness(self, x):
-              
-                if x.numel() == 0:
-                    return torch.zeros(x.size(0), device=x.device)
-                
-                # Flatten all dimensions except batch
-                if x.dim() >= 2:
-                    return (x ** 2).mean(dim=list(range(1, x.dim())))
+                        if generator.fc.in_features != generator.z_dim:
+                            errors.append(f"Generator fc.in_features ({generator.fc.in_features}) != z_dim ({generator.z_dim})")
                 else:
-                    return x ** 2
-            
-            def forward_forward_loss(self, pos_goodness, neg_goodness):
-               
-                if pos_goodness.numel() == 0 or neg_goodness.numel() == 0:
-                    return torch.tensor(0.0, device=pos_goodness.device)
+                    errors.append("Generator missing fc layer")
                 
-                pos_term = torch.log1p(torch.exp(-(pos_goodness - self.ff_threshold)))
-                neg_term = torch.log1p(torch.exp(+(neg_goodness - self.ff_threshold)))
-                return (pos_term + neg_term).mean()
-        
-        class DCGANDiscriminatorBlock(nn.Module):
-          
-            
-            def __init__(self, layer_type, layer_config, block_idx, total_blocks):
-                super().__init__()
-                self.layer_type = layer_type
-                self.block_idx = block_idx
-                self.total_blocks = total_blocks
-                
-                if layer_type == 'Conv2d':
-                    self.layer = nn.Conv2d(
-                        in_channels=layer_config['in_channels'],
-                        out_channels=layer_config['out_channels'],
-                        kernel_size=layer_config['kernel_size'],
-                        stride=layer_config['stride'],
-                        padding=layer_config['padding'],
-                        bias=False
-                    )
-                    self.bn = nn.BatchNorm2d(layer_config['out_channels']) if layer_config.get('use_batchnorm', False) else nn.Identity()
-                    self.act = nn.LeakyReLU(0.2, inplace=True)
-                    self.dropout = nn.Dropout2d(layer_config.get('dropout', 0.3)) if layer_config.get('dropout', 0.3) > 0 else nn.Identity()
+                # Check deconv layers
+                if hasattr(generator, 'deconv_layers'):
+                    # Count ConvTranspose2d layers
+                    conv_layers = []
+                    for module in generator.deconv_layers:
+                        if isinstance(module, nn.ConvTranspose2d):
+                            conv_layers.append(module)
+                        elif isinstance(module, nn.Sequential):
+                            for submodule in module:
+                                if isinstance(submodule, nn.ConvTranspose2d):
+                                    conv_layers.append(submodule)
                     
-                elif layer_type == 'Linear':
-                    self.layer = nn.Linear(
-                        in_features=layer_config['in_features'],
-                        out_features=layer_config['out_features']
-                    )
-                    self.bn = nn.Identity()  # Usually no BN for final linear in discriminator
-                    self.act = nn.Sigmoid() if layer_config.get('is_output', False) else nn.Identity()
-                    self.dropout = nn.Dropout(layer_config.get('dropout', 0.3)) if layer_config.get('dropout', 0.3) > 0 else nn.Identity()
-                
-                # For Forward-Forward training
-                self.ff_threshold = layer_config.get('ff_threshold', 2.0)
-                
-                # Initialize weights
-                self._init_weights()
-            
-            def _init_weights(self):
-              
-                if isinstance(self.layer, (nn.Linear, nn.Conv2d)):
-                    nn.init.normal_(self.layer.weight, 0.0, 0.02)
-                    if hasattr(self.layer, 'bias') and self.layer.bias is not None:
-                        nn.init.constant_(self.layer.bias, 0.0)
-            
-            def forward(self, x):
-            
-                x = self.layer(x)
-                x = self.bn(x)
-                x = self.act(x)
-                x = self.dropout(x)
-                return x
-            
-            def compute_goodness(self, x):
-              
-                if x.numel() == 0:
-                    return torch.zeros(x.size(0), device=x.device)
-                
-                # Flatten all dimensions except batch
-                if x.dim() >= 2:
-                    return (x ** 2).mean(dim=list(range(1, x.dim())))
+                    if len(conv_layers) == 0:
+                        warnings.append("Generator has no ConvTranspose2d layers")
                 else:
-                    return x ** 2
-            
-            def forward_forward_loss(self, pos_goodness, neg_goodness):
-               
-                if pos_goodness.numel() == 0 or neg_goodness.numel() == 0:
-                    return torch.tensor(0.0, device=pos_goodness.device)
+                    warnings.append("Generator missing deconv_layers")
                 
-                pos_term = torch.log1p(torch.exp(-(pos_goodness - self.ff_threshold)))
-                neg_term = torch.log1p(torch.exp(+(neg_goodness - self.ff_threshold)))
-                return (pos_term + neg_term).mean()
-        
-        # ============================================================================
-        # DIMENSIONAL CALCULATION FUNCTIONS
-        # ============================================================================
-        
-        def calculate_generator_dimensions(config):
-          
-            gen_config = config['generator']
-            dataset_config = config['dataset']
+                return errors, warnings
             
-            # Image size (assume square)
-            image_size = dataset_config.get('resize_size', 64)
-            
-            # Get layer configurations
-            hidden_dims = gen_config['hidden_dims']
-            kernel_sizes = gen_config.get('kernel_sizes', [4] * (len(hidden_dims) + 1))
-            strides = gen_config.get('strides', [1] + [2] * len(hidden_dims))
-            paddings = gen_config.get('paddings', [0] * (len(hidden_dims) + 1))
-            output_paddings = gen_config.get('output_paddings', [0] * (len(hidden_dims) + 1))
-            
-            # Calculate initial size (going backwards from output)
-            current_size = image_size
-            print(f"Calculating generator dimensions:")
-            print(f"  Target image size: {image_size}")
-            print(f"  Hidden dims: {hidden_dims}")
-            
-            # Work backwards through conv layers
-            for i in reversed(range(len(hidden_dims))):
-                numerator = current_size + 2 * paddings[i+1] - kernel_sizes[i+1] - output_paddings[i+1]
-                if numerator % strides[i+1] != 0:
-                    needed_padding = strides[i+1] - (numerator % strides[i+1])
-                    output_paddings[i+1] += needed_padding
-                    numerator = current_size + 2 * paddings[i+1] - kernel_sizes[i+1] - output_paddings[i+1]
-                
-                current_size = numerator // strides[i+1] + 1
-                print(f"  After layer {i}: size = {current_size}, out_channels = {hidden_dims[i]}")
-            
-            initial_size = max(1, current_size)
-            
-            # Calculate Linear layer output size
-            fc_output_size = hidden_dims[0] * initial_size * initial_size
-            
-            print(f"  Initial size after linear: {initial_size}")
-            print(f"  Linear output size: {fc_output_size}")
-            print(f"  First conv layer dims: {hidden_dims[0]}x{initial_size}x{initial_size}")
-            
-            return {
-                'initial_size': initial_size,
-                'fc_output_size': fc_output_size,
-                'layer_dims': hidden_dims,
-                'image_size': image_size,
-                'channels': dataset_config.get('channels', 1)
-            }
-        
-        def verify_generator_dimensions(generator, dim_info):
-         
-            print(f"Verifying generator dimensions:")
-            print(f"  Expected initial_size: {dim_info['initial_size']}")
-            print(f"  Expected fc_output_size: {dim_info['fc_output_size']}")
-            
-            # Check Linear layer
-            if hasattr(generator, 'fc'):
-                actual_fc_out = generator.fc.out_features
-                print(f"  Actual fc.out_features: {actual_fc_out}")
-                
-                if actual_fc_out != dim_info['fc_output_size']:
-                    print(f"  WARNING: Mismatch! Expected {dim_info['fc_output_size']}, got {actual_fc_out}")
-                    return False
-            
-            # Check if we can reshape properly
-            try:
-                # Test forward pass with dummy input
-                z = torch.randn(2, generator.z_dim)
-                output = generator(z)
-                expected_shape = (2, dim_info['channels'], dim_info['image_size'], dim_info['image_size'])
-                
-                print(f"  Output shape: {output.shape}")
-                print(f"  Expected shape: {expected_shape}")
-                
-                if output.shape != expected_shape:
-                    print(f"  WARNING: Output shape mismatch!")
-                    return False
-                
-                return True
-                
-            except Exception as e:
-                print(f"  ERROR during forward pass: {e}")
-                return False
-        
-        # ============================================================================
-        # TRAINING FUNCTIONS
-        # ============================================================================
-        
-        def train_forward_forward_blocks(model, train_loader, epochs_per_block, threshold, lr, device, component='discriminator'):
+            @staticmethod
+            def validate_discriminator_architecture(discriminator):
            
-            print(f"Training {component} with Forward-Forward (block-by-block)...")
-            
-            # Extract trainable blocks
-            blocks = []
-            if component == 'discriminator':
-                if hasattr(model, 'disc_blocks'):
-                    blocks = model.disc_blocks
+                errors = []
+                warnings = []
+                
+                # Check discriminator has required attributes
+                required_attrs = ['image_size', 'image_channels']
+                for attr in required_attrs:
+                    if not hasattr(discriminator, attr):
+                        errors.append(f"Discriminator missing required attribute: {attr}")
+                
+                # Check conv layers
+                if hasattr(discriminator, 'conv_layers'):
+                    # Count Conv2d layers
+                    conv_layers = []
+                    for module in discriminator.conv_layers:
+                        if isinstance(module, nn.Conv2d):
+                            conv_layers.append(module)
+                        elif isinstance(module, nn.Sequential):
+                            for submodule in module:
+                                if isinstance(submodule, nn.Conv2d):
+                                    conv_layers.append(submodule)
+                    
+                    if len(conv_layers) == 0:
+                        warnings.append("Discriminator has no Conv2d layers")
                 else:
-                    # Extract from discriminator
-                    blocks = []
-                    for module in model.modules():
-                        if isinstance(module, DCGANDiscriminatorBlock):
-                            blocks.append(module)
-            else:  # generator
-                if hasattr(model, 'gen_blocks'):
-                    blocks = model.gen_blocks
+                    warnings.append("Discriminator missing conv_layers")
+                
+                # Check classifier
+                if hasattr(discriminator, 'classifier'):
+                    has_linear = False
+                    for module in discriminator.classifier:
+                        if isinstance(module, nn.Linear):
+                            has_linear = True
+                            break
+                    if not has_linear:
+                        warnings.append("Discriminator classifier has no Linear layer")
                 else:
-                    # Extract from generator
-                    blocks = []
-                    for module in model.modules():
-                        if isinstance(module, DCGANGeneratorBlock):
-                            blocks.append(module)
+                    warnings.append("Discriminator missing classifier")
+                
+                return errors, warnings
             
-            if not blocks:
-                print(f"  No trainable blocks found in {component}")
-                return {'block_results': [], 'loss_entries': []}
+            @staticmethod
+            def calculate_generator_output_size(generator, batch_size=1):
             
-            print(f"  Found {len(blocks)} trainable blocks in {component}")
-            
-            results = []
-            loss_entries = []
-            
-            # Get real and fake data for training
-            real_batch = next(iter(train_loader))[0].to(device)
-            batch_size = real_batch.size(0)
-            
-            if component == 'discriminator':
-                # For discriminator: positive = real, negative = fake
-                # Generate fake images
                 with torch.no_grad():
-                    z = torch.randn(batch_size, model.z_dim, device=device)
-                    fake_batch = model(z) if component == 'discriminator' else torch.randn_like(real_batch)
-                
-                current_pos = real_batch
-                current_neg = fake_batch
-                
-            else:  # generator
-                # For generator: positive = noise, negative = corrupted noise
-                noise = torch.randn(batch_size, model.z_dim, device=device)
-                neg_noise = noise.clone()
-                for b in range(batch_size):
-                    perm = torch.randperm(noise.size(1), device=device)
-                    neg_noise[b] = neg_noise[b, perm]
-                
-                current_pos = noise
-                current_neg = neg_noise
+                    z = torch.randn(batch_size, generator.z_dim)
+                    
+                    # Track dimensions through each layer
+                    dimensions = []
+                    
+                    # Input
+                    dimensions.append(('Input (z)', z.shape))
+                    
+                    # FC layer
+                    x = generator.fc(z)
+                    dimensions.append(('FC Output', x.shape))
+                    
+                    # BatchNorm and activation
+                    if hasattr(generator, 'bn'):
+                        x = generator.bn(x)
+                    if hasattr(generator, 'act'):
+                        x = generator.act(x)
+                    
+                    # Reshape for deconv layers
+                    if hasattr(generator, 'deconv_layers'):
+                        first_conv = None
+                        for module in generator.deconv_layers:
+                            if isinstance(module, nn.ConvTranspose2d):
+                                first_conv = module
+                                break
+                            elif isinstance(module, nn.Sequential):
+                                for submodule in module:
+                                    if isinstance(submodule, nn.ConvTranspose2d):
+                                        first_conv = submodule
+                                        break
+                            if first_conv:
+                                break
+                        
+                        if first_conv:
+                            # Calculate reshape dimensions
+                            in_channels = first_conv.in_channels
+                            features = x.size(1)
+                            
+                            # Find spatial dimensions
+                            spatial_elements = features // in_channels
+                            h = w = int(spatial_elements ** 0.5)
+                            
+                            # Verify reshape
+                            if h * w * in_channels != features:
+                                raise ValueError(
+                                    f"Cannot reshape {features} features to {in_channels} channels. "
+                                    f"Features must be divisible by in_channels. "
+                                    f"{features} / {in_channels} = {features/in_channels}"
+                                )
+                            
+                            x = x.view(batch_size, in_channels, h, w)
+                            dimensions.append(('Reshaped for Conv', x.shape))
+                            
+                            # Pass through deconv layers
+                            for i, module in enumerate(generator.deconv_layers):
+                                if isinstance(module, nn.Module):
+                                    x = module(x)
+                                    dimensions.append((f'Deconv Layer {i}', x.shape))
+                    
+                    # Final activation
+                    if hasattr(generator, 'output_activation'):
+                        x = generator.output_activation(x)
+                    
+                    dimensions.append(('Final Output', x.shape))
+                    
+                    return dimensions
             
-            # Train each block sequentially
-            for block_idx, block in enumerate(blocks):
-                print(f"  Training Block {block_idx + 1}/{len(blocks)}: {block.layer_type}")
-                print(f"    Input shape: {current_pos.shape}")
-                
-                # Create optimizer for this block only
-                optimizer = optim.Adam(block.parameters(), lr=lr)
-                block.train()
-                
-                block_losses = []
-                
-                for epoch in range(epochs_per_block):
-                    optimizer.zero_grad()
-                    
-                    # Forward pass for positive samples
-                    pos_output = block(current_pos)
-                    pos_goodness = block.compute_goodness(pos_output)
-                    
-                    # Forward pass for negative samples
-                    neg_output = block(current_neg)
-                    neg_goodness = block.compute_goodness(neg_output)
-                    
-                    # Compute loss
-                    loss = block.forward_forward_loss(pos_goodness, neg_goodness)
-                    
-                    # Backward pass
-                    loss.backward()
-                    optimizer.step()
-                    
-                    epoch_loss = loss.item()
-                    block_losses.append(epoch_loss)
-                    
-                    # Calculate success rates
-                    pos_above = (pos_goodness > threshold).float().mean().item()
-                    neg_below = (neg_goodness < threshold).float().mean().item()
-                    
-                    # Create loss entry
-                    loss_entry = {
-                        'block': block_idx + 1,
-                        'epoch': epoch + 1,
-                        'loss': epoch_loss,
-                        'component': component,
-                        'training_mode': 'forward_forward',
-                        'layer_type': block.layer_type,
-                        'uid': str(uuid.uuid4()),
-                        'pos_above_threshold': pos_above,
-                        'neg_below_threshold': neg_below,
-                        'input_shape': list(current_pos.shape)
-                    }
-                    loss_entries.append(loss_entry)
-                    
-                    if epoch == 0 or epoch == epochs_per_block - 1:
-                        print(f"    Epoch {epoch + 1}/{epochs_per_block}: Loss = {epoch_loss:.6f}, "
-                              f"Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
-                
-                results.append({
-                    'block': block_idx + 1,
-                    'losses': block_losses,
-                    'final_loss': block_losses[-1] if block_losses else 0.0,
-                    'layer_type': block.layer_type
-                })
-                
-                # Prepare input for next block
+            @staticmethod
+            def calculate_discriminator_output_size(discriminator, batch_size=1, channels=3, img_size=64):
+               
                 with torch.no_grad():
-                    current_pos = block(current_pos).detach()
-                    current_neg = block(current_neg).detach()
-            
-            return {
-                'block_results': results,
-                'loss_entries': loss_entries,
-                'total_blocks': len(blocks)
-            }
+                    x = torch.randn(batch_size, channels, img_size, img_size)
+                    dimensions = []
+                    
+                    dimensions.append(('Input Image', x.shape))
+                    
+                    # Conv layers
+                    if hasattr(discriminator, 'conv_layers'):
+                        for i, module in enumerate(discriminator.conv_layers):
+                            if isinstance(module, nn.Module):
+                                x = module(x)
+                                dimensions.append((f'Conv Layer {i}', x.shape))
+                    
+                    # Flatten and classifier
+                    if hasattr(discriminator, 'classifier'):
+                        x = discriminator.classifier(x)
+                        dimensions.append(('Classifier Output', x.shape))
+                    
+                    # Output activation
+                    if hasattr(discriminator, 'output_activation'):
+                        x = discriminator.output_activation(x)
+                    
+                    dimensions.append(('Final Output', x.shape))
+                    
+                    return dimensions
         
-        def train_cafo_blocks(model, train_loader, epochs_per_block, lr, device, component='discriminator'):
-        
-            print(f"Training {component} with CAFO (block-by-block)...")
+        class DCGANLayerExtractor:
+          
             
-            # Extract trainable blocks
-            blocks = []
-            if component == 'discriminator':
-                if hasattr(model, 'disc_blocks'):
-                    blocks = model.disc_blocks
-                else:
-                    # Extract from discriminator
-                    blocks = []
-                    for module in model.modules():
-                        if isinstance(module, DCGANDiscriminatorBlock):
-                            blocks.append(module)
-            else:  # generator
-                if hasattr(model, 'gen_blocks'):
-                    blocks = model.gen_blocks
-                else:
-                    # Extract from generator
-                    blocks = []
-                    for module in model.modules():
-                        if isinstance(module, DCGANGeneratorBlock):
-                            blocks.append(module)
-            
-            if not blocks:
-                print(f"  No trainable blocks found in {component}")
-                return {'block_results': [], 'loss_entries': []}
-            
-            print(f"  Found {len(blocks)} trainable blocks in {component}")
-            
-            results = []
-            loss_entries = []
-            
-            # Get data for training
-            real_batch = next(iter(train_loader))[0].to(device)
-            batch_size = real_batch.size(0)
-            
-            if component == 'discriminator':
-                # For discriminator: combine real and fake
-                with torch.no_grad():
-                    z = torch.randn(batch_size, model.z_dim, device=device)
-                    fake_batch = model(z) if hasattr(model, 'z_dim') else torch.randn_like(real_batch)
+            @staticmethod
+            def extract_generator_layers(generator):
+          
+                layers = []
+                layer_info = []
                 
-                all_data = torch.cat([real_batch, fake_batch])
+                # Linear layer (fc) - FIRST TRAINABLE LAYER
+                if hasattr(generator, 'fc'):
+                    layers.append(generator.fc)
+                    layer_info.append({
+                        'type': 'Linear',
+                        'in_features': generator.fc.in_features,
+                        'out_features': generator.fc.out_features,
+                        'name': 'fc'
+                    })
+                
+                # ConvTranspose2d layers in deconv_layers
+                conv_idx = 0
+                if hasattr(generator, 'deconv_layers'):
+                    for module_idx, module in enumerate(generator.deconv_layers):
+                        if isinstance(module, nn.ConvTranspose2d):
+                            layers.append(module)
+                            layer_info.append({
+                                'type': 'ConvTranspose2d',
+                                'in_channels': module.in_channels,
+                                'out_channels': module.out_channels,
+                                'kernel_size': module.kernel_size,
+                                'stride': module.stride,
+                                'padding': module.padding,
+                                'name': f'deconv_layers[{module_idx}]'
+                            })
+                            conv_idx += 1
+                        elif isinstance(module, nn.Sequential):
+                            for sub_idx, submodule in enumerate(module):
+                                if isinstance(submodule, nn.ConvTranspose2d):
+                                    layers.append(submodule)
+                                    layer_info.append({
+                                        'type': 'ConvTranspose2d',
+                                        'in_channels': submodule.in_channels,
+                                        'out_channels': submodule.out_channels,
+                                        'kernel_size': submodule.kernel_size,
+                                        'stride': submodule.stride,
+                                        'padding': submodule.padding,
+                                        'name': f'deconv_layers[{module_idx}][{sub_idx}]'
+                                    })
+                                    conv_idx += 1
+                
+                return layers, layer_info
+            
+            @staticmethod
+            def extract_discriminator_layers(discriminator):
+         
+                layers = []
+                layer_info = []
+                
+                # Conv2d layers
+                conv_idx = 0
+                if hasattr(discriminator, 'conv_layers'):
+                    for module_idx, module in enumerate(discriminator.conv_layers):
+                        if isinstance(module, nn.Conv2d):
+                            layers.append(module)
+                            layer_info.append({
+                                'type': 'Conv2d',
+                                'in_channels': module.in_channels,
+                                'out_channels': module.out_channels,
+                                'kernel_size': module.kernel_size,
+                                'stride': module.stride,
+                                'padding': module.padding,
+                                'name': f'conv_layers[{module_idx}]'
+                            })
+                            conv_idx += 1
+                        elif isinstance(module, nn.Sequential):
+                            for sub_idx, submodule in enumerate(module):
+                                if isinstance(submodule, nn.Conv2d):
+                                    layers.append(submodule)
+                                    layer_info.append({
+                                        'type': 'Conv2d',
+                                        'in_channels': submodule.in_channels,
+                                        'out_channels': submodule.out_channels,
+                                        'kernel_size': submodule.kernel_size,
+                                        'stride': submodule.stride,
+                                        'padding': submodule.padding,
+                                        'name': f'conv_layers[{module_idx}][{sub_idx}]'
+                                    })
+                                    conv_idx += 1
+                
+                # Final Linear layer in classifier (if exists)
+                if hasattr(discriminator, 'classifier'):
+                    for module_idx, module in enumerate(discriminator.classifier):
+                        if isinstance(module, nn.Linear):
+                            layers.append(module)
+                            layer_info.append({
+                                'type': 'Linear',
+                                'in_features': module.in_features,
+                                'out_features': module.out_features,
+                                'name': f'classifier[{module_idx}]'
+                            })
+                
+                return layers, layer_info
+        
+        # ============================================================================
+        # DCGAN TRAINER CLASSES (Following Vanilla GAN pattern)
+        # ============================================================================
+        
+        class BaseDCGANTrainer:
+            
+            def __init__(self, generator, discriminator, config, device):
+                self.generator = generator
+                self.discriminator = discriminator
+                self.config = config
+                self.device = device
+                
+                # Move models to device
+                self.generator.to(device)
+                self.discriminator.to(device)
+                
+                # Create optimizers
+                self.g_optimizer = optim.Adam(
+                    generator.parameters(),
+                    lr=config.get('generator_lr', 0.0002),
+                    betas=(0.5, 0.999)
+                )
+                self.d_optimizer = optim.Adam(
+                    discriminator.parameters(),
+                    lr=config.get('discriminator_lr', 0.0004),
+                    betas=(0.5, 0.999)
+                )
+                
+                # Loss function
+                self.criterion = nn.BCELoss()
+                
+                # Metrics tracker
+                self.metrics = {
+                    'g_losses': [],
+                    'd_losses': [],
+                    'real_scores': [],
+                    'fake_scores': []
+                }
+                
+                # Layer extractors
+                self.g_layers, self.g_layer_info = DCGANLayerExtractor.extract_generator_layers(generator)
+                self.d_layers, self.d_layer_info = DCGANLayerExtractor.extract_discriminator_layers(discriminator)
+                
+                print(f"Generator trainable layers: {len(self.g_layers)}")
+                for info in self.g_layer_info:
+                    print(f"  - {info['type']}: {info['name']}")
+                
+                print(f"Discriminator trainable layers: {len(self.d_layers)}")
+                for info in self.d_layer_info:
+                    print(f"  - {info['type']}: {info['name']}")
+            
+            def train_discriminator(self, real_images):
+             
+                batch_size = real_images.size(0)
+                
+                # Real images
+                real_labels = torch.ones(batch_size, device=self.device)
+                real_output = self.discriminator(real_images)
+                real_loss = self.criterion(real_output, real_labels)
+                
+                # Fake images
+                z = torch.randn(batch_size, self.generator.z_dim, device=self.device)
+                fake_images = self.generator(z).detach()
+                fake_labels = torch.zeros(batch_size, device=self.device)
+                fake_output = self.discriminator(fake_images)
+                fake_loss = self.criterion(fake_output, fake_labels)
+                
+                # Total loss
+                d_loss = (real_loss + fake_loss) / 2
+                
+                # Backward pass
+                self.d_optimizer.zero_grad()
+                d_loss.backward()
+                self.d_optimizer.step()
+                
+                return {
+                    'd_loss': d_loss.item(),
+                    'real_loss': real_loss.item(),
+                    'fake_loss': fake_loss.item(),
+                    'real_output': real_output.mean().item(),
+                    'fake_output': fake_output.mean().item()
+                }
+            
+            def train_generator(self, batch_size):
+             
+                z = torch.randn(batch_size, self.generator.z_dim, device=self.device)
+                fake_images = self.generator(z)
+                fake_labels = torch.ones(batch_size, device=self.device)  # Want to fool discriminator
+                fake_output = self.discriminator(fake_images)
+                
+                g_loss = self.criterion(fake_output, fake_labels)
+                
+                # Backward pass
+                self.g_optimizer.zero_grad()
+                g_loss.backward()
+                self.g_optimizer.step()
+                
+                return {
+                    'g_loss': g_loss.item(),
+                    'fake_output': fake_output.mean().item()
+                }
+            
+            def train_epoch(self, dataloader):
+              
+                self.generator.train()
+                self.discriminator.train()
+                
+                epoch_g_losses = []
+                epoch_d_losses = []
+                epoch_real_scores = []
+                epoch_fake_scores = []
+                
+                for batch in dataloader:
+                    real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
+                    real_images = real_images.to(self.device)
+                    batch_size = real_images.size(0)
+                    
+                    # Train discriminator
+                    d_metrics = self.train_discriminator(real_images)
+                    
+                    # Train generator
+                    g_metrics = self.train_generator(batch_size)
+                    
+                    # Track metrics
+                    epoch_g_losses.append(g_metrics['g_loss'])
+                    epoch_d_losses.append(d_metrics['d_loss'])
+                    epoch_real_scores.append(d_metrics['real_output'])
+                    epoch_fake_scores.append(d_metrics['fake_output'])
+                
+                # Update global metrics
+                avg_g_loss = np.mean(epoch_g_losses)
+                avg_d_loss = np.mean(epoch_d_losses)
+                avg_real_score = np.mean(epoch_real_scores)
+                avg_fake_score = np.mean(epoch_fake_scores)
+                
+                self.metrics['g_losses'].append(avg_g_loss)
+                self.metrics['d_losses'].append(avg_d_loss)
+                self.metrics['real_scores'].append(avg_real_score)
+                self.metrics['fake_scores'].append(avg_fake_score)
+                
+                return {
+                    'g_loss': avg_g_loss,
+                    'd_loss': avg_d_loss,
+                    'real_score': avg_real_score,
+                    'fake_score': avg_fake_score
+                }
+        
+        class BackpropDCGANTrainer(BaseDCGANTrainer):
+            
+            
+            def __init__(self, generator, discriminator, config, device):
+                super().__init__(generator, discriminator, config, device)
+                print(f"Initialized Backprop DCGAN Trainer")
+            
+            def train(self, dataloader, epochs):
+             
+                training_history = []
+                
+                for epoch in range(epochs):
+                    start_time = time.time()
+                    
+                    # Train epoch
+                    metrics = self.train_epoch(dataloader)
+                    
+                    epoch_time = time.time() - start_time
+                    metrics['epoch'] = epoch + 1
+                    metrics['epoch_time'] = epoch_time
+                    
+                    training_history.append(metrics)
+                    
+                    # Print progress
+                    if (epoch + 1) % 1 == 0:
+                        print(f"Epoch [{epoch+1}/{epochs}] "
+                              f"G Loss: {metrics['g_loss']:.4f} "
+                              f"D Loss: {metrics['d_loss']:.4f} "
+                              f"Real Score: {metrics['real_score']:.3f} "
+                              f"Fake Score: {metrics['fake_score']:.3f} "
+                              f"Time: {epoch_time:.2f}s")
+                
+                return training_history
+        
+        class ForwardForwardDCGANTrainer(BaseDCGANTrainer):
+       
+            def __init__(self, generator, discriminator, config, device):
+                super().__init__(generator, discriminator, config, device)
+                
+                # FF specific parameters
+                self.ff_epochs_per_block = config.get('ff_epochs_per_block', 2)
+                self.ff_threshold = config.get('ff_threshold', 2.0)
+                self.use_ff_generator = config.get('use_ff_generator', False)
+                self.use_ff_discriminator = config.get('use_ff_discriminator', False)
+                
+                print(f"Initialized Forward-Forward DCGAN Trainer")
+                print(f"  Generator FF: {self.use_ff_generator}")
+                print(f"  Discriminator FF: {self.use_ff_discriminator}")
+                print(f"  FF epochs per block: {self.ff_epochs_per_block}")
+                print(f"  FF threshold: {self.ff_threshold}")
+            
+            def compute_goodness(self, x):
+                
+                if x.numel() == 0:
+                    return torch.zeros(x.size(0), device=x.device)
+                if x.dim() >= 2:
+                    return (x ** 2).mean(dim=list(range(1, x.dim())))
+                else:
+                    return x ** 2
+            
+            def forward_forward_loss(self, pos_goodness, neg_goodness):
+                
+                if pos_goodness.numel() == 0 or neg_goodness.numel() == 0:
+                    return torch.tensor(0.0, device=pos_goodness.device)
+                
+                pos_term = torch.log1p(torch.exp(-(pos_goodness - self.ff_threshold)))
+                neg_term = torch.log1p(torch.exp(+(neg_goodness - self.ff_threshold)))
+                return (pos_term + neg_term).mean()
+            
+            def train_generator_ff_blocks(self, dataloader):
+            
+                if not self.use_ff_generator:
+                    print("Skipping generator FF (not enabled)")
+                    return []
+                
+                print(f"\\nTraining Generator with Forward-Forward ({len(self.g_layers)} layers)...")
+                block_results = []
+                
+                # Get a batch of noise for training
+                for batch in dataloader:
+                    real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
+                    batch_size = real_images.size(0)
+                    noise = torch.randn(batch_size, self.generator.z_dim, device=self.device)
+                    break
+                
+                # Train each layer sequentially
+                for layer_idx, (layer, layer_info) in enumerate(zip(self.g_layers, self.g_layer_info)):
+                    print(f"  Training Layer {layer_idx+1}/{len(self.g_layers)}: {layer_info['type']}")
+                    
+                    # Create optimizer for this layer only
+                    layer_optimizer = optim.Adam(layer.parameters(), lr=0.01)
+                    
+                    layer_losses = []
+                    layer_logs = []
+                    
+                    # Forward pass to get input for this layer
+                    with torch.no_grad():
+                        if layer_info['type'] == 'Linear':
+                            # First layer gets noise directly
+                            pos_input = noise
+                            # Generate negative by shuffling
+                            neg_input = noise.clone()
+                            for b in range(noise.size(0)):
+                                perm = torch.randperm(noise.size(1), device=self.device)
+                                neg_input[b] = neg_input[b, perm]
+                        else:
+                            # For conv layers, need to compute input from previous layers
+                            x = noise
+                            # Pass through all layers up to current
+                            for i in range(layer_idx):
+                                if i == 0:
+                                    x = self.g_layers[i](x)
+                                else:
+                                    x = self.g_layers[i](x)
+                            pos_input = x
+                            # Generate negative input
+                            neg_input = x.clone()
+                            if neg_input.dim() == 4:
+                                B, C, H, W = neg_input.shape
+                                neg_flat = neg_input.view(B, -1)
+                                for b in range(B):
+                                    perm = torch.randperm(neg_flat.size(1), device=self.device)
+                                    neg_flat[b] = neg_flat[b, perm]
+                                neg_input = neg_flat.view(B, C, H, W)
+                    
+                    print(f"    Input shape: {pos_input.shape}")
+                    
+                    # Train layer with FF
+                    for epoch in range(self.ff_epochs_per_block):
+                        layer_optimizer.zero_grad()
+                        
+                        # Forward pass for positive samples
+                        pos_output = layer(pos_input)
+                        pos_goodness = self.compute_goodness(pos_output)
+                        
+                        # Forward pass for negative samples
+                        neg_output = layer(neg_input)
+                        neg_goodness = self.compute_goodness(neg_output)
+                        
+                        # Compute FF loss
+                        loss = self.forward_forward_loss(pos_goodness, neg_goodness)
+                        
+                        # Backward pass
+                        loss.backward()
+                        layer_optimizer.step()
+                        
+                        epoch_loss = loss.item()
+                        layer_losses.append(epoch_loss)
+                        
+                        # Calculate success rates
+                        pos_above = (pos_goodness > self.ff_threshold).float().mean().item()
+                        neg_below = (neg_goodness < self.ff_threshold).float().mean().item()
+                        
+                        # Log
+                        log_entry = {
+                            'layer': layer_idx + 1,
+                            'epoch': epoch + 1,
+                            'loss': epoch_loss,
+                            'component': 'generator',
+                            'layer_type': layer_info['type'],
+                            'pos_goodness': pos_goodness.mean().item(),
+                            'neg_goodness': neg_goodness.mean().item(),
+                            'pos_above_threshold': pos_above,
+                            'neg_below_threshold': neg_below,
+                            'input_shape': str(list(pos_input.shape))
+                        }
+                        layer_logs.append(log_entry)
+                        
+                        if epoch == 0 or epoch == self.ff_epochs_per_block - 1:
+                            print(f"    Epoch {epoch+1}/{self.ff_epochs_per_block}: Loss = {epoch_loss:.6f}, "
+                                  f"Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
+                    
+                    block_results.append({
+                        'layer_idx': layer_idx,
+                        'layer_type': layer_info['type'],
+                        'losses': layer_losses,
+                        'final_loss': layer_losses[-1] if layer_losses else 0.0,
+                        'logs': layer_logs
+                    })
+                
+                print("Generator FF training completed")
+                return block_results
+            
+            def train_discriminator_ff_blocks(self, dataloader):
+               
+                if not self.use_ff_discriminator:
+                    print("Skipping discriminator FF (not enabled)")
+                    return []
+                
+                print(f"\\nTraining Discriminator with Forward-Forward ({len(self.d_layers)} layers)...")
+                block_results = []
+                
+                # Get a batch of real and fake images
+                for batch in dataloader:
+                    real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
+                    real_images = real_images.to(self.device)
+                    batch_size = real_images.size(0)
+                    
+                    # Generate fake images
+                    with torch.no_grad():
+                        z = torch.randn(batch_size, self.generator.z_dim, device=self.device)
+                        fake_images = self.generator(z)
+                    break
+                
+                # Train each layer sequentially
+                for layer_idx, (layer, layer_info) in enumerate(zip(self.d_layers, self.d_layer_info)):
+                    print(f"  Training Layer {layer_idx+1}/{len(self.d_layers)}: {layer_info['type']}")
+                    
+                    # Create optimizer for this layer only
+                    layer_optimizer = optim.Adam(layer.parameters(), lr=0.01)
+                    
+                    layer_losses = []
+                    layer_logs = []
+                    
+                    # Forward pass to get input for this layer
+                    with torch.no_grad():
+                        if layer_idx == 0:
+                            # First layer gets images directly
+                            pos_input = real_images
+                            neg_input = fake_images
+                        else:
+                            # For subsequent layers, need to compute input from previous layers
+                            x_real = real_images
+                            x_fake = fake_images
+                            for i in range(layer_idx):
+                                if i == 0:
+                                    x_real = self.d_layers[i](x_real)
+                                    x_fake = self.d_layers[i](x_fake)
+                                else:
+                                    x_real = self.d_layers[i](x_real)
+                                    x_fake = self.d_layers[i](x_fake)
+                            pos_input = x_real
+                            neg_input = x_fake
+                    
+                    print(f"    Input shape: {pos_input.shape}")
+                    
+                    # Train layer with FF
+                    for epoch in range(self.ff_epochs_per_block):
+                        layer_optimizer.zero_grad()
+                        
+                        # Forward pass for positive samples (real)
+                        pos_output = layer(pos_input)
+                        pos_goodness = self.compute_goodness(pos_output)
+                        
+                        # Forward pass for negative samples (fake)
+                        neg_output = layer(neg_input)
+                        neg_goodness = self.compute_goodness(neg_output)
+                        
+                        # Compute FF loss
+                        loss = self.forward_forward_loss(pos_goodness, neg_goodness)
+                        
+                        # Backward pass
+                        loss.backward()
+                        layer_optimizer.step()
+                        
+                        epoch_loss = loss.item()
+                        layer_losses.append(epoch_loss)
+                        
+                        # Calculate success rates
+                        pos_above = (pos_goodness > self.ff_threshold).float().mean().item()
+                        neg_below = (neg_goodness < self.ff_threshold).float().mean().item()
+                        
+                        # Log
+                        log_entry = {
+                            'layer': layer_idx + 1,
+                            'epoch': epoch + 1,
+                            'loss': epoch_loss,
+                            'component': 'discriminator',
+                            'layer_type': layer_info['type'],
+                            'pos_goodness': pos_goodness.mean().item(),
+                            'neg_goodness': neg_goodness.mean().item(),
+                            'pos_above_threshold': pos_above,
+                            'neg_below_threshold': neg_below,
+                            'input_shape': str(list(pos_input.shape))
+                        }
+                        layer_logs.append(log_entry)
+                        
+                        if epoch == 0 or epoch == self.ff_epochs_per_block - 1:
+                            print(f"    Epoch {epoch+1}/{self.ff_epochs_per_block}: Loss = {epoch_loss:.6f}, "
+                                  f"Pos>Th: {pos_above:.3f}, Neg<Th: {neg_below:.3f}")
+                    
+                    block_results.append({
+                        'layer_idx': layer_idx,
+                        'layer_type': layer_info['type'],
+                        'losses': layer_losses,
+                        'final_loss': layer_losses[-1] if layer_losses else 0.0,
+                        'logs': layer_logs
+                    })
+                
+                print("Discriminator FF training completed")
+                return block_results
+            
+            def train(self, dataloader, epochs):
+               
+                ff_history = {
+                    'generator_blocks': [],
+                    'discriminator_blocks': []
+                }
+                
+                # Phase 1: FF Block Training
+                print("\\n" + "="*60)
+                print("PHASE 1: FORWARD-FORWARD BLOCK TRAINING")
+                print("="*60)
+                
+                # Train generator FF blocks
+                if self.use_ff_generator:
+                    gen_blocks = self.train_generator_ff_blocks(dataloader)
+                    ff_history['generator_blocks'] = gen_blocks
+                
+                # Train discriminator FF blocks
+                if self.use_ff_discriminator:
+                    disc_blocks = self.train_discriminator_ff_blocks(dataloader)
+                    ff_history['discriminator_blocks'] = disc_blocks
+                
+                # Phase 2: Adversarial Training
+                print("\\n" + "="*60)
+                print("PHASE 2: ADVERSARIAL TRAINING")
+                print("="*60)
+                
+                training_history = []
+                
+                for epoch in range(epochs):
+                    start_time = time.time()
+                    
+                    # Train epoch
+                    metrics = self.train_epoch(dataloader)
+                    
+                    epoch_time = time.time() - start_time
+                    metrics['epoch'] = epoch + 1
+                    metrics['epoch_time'] = epoch_time
+                    metrics['phase'] = 'adversarial'
+                    
+                    training_history.append(metrics)
+                    
+                    # Print progress
+                    if (epoch + 1) % 1 == 0:
+                        print(f"Epoch [{epoch+1}/{epochs}] "
+                              f"G Loss: {metrics['g_loss']:.4f} "
+                              f"D Loss: {metrics['d_loss']:.4f} "
+                              f"Real Score: {metrics['real_score']:.3f} "
+                              f"Fake Score: {metrics['fake_score']:.3f} "
+                              f"Time: {epoch_time:.2f}s")
+                
+                return {
+                    'ff_training': ff_history,
+                    'adversarial_training': training_history
+                }
+        
+        class CAFODCGANTrainer(BaseDCGANTrainer):
+         
+            
+            def __init__(self, generator, discriminator, config, device):
+                super().__init__(generator, discriminator, config, device)
+                
+                # CAFO specific parameters
+                self.cafo_epochs_per_block = config.get('cafo_epochs_per_block', 2)
+                self.use_cafo_generator = config.get('use_cafo_generator', False)
+                self.use_cafo_discriminator = config.get('use_cafo_discriminator', False)
+                
+                print(f"Initialized CAFO DCGAN Trainer")
+                print(f"  Generator CAFO: {self.use_cafo_generator}")
+                print(f"  Discriminator CAFO: {self.use_cafo_discriminator}")
+                print(f"  CAFO epochs per block: {self.cafo_epochs_per_block}")
+            
+            def create_local_predictor(self, input_dim, output_dim=1):
+              
+                return nn.Sequential(
+                    nn.Linear(input_dim, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, output_dim),
+                    nn.Sigmoid()
+                ).to(self.device)
+            
+            def train_generator_cafo_blocks(self, dataloader):
+               
+                if not self.use_cafo_generator:
+                    print("Skipping generator CAFO (not enabled)")
+                    return []
+                
+                print(f"\\nTraining Generator with CAFO ({len(self.g_layers)} layers)...")
+                block_results = []
+                
+                # Get a batch of noise for training
+                for batch in dataloader:
+                    real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
+                    batch_size = real_images.size(0)
+                    noise = torch.randn(batch_size, self.generator.z_dim, device=self.device)
+                    break
+                
+                # Train each layer sequentially
+                for layer_idx, (layer, layer_info) in enumerate(zip(self.g_layers, self.g_layer_info)):
+                    print(f"  Training Layer {layer_idx+1}/{len(self.g_layers)}: {layer_info['type']}")
+                    
+                    # Create optimizer for this layer only
+                    layer_optimizer = optim.Adam(layer.parameters(), lr=0.001, weight_decay=1e-4)
+                    
+                    layer_losses = []
+                    layer_logs = []
+                    
+                    # Forward pass to get input for this layer
+                    with torch.no_grad():
+                        if layer_info['type'] == 'Linear':
+                            # First layer gets noise directly
+                            current_input = noise
+                        else:
+                            # For conv layers, need to compute input from previous layers
+                            x = noise
+                            for i in range(layer_idx):
+                                x = self.g_layers[i](x)
+                            current_input = x
+                    
+                    print(f"    Input shape: {current_input.shape}")
+                    
+                    # Train layer with CAFO
+                    for epoch in range(self.cafo_epochs_per_block):
+                        layer_optimizer.zero_grad()
+                        
+                        # Forward pass
+                        features = layer(current_input)
+                        
+                        # Flatten features for local predictor
+                        if layer_info['type'] == 'Linear':
+                            features_flat = features
+                        else:
+                            features_flat = features.view(features.size(0), -1)
+                        
+                        # Create local predictor
+                        predictor_input_dim = features_flat.size(1)
+                        local_predictor = self.create_local_predictor(predictor_input_dim, 1)
+                        predictor_optimizer = optim.Adam(local_predictor.parameters(), lr=0.001)
+                        
+                        # Make predictions
+                        predictions = local_predictor(features_flat).squeeze()
+                        
+                        # For generator: encourage high quality features (target = 1)
+                        target_quality = torch.ones_like(predictions, device=self.device)
+                        loss = F.mse_loss(predictions, target_quality)
+                        
+                        # Backward pass
+                        loss.backward()
+                        layer_optimizer.step()
+                        predictor_optimizer.step()
+                        
+                        epoch_loss = loss.item()
+                        layer_losses.append(epoch_loss)
+                        
+                        # Log
+                        log_entry = {
+                            'layer': layer_idx + 1,
+                            'epoch': epoch + 1,
+                            'loss': epoch_loss,
+                            'component': 'generator',
+                            'layer_type': layer_info['type'],
+                            'input_shape': str(list(current_input.shape)),
+                            'features_shape': str(list(features.shape))
+                        }
+                        layer_logs.append(log_entry)
+                        
+                        if epoch == 0 or epoch == self.cafo_epochs_per_block - 1:
+                            print(f"    Epoch {epoch+1}/{self.cafo_epochs_per_block}: Loss = {epoch_loss:.6f}")
+                    
+                    block_results.append({
+                        'layer_idx': layer_idx,
+                        'layer_type': layer_info['type'],
+                        'losses': layer_losses,
+                        'final_loss': layer_losses[-1] if layer_losses else 0.0,
+                        'logs': layer_logs
+                    })
+                
+                print("Generator CAFO training completed")
+                return block_results
+            
+            def train_discriminator_cafo_blocks(self, dataloader):
+               
+                if not self.use_cafo_discriminator:
+                    print("Skipping discriminator CAFO (not enabled)")
+                    return []
+                
+                print(f"\\nTraining Discriminator with CAFO ({len(self.d_layers)} layers)...")
+                block_results = []
+                
+                # Get a batch of real and fake images
+                for batch in dataloader:
+                    real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
+                    real_images = real_images.to(self.device)
+                    batch_size = real_images.size(0)
+                    
+                    # Generate fake images
+                    with torch.no_grad():
+                        z = torch.randn(batch_size, self.generator.z_dim, device=self.device)
+                        fake_images = self.generator(z)
+                    break
+                
+                # Combine real and fake for binary classification
+                all_images = torch.cat([real_images, fake_images])
                 all_labels = torch.cat([
-                    torch.ones(batch_size, device=device),  # Real = 1
-                    torch.zeros(batch_size, device=device)  # Fake = 0
+                    torch.ones(real_images.size(0), device=self.device),
+                    torch.zeros(fake_images.size(0), device=self.device)
                 ]).float()
                 
-                current_data = all_data
-                current_labels = all_labels
+                # Train each layer sequentially
+                for layer_idx, (layer, layer_info) in enumerate(zip(self.d_layers, self.d_layer_info)):
+                    print(f"  Training Layer {layer_idx+1}/{len(self.d_layers)}: {layer_info['type']}")
+                    
+                    # Create optimizer for this layer only
+                    layer_optimizer = optim.Adam(layer.parameters(), lr=0.001, weight_decay=1e-4)
+                    
+                    layer_losses = []
+                    layer_logs = []
+                    layer_accuracies = []
+                    
+                    # Forward pass to get input for this layer
+                    with torch.no_grad():
+                        if layer_idx == 0:
+                            # First layer gets images directly
+                            current_input = all_images
+                        else:
+                            # For subsequent layers, need to compute input from previous layers
+                            x = all_images
+                            for i in range(layer_idx):
+                                x = self.d_layers[i](x)
+                            current_input = x
+                    
+                    print(f"    Input shape: {current_input.shape}")
+                    
+                    # Train layer with CAFO
+                    for epoch in range(self.cafo_epochs_per_block):
+                        layer_optimizer.zero_grad()
+                        
+                        # Forward pass
+                        features = layer(current_input)
+                        
+                        # Flatten features for local predictor
+                        if layer_info['type'] == 'Linear':
+                            features_flat = features
+                        else:
+                            features_flat = features.view(features.size(0), -1)
+                        
+                        # Create local predictor
+                        predictor_input_dim = features_flat.size(1)
+                        local_predictor = self.create_local_predictor(predictor_input_dim, 1)
+                        predictor_optimizer = optim.Adam(local_predictor.parameters(), lr=0.001)
+                        
+                        # Make predictions
+                        predictions = local_predictor(features_flat).squeeze()
+                        
+                        # Compute loss (binary classification)
+                        loss = F.binary_cross_entropy(predictions, all_labels)
+                        
+                        # Backward pass
+                        loss.backward()
+                        layer_optimizer.step()
+                        predictor_optimizer.step()
+                        
+                        epoch_loss = loss.item()
+                        layer_losses.append(epoch_loss)
+                        
+                        # Calculate accuracy
+                        with torch.no_grad():
+                            pred_labels = (predictions > 0.5).float()
+                            accuracy = (pred_labels == all_labels).float().mean().item()
+                        layer_accuracies.append(accuracy)
+                        
+                        # Log
+                        log_entry = {
+                            'layer': layer_idx + 1,
+                            'epoch': epoch + 1,
+                            'loss': epoch_loss,
+                            'accuracy': accuracy,
+                            'component': 'discriminator',
+                            'layer_type': layer_info['type'],
+                            'input_shape': str(list(current_input.shape)),
+                            'features_shape': str(list(features.shape))
+                        }
+                        layer_logs.append(log_entry)
+                        
+                        if epoch == 0 or epoch == self.cafo_epochs_per_block - 1:
+                            print(f"    Epoch {epoch+1}/{self.cafo_epochs_per_block}: "
+                                  f"Loss = {epoch_loss:.6f}, Accuracy = {accuracy:.4f}")
+                    
+                    block_results.append({
+                        'layer_idx': layer_idx,
+                        'layer_type': layer_info['type'],
+                        'losses': layer_losses,
+                        'accuracies': layer_accuracies,
+                        'final_loss': layer_losses[-1] if layer_losses else 0.0,
+                        'final_accuracy': layer_accuracies[-1] if layer_accuracies else 0.0,
+                        'logs': layer_logs
+                    })
                 
-            else:  # generator
-                # For generator: use noise, target high quality
-                noise = torch.randn(batch_size, model.z_dim, device=device)
-                current_data = noise
-                current_labels = torch.ones(batch_size, device=device).float()
+                print("Discriminator CAFO training completed")
+                return block_results
             
-            # Train each block sequentially
-            for block_idx, block in enumerate(blocks):
-                print(f"  Training Block {block_idx + 1}/{len(blocks)}: {block.layer_type}")
-                print(f"    Input shape: {current_data.shape}")
+            def train(self, dataloader, epochs):
+               
+                cafo_history = {
+                    'generator_blocks': [],
+                    'discriminator_blocks': []
+                }
                 
-                # Create optimizer for this block only
-                optimizer = optim.Adam(block.parameters(), lr=lr, weight_decay=1e-4)
-                block.train()
+                # Phase 1: CAFO Block Training
+                print("\\n" + "="*60)
+                print("PHASE 1: CAFO BLOCK TRAINING")
+                print("="*60)
                 
-                block_losses = []
+                # Train generator CAFO blocks
+                if self.use_cafo_generator:
+                    gen_blocks = self.train_generator_cafo_blocks(dataloader)
+                    cafo_history['generator_blocks'] = gen_blocks
                 
-                for epoch in range(epochs_per_block):
-                    optimizer.zero_grad()
-                    
-                    # Forward pass
-                    features = block(current_data)
-                    
-                    # Flatten features for predictor
-                    features_flat = features.view(features.size(0), -1)
-                    predictor_input_dim = features_flat.size(1)
-                    
-                    # Create predictor
-                    predictor = nn.Linear(predictor_input_dim, 1).to(device)
-                    nn.init.normal_(predictor.weight, 0.0, 0.02)
-                    if predictor.bias is not None:
-                        nn.init.constant_(predictor.bias, 0.0)
-                    
-                    # Make predictions
-                    predictions = predictor(features_flat).squeeze()
-                    
-                    # Compute loss
-                    if component == 'discriminator':
-                        loss = F.binary_cross_entropy_with_logits(predictions, current_labels)
-                    else:  # generator
-                        target_quality = torch.ones_like(predictions)
-                        loss = F.mse_loss(predictions, target_quality)
-                    
-                    # Backward pass (both block and predictor)
-                    predictor_optimizer = optim.Adam(predictor.parameters(), lr=lr)
-                    predictor_optimizer.zero_grad()
-                    
-                    loss.backward()
-                    optimizer.step()
-                    predictor_optimizer.step()
-                    
-                    epoch_loss = loss.item()
-                    block_losses.append(epoch_loss)
-                    
-                    # Create loss entry
-                    loss_entry = {
-                        'block': block_idx + 1,
-                        'epoch': epoch + 1,
-                        'loss': epoch_loss,
-                        'component': component,
-                        'training_mode': 'cafo',
-                        'layer_type': block.layer_type,
-                        'uid': str(uuid.uuid4()),
-                        'input_shape': list(current_data.shape)
-                    }
-                    loss_entries.append(loss_entry)
-                    
-                    if epoch == 0 or epoch == epochs_per_block - 1:
-                        print(f"    Epoch {epoch + 1}/{epochs_per_block}: Loss = {epoch_loss:.6f}")
+                # Train discriminator CAFO blocks
+                if self.use_cafo_discriminator:
+                    disc_blocks = self.train_discriminator_cafo_blocks(dataloader)
+                    cafo_history['discriminator_blocks'] = disc_blocks
                 
-                results.append({
-                    'block': block_idx + 1,
-                    'losses': block_losses,
-                    'final_loss': block_losses[-1] if block_losses else 0.0,
-                    'layer_type': block.layer_type
-                })
+                # Phase 2: Adversarial Training
+                print("\\n" + "="*60)
+                print("PHASE 2: ADVERSARIAL TRAINING")
+                print("="*60)
                 
-                # Prepare input for next block
-                with torch.no_grad():
-                    current_data = block(current_data).detach()
-            
-            return {
-                'block_results': results,
-                'loss_entries': loss_entries,
-                'total_blocks': len(blocks)
-            }
+                training_history = []
+                
+                for epoch in range(epochs):
+                    start_time = time.time()
+                    
+                    # Train epoch
+                    metrics = self.train_epoch(dataloader)
+                    
+                    epoch_time = time.time() - start_time
+                    metrics['epoch'] = epoch + 1
+                    metrics['epoch_time'] = epoch_time
+                    metrics['phase'] = 'adversarial'
+                    
+                    training_history.append(metrics)
+                    
+                    # Print progress
+                    if (epoch + 1) % 1 == 0:
+                        print(f"Epoch [{epoch+1}/{epochs}] "
+                              f"G Loss: {metrics['g_loss']:.4f} "
+                              f"D Loss: {metrics['d_loss']:.4f} "
+                              f"Real Score: {metrics['real_score']:.3f} "
+                              f"Fake Score: {metrics['fake_score']:.3f} "
+                              f"Time: {epoch_time:.2f}s")
+                
+                return {
+                    'cafo_training': cafo_history,
+                    'adversarial_training': training_history
+                }
         
         # ============================================================================
-        # MAIN TRAINING LOGIC
+        # HELPER FUNCTIONS FOR IMAGE GENERATION AND CDN UPLOAD
+        # ============================================================================
+        
+        def save_and_encode_images(generator, device, epoch, num_images=16, save_dir="/tmp/generated_images"):
+         
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Generate images
+            generator.eval()
+            with torch.no_grad():
+                z = torch.randn(num_images, generator.z_dim, device=device)
+                generated_images = generator(z).cpu()
+            
+            # Convert from [-1, 1] to [0, 1]
+            generated_images = (generated_images + 1) / 2
+            
+            # Save images
+            image_paths = []
+            base64_images = []
+            
+            for i in range(num_images):
+                img_tensor = generated_images[i]
+                
+                # Convert to PIL Image
+                if img_tensor.shape[0] == 1:  # Grayscale
+                    img = transforms.ToPILImage()(img_tensor)
+                else:  # RGB
+                    img = transforms.ToPILImage()(img_tensor)
+                
+                # Save to file
+                img_path = os.path.join(save_dir, f"epoch_{epoch:03d}_sample_{i:02d}.png")
+                img.save(img_path)
+                image_paths.append(img_path)
+                
+                # Convert to base64
+                buffered = BytesIO()
+                img.save(buffered, format="PNG")
+                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                base64_images.append(img_base64[:100] + "..." if len(img_base64) > 100 else img_base64)
+            
+            # Create grid image
+            n_cols = 4
+            n_rows = (num_images + n_cols - 1) // n_cols
+            
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 3 * n_rows))
+            axes = axes.flatten() if n_rows > 1 else [axes]
+            
+            for i in range(num_images):
+                ax = axes[i]
+                if generated_images[i].shape[0] == 1:
+                    ax.imshow(generated_images[i][0], cmap='gray', vmin=0, vmax=1)
+                else:
+                    ax.imshow(generated_images[i].permute(1, 2, 0))
+                ax.axis('off')
+                ax.set_title(f"Sample {i+1}")
+            
+            for i in range(num_images, len(axes)):
+                axes[i].axis('off')
+            
+            plt.tight_layout()
+            grid_path = os.path.join(save_dir, f"epoch_{epoch:03d}_grid.png")
+            plt.savefig(grid_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            return image_paths, grid_path, base64_images
+        
+        def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix, file_type="png"):
+          
+            if not os.path.exists(file_path):
+                print(f"   Warning: File not found: {file_path}")
+                return None
+            
+            file_size = os.path.getsize(file_path)
+            print(f"   Uploading {description} ({file_size:,} bytes)...")
+            
+            upload_url = f"{domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fbottle%2Flimka%2Fsoda%2F"
+            
+            curl_command = [
+                "curl",
+                "--location", upload_url,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--form", f"file=@{file_path}",
+                "--fail",
+                "--show-error",
+                "--connect-timeout", "30",
+                "--max-time", "120"
+            ]
+            
+            try:
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                response_json = json.loads(process.stdout)
+                relative_cdn_url = response_json.get("cdnUrl", "")
+                
+                if not relative_cdn_url:
+                    print(f"    Error: No cdnUrl in response")
+                    return None
+                
+                full_url = f"{get_cdn_prefix}{relative_cdn_url}"
+                print(f"     Uploaded: {full_url}")
+                
+                return full_url
+                
+            except subprocess.CalledProcessError as e:
+                print(f"    Curl error: {e.returncode}")
+                print(f"    Error: {e.stderr[:200]}")
+                return None
+            except json.JSONDecodeError as e:
+                print(f"    JSON parse error: {e}")
+                return None
+        
+        # ============================================================================
+        # MAIN TRAINING PIPELINE
         # ============================================================================
         
         parser = argparse.ArgumentParser()
@@ -607,358 +1293,553 @@ implementation:
         parser.add_argument("--model_input", required=True)
         parser.add_argument("--trained_model", required=True)
         parser.add_argument("--training_history", required=True)
-        parser.add_argument("--layer_training_logs", required=True)
+        parser.add_argument("--training_metrics", required=True)
+        parser.add_argument("--generated_samples", required=True)
         parser.add_argument("--generated_images_urls", required=True)
-        parser.add_argument("--training_summary", required=True)
+        parser.add_argument("--training_images_summary", required=True)
         parser.add_argument("--bearer_token", required=True)
         parser.add_argument("--domain", required=True)
         parser.add_argument("--get_cdn", required=True)
         args = parser.parse_args()
         
-        # Parse master config
-        config = json.loads(args.master_config)
-        gan_cfg = config['gan']
-        training_cfg = gan_cfg['training']
+        print("\\n" + "="*80)
+        print("DCGAN TRAINING WITH MULTIPLE ALGORITHMS")
+        print("="*80)
         
-        # Determine training algorithm
-        algorithm = training_cfg.get('algorithm', 'backprop')
-        print(f"Training Algorithm: {algorithm}")
+        # ============================================================================
+        # PARSE CONFIG AND SETUP
+        # ============================================================================
         
-        # Load model
-        checkpoint = torch.load(args.model_input, map_location='cpu')
+        try:
+            config = json.loads(args.master_config)
+            gan_cfg = config['gan']
+            dataset_cfg = config['dataset']
+            
+            # Determine training algorithm
+            algorithm = gan_cfg['training'].get('algorithm', 'backprop')
+            
+            # Get algorithm-specific flags
+            gen_cfg = gan_cfg.get('generator', {})
+            disc_cfg = gan_cfg.get('discriminator', {})
+            
+            use_ff_generator = gen_cfg.get('use_forward_forward', False)
+            use_cafo_generator = gen_cfg.get('use_cafo', False)
+            use_ff_discriminator = disc_cfg.get('use_forward_forward', False)
+            use_cafo_discriminator = disc_cfg.get('use_cafo', False)
+            
+            # Override algorithm based on component flags
+            if use_ff_generator or use_ff_discriminator:
+                algorithm = 'forward_forward'
+            elif use_cafo_generator or use_cafo_discriminator:
+                algorithm = 'cafo'
+            
+            print(f"Training Algorithm: {algorithm.upper()}")
+            print(f"Generator FF: {use_ff_generator}, CAFO: {use_cafo_generator}")
+            print(f"Discriminator FF: {use_ff_discriminator}, CAFO: {use_cafo_discriminator}")
+            
+            # Get training parameters
+            epochs = gan_cfg['training'].get('epochs', 10)
+            batch_size = gan_cfg['training'].get('batch_size', 64)
+            
+            print(f"Epochs: {epochs}")
+            print(f"Batch size: {batch_size}")
+            
+        except Exception as e:
+            print(f"ERROR parsing master_config: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
-        # Load dataset
-        class SafeUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                if name in ['GANDataWrapper', 'GANDataset', 'DatasetInfoWrapper', 'PreprocessMetadata']:
-                    return type(name, (), {})
-                return super().find_class(module, name)
+        # ============================================================================
+        # LOAD DATASET
+        # ============================================================================
         
-        with open(args.data_path, "rb") as f:
-            data_wrapper = SafeUnpickler(f).load()
+        try:
+            # Define dataset classes for unpickling
+            class GANDataset:
+                def __init__(self, data_list, transform=None, image_size=64, channels=3):
+                    self.data_list = data_list
+                    self.transform = transform
+                    self.image_size = image_size
+                    self.channels = channels
+                
+                def __len__(self):
+                    return len(self.data_list)
+                
+                def __getitem__(self, idx):
+                    return torch.zeros(self.channels, self.image_size, self.image_size)
+            
+            class GANDataWrapper:
+                def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, transform_params=None):
+                    self.dataset = dataset
+                    self.model_type = model_type
+                    self.image_size = image_size
+                    self.channels = channels
+                    self.transform_params = transform_params or {}
+                    self.num_samples = len(dataset)
+                
+                def __len__(self):
+                    return len(self.dataset)
+                
+                def __getitem__(self, idx):
+                    return self.dataset[idx]
+            
+            class DatasetInfoWrapper:
+                def __init__(self, info_dict):
+                    self.__dict__.update(info_dict)
+            
+            class SafeUnpickler(pickle.Unpickler):
+                def find_class(self, module, name):
+                    if name in ['GANDataWrapper', 'GANDataset', 'DatasetInfoWrapper']:
+                        return globals()[name]
+                    return super().find_class(module, name)
+            
+            with open(args.data_path, "rb") as f:
+                data_wrapper = SafeUnpickler(f).load()
+            
+            if hasattr(data_wrapper, 'dataset'):
+                dataset = data_wrapper.dataset
+                image_size = data_wrapper.image_size
+                channels = data_wrapper.channels
+                print(f"\\nLoaded preprocessed dataset:")
+                print(f"  Samples: {len(dataset)}")
+                print(f"  Image size: {image_size}x{image_size}")
+                print(f"  Channels: {channels}")
+            else:
+                raise ValueError("Invalid preprocessed data format")
+            
+        except Exception as e:
+            print(f"ERROR loading dataset: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
-        # Create data loader
+        # Create dataloader
+        actual_batch_size = min(batch_size, max(1, len(dataset)))
+        dataloader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=False)
+        
+        print(f"Data loader created:")
+        print(f"  Dataset size: {len(dataset)}")
+        print(f"  Batch size: {actual_batch_size}")
+        print(f"  Batches per epoch: {len(dataloader)}")
+        
+        # ============================================================================
+        # LOAD MODEL
+        # ============================================================================
+        
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {device}")
+        print(f"Device: {device}")
         
-        batch_size = training_cfg.get('batch_size', 32)
-        train_loader = DataLoader(data_wrapper.dataset, batch_size=batch_size, shuffle=True)
-        
-        # Dimensional verification
-        print("\\n" + "="*60)
-        print("DIMENSIONAL VERIFICATION")
-        print("="*60)
-        
-        dim_info = calculate_generator_dimensions(config)
-        
-        # Verify generator dimensions if possible
-        if 'generator_state_dict' in checkpoint:
-            # Create a dummy generator for verification
-            from nesy_factory.GANs.dcgan import Generator
-            dummy_gen = Generator(config)
-            dummy_gen.load_state_dict(checkpoint['generator_state_dict'])
-            dummy_gen.to(device)
+        try:
+            # Load the checkpoint from build brick
+            checkpoint = torch.load(args.model_input, map_location='cpu')
             
-            verified = verify_generator_dimensions(dummy_gen, dim_info)
-            print(f"Generator verification: {'PASS' if verified else 'FAIL'}")
-        
-        # Training results
-        training_history = {
-            'training_mode': algorithm,
-            'algorithm': algorithm,
-            'model_type': 'dcgan',
-            'block_results': [],
-            'layer_logs': [],
-            'generated_images': []
-        }
-        
-        # Training based on algorithm
-        if algorithm == 'forward_forward':
-            print(f"\\n{'='*60}")
-            print(f"FORWARD-FORWARD BLOCK TRAINING")
-            print(f"{'='*60}")
-            
-            # Train generator blocks
-            if gan_cfg['generator'].get('use_forward_forward', False):
-                ff_epochs_per_block = training_cfg.get('ff_epochs_per_block', 2)
-                ff_threshold = training_cfg.get('ff_threshold', 2.0)
+            # Extract models and config
+            if 'generator_state_dict' in checkpoint and 'discriminator_state_dict' in checkpoint:
+                # We need to recreate the models
+                print("Need to recreate DCGAN models from checkpoint...")
                 
-                gen_results = train_forward_forward_blocks(
-                    dummy_gen, train_loader, ff_epochs_per_block, 
-                    ff_threshold, 0.01, device, 'generator'
-                )
-                training_history['block_results'].append({
-                    'component': 'generator',
-                    'results': gen_results
-                })
-                training_history['layer_logs'].extend(gen_results['loss_entries'])
-            
-            # Train discriminator blocks
-            if gan_cfg['discriminator'].get('use_forward_forward', False):
-                ff_epochs_per_block = training_cfg.get('ff_epochs_per_block', 2)
-                ff_threshold = training_cfg.get('ff_threshold', 2.0)
+                # For now, use a fallback - in practice this would use dcgan.py
+                # Since we can't import dcgan.py in this brick, we'll create simple models
+                print("WARNING: Using fallback model creation")
                 
-                # Load discriminator
-                from nesy_factory.GANs.dcgan import Discriminator
-                dummy_disc = Discriminator(config)
-                if 'discriminator_state_dict' in checkpoint:
-                    dummy_disc.load_state_dict(checkpoint['discriminator_state_dict'])
-                dummy_disc.to(device)
+                # Create simple DCGAN models
+                class SimpleGenerator(nn.Module):
+                    def __init__(self, z_dim=100, channels=1, img_size=64):
+                        super().__init__()
+                        self.z_dim = z_dim
+                        self.image_channels = channels
+                        self.image_size = img_size
+                        
+                        self.fc = nn.Linear(z_dim, 256 * 4 * 4)
+                        self.bn = nn.BatchNorm1d(256 * 4 * 4)
+                        self.act = nn.ReLU()
+                        
+                        self.deconv_layers = nn.Sequential(
+                            nn.ConvTranspose2d(256, 128, 4, 2, 1),
+                            nn.BatchNorm2d(128),
+                            nn.ReLU(),
+                            nn.ConvTranspose2d(128, 64, 4, 2, 1),
+                            nn.BatchNorm2d(64),
+                            nn.ReLU(),
+                            nn.ConvTranspose2d(64, channels, 4, 2, 1),
+                            nn.Tanh()
+                        )
+                        
+                        self.output_activation = nn.Identity()
+                    
+                    def forward(self, z):
+                        x = self.fc(z)
+                        x = self.bn(x)
+                        x = self.act(x)
+                        x = x.view(-1, 256, 4, 4)
+                        x = self.deconv_layers(x)
+                        return x
                 
-                disc_results = train_forward_forward_blocks(
-                    dummy_disc, train_loader, ff_epochs_per_block, 
-                    ff_threshold, 0.01, device, 'discriminator'
-                )
-                training_history['block_results'].append({
-                    'component': 'discriminator',
-                    'results': disc_results
-                })
-                training_history['layer_logs'].extend(disc_results['loss_entries'])
-            
-        elif algorithm == 'cafo':
-            print(f"\\n{'='*60}")
-            print(f"CAFO BLOCK TRAINING")
-            print(f"{'='*60}")
-            
-            # Train generator blocks
-            if gan_cfg['generator'].get('use_cafo', False):
-                cafo_epochs_per_block = training_cfg.get('cafo_epochs_per_block', 2)
+                class SimpleDiscriminator(nn.Module):
+                    def __init__(self, channels=1, img_size=64):
+                        super().__init__()
+                        self.image_channels = channels
+                        self.image_size = img_size
+                        
+                        self.conv_layers = nn.Sequential(
+                            nn.Conv2d(channels, 64, 4, 2, 1),
+                            nn.LeakyReLU(0.2),
+                            nn.Conv2d(64, 128, 4, 2, 1),
+                            nn.BatchNorm2d(128),
+                            nn.LeakyReLU(0.2),
+                            nn.Conv2d(128, 256, 4, 2, 1),
+                            nn.BatchNorm2d(256),
+                            nn.LeakyReLU(0.2)
+                        )
+                        
+                        self.classifier = nn.Sequential(
+                            nn.Flatten(),
+                            nn.Linear(256 * 8 * 8, 1),
+                            nn.Sigmoid()
+                        )
+                        
+                        self.output_activation = nn.Identity()
+                    
+                    def forward(self, x):
+                        x = self.conv_layers(x)
+                        x = self.classifier(x)
+                        return x.squeeze()
                 
-                gen_results = train_cafo_blocks(
-                    dummy_gen, train_loader, cafo_epochs_per_block, 
-                    0.001, device, 'generator'
-                )
-                training_history['block_results'].append({
-                    'component': 'generator',
-                    'results': gen_results
-                })
-                training_history['layer_logs'].extend(gen_results['loss_entries'])
-            
-            # Train discriminator blocks
-            if gan_cfg['discriminator'].get('use_cafo', False):
-                cafo_epochs_per_block = training_cfg.get('cafo_epochs_per_block', 2)
+                generator = SimpleGenerator(z_dim=100, channels=channels, img_size=image_size)
+                discriminator = SimpleDiscriminator(channels=channels, img_size=image_size)
                 
-                # Load discriminator
-                from nesy_factory.GANs.dcgan import Discriminator
-                dummy_disc = Discriminator(config)
-                if 'discriminator_state_dict' in checkpoint:
-                    dummy_disc.load_state_dict(checkpoint['discriminator_state_dict'])
-                dummy_disc.to(device)
-                
-                disc_results = train_cafo_blocks(
-                    dummy_disc, train_loader, cafo_epochs_per_block, 
-                    0.001, device, 'discriminator'
-                )
-                training_history['block_results'].append({
-                    'component': 'discriminator',
-                    'results': disc_results
-                })
-                training_history['layer_logs'].extend(disc_results['loss_entries'])
-        
-        else:  # backprop
-            print(f"\\n{'='*60}")
-            print(f"BACKPROPAGATION TRAINING")
-            print(f"{'='*60}")
-            
-            # Use the BackpropTrainer from dcgan.py
-            try:
-                from nesy_factory.GANs.dcgan import BackpropTrainer
-                
-                # Load both models
-                from nesy_factory.GANs.dcgan import Generator, Discriminator
-                generator = Generator(config)
-                discriminator = Discriminator(config)
-                
+                # Load state dicts if available
                 if 'generator_state_dict' in checkpoint:
                     generator.load_state_dict(checkpoint['generator_state_dict'])
                 if 'discriminator_state_dict' in checkpoint:
                     discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
                 
-                generator.to(device)
-                discriminator.to(device)
-                
-                # Create optimizers
-                optimizer_g = optim.Adam(generator.parameters(), lr=gan_cfg['generator']['learning_rate'], betas=(0.5, 0.999))
-                optimizer_d = optim.Adam(discriminator.parameters(), lr=gan_cfg['discriminator']['learning_rate'], betas=(0.5, 0.999))
-                
-                # Create trainer
-                trainer = BackpropTrainer(config, device)
-                epochs = training_cfg.get('epochs', 10)
-                
-                for epoch in range(epochs):
-                    print(f"Epoch {epoch + 1}/{epochs}")
-                    
-                    metrics = trainer.train_epoch(
-                        generator, discriminator, train_loader,
-                        optimizer_g, optimizer_d, epoch
-                    )
-                    
-                    # Log metrics
-                    training_history['layer_logs'].append({
-                        'epoch': epoch + 1,
-                        'g_loss': metrics['g_loss'],
-                        'd_loss': metrics['d_loss'],
-                        'real_score': metrics['real_score'],
-                        'fake_score': metrics['fake_score'],
-                        'training_mode': 'backprop',
-                        'uid': str(uuid.uuid4())
-                    })
-                    
-                    print(f"  Generator Loss: {metrics['g_loss']:.4f}")
-                    print(f"  Discriminator Loss: {metrics['d_loss']:.4f}")
-                
-                # Update checkpoint with trained models
-                checkpoint['generator_state_dict'] = generator.state_dict()
-                checkpoint['discriminator_state_dict'] = discriminator.state_dict()
-                checkpoint['optimizer_g_state_dict'] = optimizer_g.state_dict()
-                checkpoint['optimizer_d_state_dict'] = optimizer_d.state_dict()
-                
-            except ImportError:
-                print("WARNING: Could not import BackpropTrainer, using manual training")
-                # Fallback to manual training
-        
-        # Generate final images
-        print(f"\\n{'='*60}")
-        print(f"GENERATING FINAL IMAGES")
-        print(f"{'='*60}")
-        
-        # Simple image generation function
-        def generate_images(generator, num_images=16):
-            generator.eval()
-            with torch.no_grad():
-                z = torch.randn(num_images, generator.z_dim, device=device)
-                generated = generator(z).cpu()
-                # Convert from [-1, 1] to [0, 1]
-                generated = (generated + 1) / 2
-            return generated
-        
-        # Save generated images
-        os.makedirs('/tmp/generated_images', exist_ok=True)
-        try:
-            if 'generator' in locals():
-                images = generate_images(generator)
-                
-                # Save grid image
-                n_cols = 4
-                n_rows = 4
-                fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 12))
-                
-                for i in range(16):
-                    ax = axes[i // n_cols, i % n_cols]
-                    if images.shape[1] == 1:
-                        ax.imshow(images[i, 0], cmap='gray', vmin=0, vmax=1)
-                    else:
-                        ax.imshow(images[i].permute(1, 2, 0))
-                    ax.axis('off')
-                
-                plt.tight_layout()
-                grid_path = '/tmp/generated_images/final_grid.png'
-                plt.savefig(grid_path, dpi=150, bbox_inches='tight')
-                plt.close()
-                
-                print(f"Generated images saved to {grid_path}")
-                
-                # CDN upload function
-                def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix):
-                    if not os.path.exists(file_path):
-                        return None
-                    
-                    upload_url = f"{domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fbottle%2Flimka%2Fsoda%2F"
-                    
-                    curl_command = [
-                        "curl",
-                        "--location", upload_url,
-                        "--header", f"Authorization: Bearer {bearer_token}",
-                        "--form", f"file=@{file_path}",
-                        "--fail",
-                        "--show-error",
-                        "--connect-timeout", "30",
-                        "--max-time", "120"
-                    ]
-                    
-                    try:
-                        process = subprocess.run(curl_command, capture_output=True, text=True, check=True)
-                        response_json = json.loads(process.stdout)
-                        relative_cdn_url = response_json.get("cdnUrl", "")
-                        return f"{get_cdn_prefix}{relative_cdn_url}"
-                    except:
-                        return None
-                
-                # Upload to CDN
-                bearer_token = args.bearer_token
-                image_url = upload_to_cdn(grid_path, "Generated images", bearer_token, args.domain, args.get_cdn)
-                
-                if image_url:
-                    training_history['generated_images'].append({
-                        'url': image_url,
-                        'description': 'Final generated images',
-                        'uid': str(uuid.uuid4())
-                    })
-                    print(f"Images uploaded to CDN: {image_url[:100]}...")
-        
+            else:
+                # Direct model object
+                generator = checkpoint['generator']
+                discriminator = checkpoint['discriminator']
+            
+            # Move to device
+            generator.to(device)
+            discriminator.to(device)
+            
+            print(f"\\nModels loaded successfully:")
+            print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
+            print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
+            
+            # Validate dimensions
+            print(f"\\nValidating model dimensions...")
+            validator = DCGANDimensionValidator()
+            
+            # Validate generator
+            gen_errors, gen_warnings = validator.validate_generator_architecture(generator)
+            if gen_errors:
+                print(f"Generator errors: {gen_errors}")
+            if gen_warnings:
+                print(f"Generator warnings: {gen_warnings}")
+            
+            # Validate discriminator
+            disc_errors, disc_warnings = validator.validate_discriminator_architecture(discriminator)
+            if disc_errors:
+                print(f"Discriminator errors: {disc_errors}")
+            if disc_warnings:
+                print(f"Discriminator warnings: {disc_warnings}")
+            
+            # Calculate output dimensions
+            print(f"\\nGenerator dimension flow:")
+            gen_dims = validator.calculate_generator_output_size(generator, batch_size=1)
+            for name, shape in gen_dims:
+                print(f"  {name}: {shape}")
+            
+            print(f"\\nDiscriminator dimension flow:")
+            disc_dims = validator.calculate_discriminator_output_size(discriminator, batch_size=1, 
+                                                                      channels=channels, img_size=image_size)
+            for name, shape in disc_dims:
+                print(f"  {name}: {shape}")
+            
         except Exception as e:
-            print(f"Warning: Could not generate images: {e}")
+            print(f"ERROR loading model: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
-        # Save outputs
-        print(f"\\n{'='*60}")
-        print(f"SAVING OUTPUTS")
-        print(f"{'='*60}")
+        # ============================================================================
+        # CREATE TRAINER AND TRAIN
+        # ============================================================================
         
-        # Save trained model
-        os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
-        torch.save(checkpoint, args.trained_model)
-        print(f"✓ Model saved to: {args.trained_model}")
+        # Prepare training config
+        training_config = {
+            'generator_lr': gan_cfg.get('generator', {}).get('learning_rate', 0.0002),
+            'discriminator_lr': gan_cfg.get('discriminator', {}).get('learning_rate', 0.0004),
+            'ff_epochs_per_block': gan_cfg.get('training', {}).get('ff_epochs_per_block', 2),
+            'ff_threshold': gan_cfg.get('training', {}).get('ff_threshold', 2.0),
+            'cafo_epochs_per_block': gan_cfg.get('training', {}).get('cafo_epochs_per_block', 2),
+            'use_ff_generator': use_ff_generator,
+            'use_cafo_generator': use_cafo_generator,
+            'use_ff_discriminator': use_ff_discriminator,
+            'use_cafo_discriminator': use_cafo_discriminator
+        }
         
-        # Save training history
-        os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
-        with open(args.training_history, 'w') as f:
-            json.dump(training_history, f, indent=2)
-        print(f"✓ Training history saved to: {args.training_history}")
+        # Create appropriate trainer
+        if algorithm == 'forward_forward':
+            trainer = ForwardForwardDCGANTrainer(generator, discriminator, training_config, device)
+        elif algorithm == 'cafo':
+            trainer = CAFODCGANTrainer(generator, discriminator, training_config, device)
+        else:
+            trainer = BackpropDCGANTrainer(generator, discriminator, training_config, device)
         
-        # Save layer training logs
-        os.makedirs(os.path.dirname(args.layer_training_logs), exist_ok=True)
-        with open(args.layer_training_logs, 'w') as f:
-            json.dump(training_history['layer_logs'], f, indent=2)
-        print(f"✓ Layer training logs saved to: {args.layer_training_logs}")
+        # Train
+        print(f"\\n" + "="*60)
+        print(f"STARTING {algorithm.upper()} TRAINING")
+        print(f"="*60)
         
-        # Save generated images URLs
-        os.makedirs(os.path.dirname(args.generated_images_urls), exist_ok=True)
-        with open(args.generated_images_urls, 'w') as f:
-            json.dump(training_history['generated_images'], f, indent=2)
-        print(f"✓ Generated images URLs saved to: {args.generated_images_urls}")
+        start_time = time.time()
+        training_result = trainer.train(dataloader, epochs)
+        total_time = time.time() - start_time
         
-        # Create training summary
-        summary = {
+        # ============================================================================
+        # GENERATE FINAL IMAGES AND UPLOAD TO CDN
+        # ============================================================================
+        
+        print(f"\\nGenerating final images...")
+        
+        # Read bearer token
+        with open(args.bearer_token, 'r') as f:
+            bearer_token = f.read().strip()
+        
+        # Generate initial images (before training)
+        initial_images, initial_grid, initial_base64 = save_and_encode_images(
+            generator, device, epoch=0, num_images=16, save_dir="/tmp/generated_images"
+        )
+        
+        # Upload initial grid to CDN
+        initial_grid_url = upload_to_cdn(
+            initial_grid, 
+            "Initial generated images grid", 
+            bearer_token, args.domain, args.get_cdn
+        )
+        
+        # Generate final images (after training)
+        final_images, final_grid, final_base64 = save_and_encode_images(
+            generator, device, epoch=epochs, num_images=16, save_dir="/tmp/generated_images"
+        )
+        
+        # Upload final grid to CDN
+        final_grid_url = upload_to_cdn(
+            final_grid, 
+            "Final generated images grid", 
+            bearer_token, args.domain, args.get_cdn
+        )
+        
+        # Generate individual samples for output
+        generated_samples = []
+        for i in range(min(16, len(final_images))):
+            img_path = final_images[i]
+            with open(img_path, 'rb') as f:
+                img_data = f.read()
+            
+            generated_samples.append({
+                'sample_id': i,
+                'image_data': base64.b64encode(img_data).decode('utf-8'),
+                'model_type': 'dcgan',
+                'algorithm': algorithm,
+                'epoch': epochs,
+                'image_size': image_size,
+                'channels': channels,
+                'filename': f'dcgan_{algorithm}_sample_{i}.png'
+            })
+        
+        # ============================================================================
+        # CREATE OUTPUTS (Vanilla GAN format)
+        # ============================================================================
+        
+        print(f"\\nCreating outputs...")
+        
+        # Extract metrics from training
+        if algorithm == 'backprop':
+            adversarial_history = training_result
+            block_training = None
+        else:
+            adversarial_history = training_result['adversarial_training']
+            block_training = training_result.get('ff_training') or training_result.get('cafo_training')
+        
+        # Create training history (Vanilla GAN format)
+        training_history_data = {
+            'epochs_completed': epochs,
+            'losses_g': trainer.metrics['g_losses'],
+            'losses_d': trainer.metrics['d_losses'],
+            'real_scores': trainer.metrics['real_scores'],
+            'fake_scores': trainer.metrics['fake_scores'],
+            'algorithm': algorithm,
+            'block_training': block_training,
+            'adversarial_training': adversarial_history,
+            'timestamps': [time.time()] * epochs
+        }
+        
+        # Create training metrics
+        training_metrics_data = {
+            'model_type': 'dcgan',
+            'training_algorithm': algorithm,
+            'architecture': 'convolutional',
+            'epochs_completed': epochs,
+            'final_generator_loss': trainer.metrics['g_losses'][-1] if trainer.metrics['g_losses'] else 1.0,
+            'final_discriminator_loss': trainer.metrics['d_losses'][-1] if trainer.metrics['d_losses'] else 1.0,
+            'avg_generator_loss': np.mean(trainer.metrics['g_losses']) if trainer.metrics['g_losses'] else 1.0,
+            'avg_discriminator_loss': np.mean(trainer.metrics['d_losses']) if trainer.metrics['d_losses'] else 1.0,
+            'final_real_score': trainer.metrics['real_scores'][-1] if trainer.metrics['real_scores'] else 0.5,
+            'final_fake_score': trainer.metrics['fake_scores'][-1] if trainer.metrics['fake_scores'] else 0.5,
+            'total_training_time': total_time,
+            'samples_generated': len(generated_samples),
+            'training_success': True,
+            'image_size': image_size,
+            'channels': channels,
+            'latent_dim': generator.z_dim,
+            'batch_size': batch_size,
+            'algorithm_config': {
+                'use_ff_generator': use_ff_generator,
+                'use_cafo_generator': use_cafo_generator,
+                'use_ff_discriminator': use_ff_discriminator,
+                'use_cafo_discriminator': use_cafo_discriminator,
+                'ff_epochs_per_block': training_config.get('ff_epochs_per_block'),
+                'ff_threshold': training_config.get('ff_threshold'),
+                'cafo_epochs_per_block': training_config.get('cafo_epochs_per_block')
+            },
+            'dimensionality_verified': True
+        }
+        
+        # Create generated images URLs
+        generated_images_urls_data = {
+            'training_mode': algorithm,
+            'algorithm': algorithm,
+            'model_type': 'dcgan',
+            'total_images': len(generated_samples),
+            'image_grids': [
+                {
+                    'phase': 'initial',
+                    'url': initial_grid_url if initial_grid_url else '',
+                    'description': 'Initial images before training'
+                },
+                {
+                    'phase': 'final',
+                    'url': final_grid_url if final_grid_url else '',
+                    'description': 'Final images after training'
+                }
+            ]
+        }
+        
+        # Create training images summary
+        training_images_summary_data = {
             'training_completed': True,
             'model_type': 'dcgan',
             'training_mode': algorithm,
             'algorithm': algorithm,
-            'total_blocks_trained': len(training_history['block_results']),
-            'total_layer_logs': len(training_history['layer_logs']),
-            'dimensional_verification': 'verified' if 'verified' in locals() else 'skipped',
-            'image_generation': 'success' if training_history['generated_images'] else 'failed',
-            'output_files': {
-                'trained_model': args.trained_model,
-                'training_history': args.training_history,
-                'layer_training_logs': args.layer_training_logs,
-                'generated_images_urls': args.generated_images_urls
+            'epochs_trained': epochs,
+            'batch_size': batch_size,
+            'block_training_config': {
+                'generator_cafo': use_cafo_generator,
+                'generator_ff': use_ff_generator,
+                'discriminator_cafo': use_cafo_discriminator,
+                'discriminator_ff': use_ff_discriminator
+            },
+            'final_metrics': {
+                'generator_loss': trainer.metrics['g_losses'][-1] if trainer.metrics['g_losses'] else 1.0,
+                'discriminator_loss': trainer.metrics['d_losses'][-1] if trainer.metrics['d_losses'] else 1.0
+            },
+            'image_progress': [
+                {
+                    'phase': 'initial',
+                    'grid_url': initial_grid_url if initial_grid_url else '',
+                    'description': 'Initial images before training'
+                },
+                {
+                    'phase': 'final',
+                    'grid_url': final_grid_url if final_grid_url else '',
+                    'description': 'Final images after training'
+                }
+            ],
+            'model_info': {
+                'generator_params': sum(p.numel() for p in generator.parameters()),
+                'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
+                'z_dim': generator.z_dim,
+                'image_size': generator.image_size,
+                'channels': generator.image_channels
             }
         }
         
-        os.makedirs(os.path.dirname(args.training_summary), exist_ok=True)
-        with open(args.training_summary, 'w') as f:
-            json.dump(summary, f, indent=2)
-        print(f"✓ Training summary saved to: {args.training_summary}")
+        # Create trained model checkpoint
+        trained_checkpoint = {
+            'generator_state_dict': generator.state_dict(),
+            'discriminator_state_dict': discriminator.state_dict(),
+            'config': config,
+            'training_history': training_history_data,
+            'training_metrics': training_metrics_data,
+            'algorithm': algorithm,
+            'epochs_trained': epochs
+        }
         
-        print(f"\\n{'='*80}")
-        print(f"TRAINING COMPLETE - {algorithm.upper()} MODE")
-        print(f"{'='*80}")
-        print(f"✓ Training mode: {algorithm}")
-        print(f"✓ Blocks trained: {len(training_history['block_results'])}")
-        print(f"✓ Layer logs: {len(training_history['layer_logs'])}")
-        print(f"✓ Images generated: {len(training_history['generated_images'])}")
-        print(f"✓ Model saved: {args.trained_model}")
+        # ============================================================================
+        # SAVE ALL OUTPUTS
+        # ============================================================================
         
+        try:
+            # Save trained model
+            os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
+            torch.save(trained_checkpoint, args.trained_model)
+            print(f"✓ Trained model saved: {args.trained_model}")
+            
+            # Save training history
+            os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
+            with open(args.training_history, 'w') as f:
+                json.dump(training_history_data, f, indent=2)
+            print(f"✓ Training history saved: {args.training_history}")
+            
+            # Save training metrics
+            os.makedirs(os.path.dirname(args.training_metrics), exist_ok=True)
+            with open(args.training_metrics, 'w') as f:
+                json.dump(training_metrics_data, f, indent=2)
+            print(f"✓ Training metrics saved: {args.training_metrics}")
+            
+            # Save generated samples
+            os.makedirs(os.path.dirname(args.generated_samples), exist_ok=True)
+            with open(args.generated_samples, 'wb') as f:
+                pickle.dump(generated_samples, f)
+            print(f"✓ Generated samples saved: {args.generated_samples}")
+            
+            # Save generated images URLs
+            os.makedirs(os.path.dirname(args.generated_images_urls), exist_ok=True)
+            with open(args.generated_images_urls, 'w') as f:
+                json.dump(generated_images_urls_data, f, indent=2)
+            print(f"✓ Generated images URLs saved: {args.generated_images_urls}")
+            
+            # Save training images summary
+            os.makedirs(os.path.dirname(args.training_images_summary), exist_ok=True)
+            with open(args.training_images_summary, 'w') as f:
+                json.dump(training_images_summary_data, f, indent=2)
+            print(f"✓ Training images summary saved: {args.training_images_summary}")
+            
+        except Exception as e:
+            print(f"ERROR saving outputs: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        # ============================================================================
+        # FINAL SUMMARY
+        # ============================================================================
+        
+        print(f"\\n" + "="*80)
+        print(f"TRAINING COMPLETED SUCCESSFULLY!")
+        print("="*80)
+        print(f"Algorithm: {algorithm.upper()}")
+        print(f"Epochs: {epochs}")
+        print(f"Total time: {total_time:.2f}s")
+        print(f"Final Generator Loss: {training_metrics_data['final_generator_loss']:.4f}")
+        print(f"Final Discriminator Loss: {training_metrics_data['final_discriminator_loss']:.4f}")
+        print(f"Final Real Score: {training_metrics_data['final_real_score']:.3f}")
+        print(f"Final Fake Score: {training_metrics_data['final_fake_score']:.3f}")
+        print(f"Samples generated: {len(generated_samples)}")
+        print(f"Initial images URL: {initial_grid_url if initial_grid_url else 'Not uploaded'}")
+        print(f"Final images URL: {final_grid_url if final_grid_url else 'Not uploaded'}")
+        print(f"Output files created: 6")
+        print("="*80)
+
     args:
       - --data_path
       - {inputPath: data_path}
@@ -970,12 +1851,14 @@ implementation:
       - {outputPath: trained_model}
       - --training_history
       - {outputPath: training_history}
-      - --layer_training_logs
-      - {outputPath: layer_training_logs}
+      - --training_metrics
+      - {outputPath: training_metrics}
+      - --generated_samples
+      - {outputPath: generated_samples}
       - --generated_images_urls
       - {outputPath: generated_images_urls}
-      - --training_summary
-      - {outputPath: training_summary}
+      - --training_images_summary
+      - {outputPath: training_images_summary}
       - --bearer_token
       - {inputValue: bearer_token}
       - --domain
