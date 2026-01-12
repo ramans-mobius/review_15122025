@@ -1,121 +1,104 @@
-name: Upload Data To CDN v9
-description: Uploads dataset outputs (from Load Dataset and Preprocess) to CDN for reuse
+name: Upload Data To CDN v10
+description: Uploads actual dataset outputs (images, not metadata) to CDN
 inputs:
-  # From Load Dataset brick
-  - name: train_data
+  # From Load Dataset v9 - ACTUAL DATA
+  - name: raw_train_data
     type: Dataset
-    description: "Train dataset pickle from Load Dataset"
-  - name: test_data
+    description: "Raw train dataset (actual images)"
+  - name: raw_test_data
     type: Dataset
-    description: "Test dataset pickle from Load Dataset"
+    description: "Raw test dataset (actual images)"
   - name: dataset_info
     type: DatasetInfo
-    description: "Dataset info pickle from Load Dataset"
   - name: data_config
     type: String
-    description: "Data config JSON from Load Dataset"
   
-  # From Preprocess brick
-  - name: processed_data
+  # From Preprocess v5 - PROCESSED DATA
+  - name: processed_train_data
     type: Dataset
-    description: "Processed data (GANDataWrapper) from Preprocess"
+    description: "Preprocessed train data (GAN-ready)"
+  - name: processed_test_data
+    type: Dataset
+    description: "Preprocessed test data (GAN-ready)"
   - name: preprocess_metadata
     type: String
-    description: "Preprocess metadata pickle"
   
   # CDN credentials
   - name: bearer_token
     type: String
-    description: "Bearer token for CDN authentication"
   - name: domain
     type: String
-    description: "CDN upload domain"
   - name: get_cdn
     type: String
-    description: "CDN download domain prefix"
 
 outputs:
-  # Train data URLs
-  - name: train_data_url
+  # Raw data URLs
+  - name: raw_train_data_url
     type: String
-    description: "URL to uploaded train dataset"
-  - name: test_data_url
+  - name: raw_test_data_url
     type: String
-    description: "URL to uploaded test dataset"
   - name: dataset_info_url
     type: String
-    description: "URL to uploaded dataset info"
   - name: data_config_url
     type: String
-    description: "URL to uploaded data config"
   
   # Processed data URLs
-  - name: processed_data_url
+  - name: processed_train_data_url
     type: String
-    description: "URL to uploaded processed data"
+  - name: processed_test_data_url
+    type: String
   - name: preprocess_metadata_url
     type: String
-    description: "URL to uploaded preprocess metadata"
   
   # Summary
   - name: upload_summary
     type: String
-    description: "JSON summary of all uploaded URLs and file info"
   - name: upload_summary_url
     type: String
-    description: "CDN URL for the upload summary JSON file"
 
 implementation:
   container:
-    image: deepak0147/nessy-facotry:0.0.8
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -ec
       - |
-        # Install curl if not available
-        if ! command -v curl &> /dev/null; then
-          echo "curl could not be found, installing..."
-          apt-get update > /dev/null && apt-get install -y curl > /dev/null
-        fi
+        apt-get update > /dev/null && apt-get install -y curl > /dev/null
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
-        import argparse
-        import subprocess
-        import json
-        import os
-        import uuid
-        import pickle
-        from pathlib import Path
+        import argparse, subprocess, json, os, uuid, pickle, sys
         
-        parser = argparse.ArgumentParser(description="Upload dataset files to CDN.")
+        parser = argparse.ArgumentParser()
         
-        # Load Dataset outputs
-        parser.add_argument('--train_data', type=str, required=True, help='Path to train dataset pickle')
-        parser.add_argument('--test_data', type=str, required=True, help='Path to test dataset pickle')
-        parser.add_argument('--dataset_info', type=str, required=True, help='Path to dataset info pickle')
-        parser.add_argument('--data_config', type=str, required=True, help='Path to data config JSON')
+        # Raw data from Load Dataset
+        parser.add_argument('--raw_train_data', type=str, required=True)
+        parser.add_argument('--raw_test_data', type=str, required=True)
+        parser.add_argument('--dataset_info', type=str, required=True)
+        parser.add_argument('--data_config', type=str, required=True)
         
-        # Preprocess outputs
-        parser.add_argument('--processed_data', type=str, required=True, help='Path to processed data pickle')
-        parser.add_argument('--preprocess_metadata', type=str, required=True, help='Path to preprocess metadata pickle')
+        # Processed data from Preprocess
+        parser.add_argument('--processed_train_data', type=str, required=True)
+        parser.add_argument('--processed_test_data', type=str, required=True)
+        parser.add_argument('--preprocess_metadata', type=str, required=True)
         
         # CDN credentials
-        parser.add_argument('--bearer_token', type=str, required=True, help='Bearer token file path')
-        parser.add_argument('--domain', type=str, required=True, help='CDN upload domain')
-        parser.add_argument('--get_cdn', type=str, required=True, help='CDN download domain prefix')
+        parser.add_argument('--bearer_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--get_cdn', type=str, required=True)
         
         # Output URLs
-        parser.add_argument('--train_data_url', type=str, required=True, help='Output path for train data URL')
-        parser.add_argument('--test_data_url', type=str, required=True, help='Output path for test data URL')
-        parser.add_argument('--dataset_info_url', type=str, required=True, help='Output path for dataset info URL')
-        parser.add_argument('--data_config_url', type=str, required=True, help='Output path for data config URL')
-        parser.add_argument('--processed_data_url', type=str, required=True, help='Output path for processed data URL')
-        parser.add_argument('--preprocess_metadata_url', type=str, required=True, help='Output path for preprocess metadata URL')
-        parser.add_argument('--upload_summary', type=str, required=True, help='Output path for upload summary')
-        parser.add_argument('--upload_summary_url', type=str, required=True, help='Output path for upload summary CDN URL')
+        parser.add_argument('--raw_train_data_url', type=str, required=True)
+        parser.add_argument('--raw_test_data_url', type=str, required=True)
+        parser.add_argument('--dataset_info_url', type=str, required=True)
+        parser.add_argument('--data_config_url', type=str, required=True)
+        parser.add_argument('--processed_train_data_url', type=str, required=True)
+        parser.add_argument('--processed_test_data_url', type=str, required=True)
+        parser.add_argument('--preprocess_metadata_url', type=str, required=True)
+        parser.add_argument('--upload_summary', type=str, required=True)
+        parser.add_argument('--upload_summary_url', type=str, required=True)
         
         args = parser.parse_args()
         
@@ -123,36 +106,35 @@ implementation:
         with open(args.bearer_token, 'r') as f:
             bearer_token = f.read().strip()
         
-        upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fbottle%2Flimka%2Fsoda%2F"
+        upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
         
-        print(f"=== DCGAN Data Upload to CDN ===")
-        print(f"Upload domain: {args.domain}")
-        print(f"Download prefix: {args.get_cdn}")
-        print(f"Files to upload: 7 (6 data files + 1 summary)")
+        print(f"=== UPLOAD ACTUAL DCGAN DATA TO CDN ===")
+        print(f"Files to upload: 8")
         
-        def upload_file_to_cdn(file_path, output_cdn_url_path, description, file_type="pkl"):
-            
+        def upload_file_to_cdn(file_path, output_url_path, description, file_type="data"):
             if not os.path.exists(file_path):
-                print(f"   Warning: File not found: {file_path}")
+                print(f"   ✗ File not found: {file_path}")
                 return None
             
             file_size = os.path.getsize(file_path)
-            print(f"   Uploading {description} ({file_size:,} bytes)...")
+            size_mb = file_size / (1024 * 1024)
             
-            # Generate unique filename
+            print(f"   Uploading {description} ({size_mb:.2f} MB)...")
+            
+            # Generate filename
             unique_id = str(uuid.uuid4())[:8]
-            original_name = os.path.basename(file_path)
-            cdn_filename = f"dcgan_{file_type}_{unique_id}_{original_name}"
+            cdn_filename = f"dcgan_{file_type}_{unique_id}.pkl"
             
             curl_command = [
                 "curl",
                 "--location", upload_url,
                 "--header", f"Authorization: Bearer {bearer_token}",
                 "--form", f"file=@{file_path}",
+                "--form", f"filename={cdn_filename}",
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "120"
+                "--max-time", "300"  # Longer timeout for larger files
             ]
             
             try:
@@ -170,199 +152,141 @@ implementation:
                     print(f"    Error: No cdnUrl in response")
                     return None
                 
-                # DO NOT modify the $$ pattern here - let the trigger brick handle it
-                # if "$$" in relative_cdn_url:
-                #     relative_cdn_url = relative_cdn_url.replace("$$", "$$$")
-                #     print(f"     Fixed $$ pattern in URL")
-                
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"     Uploaded: {full_url}...")
+                print(f"    ✓ Uploaded: {full_url[:100]}...")
                 
-                # Save URL to output file
-                output_dir = os.path.dirname(output_cdn_url_path)
-                if output_dir:
-                    os.makedirs(output_dir, exist_ok=True)
-                
-                with open(output_cdn_url_path, "w") as f:
+                # Save URL
+                os.makedirs(os.path.dirname(output_url_path) or '.', exist_ok=True)
+                with open(output_url_path, "w") as f:
                     f.write(full_url)
                 
                 return {
                     'url': full_url,
                     'size_bytes': file_size,
-                    'description': description,
-                    'original_path': file_path
+                    'size_mb': size_mb,
+                    'description': description
                 }
                 
             except subprocess.CalledProcessError as e:
-                print(f"    Curl error: {e.returncode}")
-                print(f"    Error: {e.stderr[:200]}")
-                return None
-            except json.JSONDecodeError as e:
-                print(f"     JSON parse error: {e}")
+                print(f"    ✗ Curl error: {e.stderr[:200]}")
                 return None
         
-        # Create summary dictionary
+        # Upload all files
         upload_results = {}
         
-        print(f"\\n Uploading Load Dataset outputs...")
+        print(f"\\nUploading raw data...")
         
-        # Upload Load Dataset outputs
-        results = []
-        
-        # 1. Train data
-        train_result = upload_file_to_cdn(
-            args.train_data, 
-            args.train_data_url, 
-            "Train dataset", 
-            "train"
+        # 1. Raw train data (ACTUAL IMAGES - could be large)
+        result = upload_file_to_cdn(
+            args.raw_train_data, args.raw_train_data_url,
+            "Raw train dataset (actual images)", "raw_train"
         )
-        if train_result:
-            results.append(train_result)
-            upload_results['train_data'] = train_result
+        if result:
+            upload_results['raw_train_data'] = result
         
-        # 2. Test data
-        test_result = upload_file_to_cdn(
-            args.test_data, 
-            args.test_data_url, 
-            "Test dataset", 
-            "test"
+        # 2. Raw test data
+        result = upload_file_to_cdn(
+            args.raw_test_data, args.raw_test_data_url,
+            "Raw test dataset (actual images)", "raw_test"
         )
-        if test_result:
-            results.append(test_result)
-            upload_results['test_data'] = test_result
+        if result:
+            upload_results['raw_test_data'] = result
         
         # 3. Dataset info
-        info_result = upload_file_to_cdn(
-            args.dataset_info, 
-            args.dataset_info_url, 
-            "Dataset info", 
-            "info"
+        result = upload_file_to_cdn(
+            args.dataset_info, args.dataset_info_url,
+            "Dataset info", "info"
         )
-        if info_result:
-            results.append(info_result)
-            upload_results['dataset_info'] = info_result
+        if result:
+            upload_results['dataset_info'] = result
         
         # 4. Data config
-        data_config_result = upload_file_to_cdn(
-            args.data_config, 
-            args.data_config_url, 
-            "Data config", 
-            "config"
+        result = upload_file_to_cdn(
+            args.data_config, args.data_config_url,
+            "Data config", "config"
         )
-        if data_config_result:
-            results.append(data_config_result)
-            upload_results['data_config'] = data_config_result
+        if result:
+            upload_results['data_config'] = result
         
-        print(f"\\n Uploading Preprocess outputs...")
+        print(f"\\nUploading processed data...")
         
-        # Upload Preprocess outputs
-        # 5. Processed data (GANDataWrapper)
-        processed_result = upload_file_to_cdn(
-            args.processed_data, 
-            args.processed_data_url, 
-            "Processed data (GANDataWrapper)", 
-            "processed"
+        # 5. Processed train data
+        result = upload_file_to_cdn(
+            args.processed_train_data, args.processed_train_data_url,
+            "Processed train data (GAN-ready)", "processed_train"
         )
-        if processed_result:
-            results.append(processed_result)
-            upload_results['processed_data'] = processed_result
+        if result:
+            upload_results['processed_train_data'] = result
         
-        # 6. Preprocess metadata
-        metadata_result = upload_file_to_cdn(
-            args.preprocess_metadata, 
-            args.preprocess_metadata_url, 
-            "Preprocess metadata", 
-            "metadata"
+        # 6. Processed test data
+        result = upload_file_to_cdn(
+            args.processed_test_data, args.processed_test_data_url,
+            "Processed test data (GAN-ready)", "processed_test"
         )
-        if metadata_result:
-            results.append(metadata_result)
-            upload_results['preprocess_metadata'] = metadata_result
+        if result:
+            upload_results['processed_test_data'] = result
         
-        # Create summary JSON file
-        print(f"\\n Creating upload summary...")
+        # 7. Preprocess metadata
+        result = upload_file_to_cdn(
+            args.preprocess_metadata, args.preprocess_metadata_url,
+            "Preprocess metadata", "preprocess_meta"
+        )
+        if result:
+            upload_results['preprocess_metadata'] = result
         
-        total_size = sum(r['size_bytes'] for r in results if r)
-        successful_uploads = len(results)
+        # Create summary
+        total_size = sum(r['size_bytes'] for r in upload_results.values())
+        successful = len(upload_results)
         
         summary = {
-            'total_uploads': successful_uploads,
+            'total_files': 7,
+            'successful_uploads': successful,
             'total_size_bytes': total_size,
             'total_size_mb': total_size / (1024 * 1024),
-            'timestamp': os.path.getmtime(args.train_data) if os.path.exists(args.train_data) else None,
-            'urls': {k: v['url'] for k, v in upload_results.items() if v},
-            'file_sizes': {k: v['size_bytes'] for k, v in upload_results.items() if v},
-            'cdn_info': {
-                'upload_domain': args.domain,
-                'download_prefix': args.get_cdn,
-                'upload_endpoint': upload_url
-            }
+            'files': {k: {
+                'size_mb': v['size_mb'],
+                'description': v['description']
+            } for k, v in upload_results.items()},
+            'urls': {k: v['url'] for k, v in upload_results.items()}
         }
         
-        # Save summary to local file first
-        os.makedirs(os.path.dirname(args.upload_summary) or '.', exist_ok=True)
+        # Save summary locally
         with open(args.upload_summary, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        print(f"   Summary created locally: {args.upload_summary}")
-        
-        # 7. Upload the summary JSON file to CDN
-        print(f"\\n Uploading summary to CDN...")
-        summary_result = upload_file_to_cdn(
-            args.upload_summary,
-            args.upload_summary_url,
-            "Upload summary JSON",
-            "summary"
+        # 8. Upload summary
+        result = upload_file_to_cdn(
+            args.upload_summary, args.upload_summary_url,
+            "Upload summary", "summary"
         )
-        
-        if summary_result:
-            results.append(summary_result)
-            upload_results['upload_summary'] = summary_result
-            # Update the summary to include its own CDN URL
-            summary['upload_summary_cdn_url'] = summary_result['url']
+        if result:
+            upload_results['upload_summary'] = result
+            summary['upload_summary_url'] = result['url']
             
-            # Save updated summary with CDN URL
+            # Update local summary with URL
             with open(args.upload_summary, 'w') as f:
                 json.dump(summary, f, indent=2)
         
-        print(f"\\n Upload Complete!")
-        print(f"   Successful uploads: {len(results)}/7")
-        print(f"   Total size: {total_size:,} bytes ({total_size/(1024*1024):.2f} MB)")
-        print(f"\\n Uploaded files:")
-        for i, result in enumerate(results, 1):
-            if result:
-                print(f"   {i}. {result['description']}: {result['size_bytes']:,} bytes")
-        
-        print(f"\\n Summary saved to: {args.upload_summary}")
-        if summary_result:
-            print(f" Summary CDN URL: {summary_result['url']}...")
-        
-        # Verify all outputs were created
-        output_files = [
-            args.train_data_url, args.test_data_url, args.dataset_info_url,
-            args.data_config_url, args.processed_data_url, args.preprocess_metadata_url,
-            args.upload_summary, args.upload_summary_url
-        ]
-        
-        for output_file in output_files:
-            if os.path.exists(output_file):
-                print(f"   ✓ {os.path.basename(output_file)} created")
-            else:
-                print(f"     {os.path.basename(output_file)} not created")
+        print(f"\\n✓ Upload complete!")
+        print(f"  Successful: {successful}/7 files")
+        print(f"  Total size: {total_size/(1024*1024):.2f} MB")
         
     args:
-      # Load Dataset inputs
-      - --train_data
-      - {inputPath: train_data}
-      - --test_data
-      - {inputPath: test_data}
+      # Raw data inputs
+      - --raw_train_data
+      - {inputPath: raw_train_data}
+      - --raw_test_data
+      - {inputPath: raw_test_data}
       - --dataset_info
       - {inputPath: dataset_info}
       - --data_config
       - {inputPath: data_config}
       
-      # Preprocess inputs
-      - --processed_data
-      - {inputPath: processed_data}
+      # Processed data inputs
+      - --processed_train_data
+      - {inputPath: processed_train_data}
+      - --processed_test_data
+      - {inputPath: processed_test_data}
       - --preprocess_metadata
       - {inputPath: preprocess_metadata}
       
@@ -375,16 +299,18 @@ implementation:
       - {inputValue: get_cdn}
       
       # Output URLs
-      - --train_data_url
-      - {outputPath: train_data_url}
-      - --test_data_url
-      - {outputPath: test_data_url}
+      - --raw_train_data_url
+      - {outputPath: raw_train_data_url}
+      - --raw_test_data_url
+      - {outputPath: raw_test_data_url}
       - --dataset_info_url
       - {outputPath: dataset_info_url}
       - --data_config_url
       - {outputPath: data_config_url}
-      - --processed_data_url
-      - {outputPath: processed_data_url}
+      - --processed_train_data_url
+      - {outputPath: processed_train_data_url}
+      - --processed_test_data_url
+      - {outputPath: processed_test_data_url}
       - --preprocess_metadata_url
       - {outputPath: preprocess_metadata_url}
       - --upload_summary
