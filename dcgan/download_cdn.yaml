@@ -1,57 +1,46 @@
-name: Download DCGAN Data From CDN
-description: Downloads dataset outputs (train, test, processed data, configs) from CDN
+name: Download DCGAN Data From CDN v2
+description: Downloads actual image datasets from CDN
 inputs:
-  # Input URLs from UploadDataToCDN brick
-  - name: train_data_url
+  # Input URLs from Upload
+  - name: raw_train_data_url
     type: String
-    description: "URL to train dataset on CDN"
-  - name: test_data_url
+  - name: raw_test_data_url
     type: String
-    description: "URL to test dataset on CDN"
+  - name: processed_train_data_url
+    type: String
+  - name: processed_test_data_url
+    type: String
   - name: dataset_info_url
     type: String
-    description: "URL to dataset info on CDN"
   - name: data_config_url
     type: String
-    description: "URL to data config on CDN"
-  - name: processed_data_url
-    type: String
-    description: "URL to processed data on CDN"
   - name: preprocess_metadata_url
     type: String
-    description: "URL to preprocess metadata on CDN"
   - name: upload_summary_url
     type: String
-    description: "URL to upload summary (optional)"
   
   # CDN credentials
   - name: bearer_token
     type: String
-    description: "Bearer token for CDN authentication"
 
 outputs:
-  # Recreated outputs (matching Load Dataset and Preprocess outputs)
-  - name: train_data
+  # Downloaded files
+  - name: raw_train_data
     type: Dataset
-    description: "Downloaded train dataset pickle"
-  - name: test_data
+  - name: raw_test_data
     type: Dataset
-    description: "Downloaded test dataset pickle"
+  - name: processed_train_data
+    type: Dataset
+  - name: processed_test_data
+    type: Dataset
   - name: dataset_info
     type: DatasetInfo
-    description: "Downloaded dataset info pickle"
   - name: data_config
     type: String
-    description: "Downloaded data config JSON"
-  - name: processed_data
-    type: Dataset
-    description: "Downloaded processed data (GANDataWrapper)"
   - name: preprocess_metadata
     type: String
-    description: "Downloaded preprocess metadata pickle"
   - name: download_summary
     type: String
-    description: "JSON summary of all downloads"
 
 implementation:
   container:
@@ -60,64 +49,63 @@ implementation:
       - sh
       - -ec
       - |
-        # Install required packages
         apt-get update > /dev/null && apt-get install -y curl > /dev/null
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
-        import argparse
-        import subprocess
-        import json
-        import os
-        import pickle
-        import urllib.parse
+        import argparse, subprocess, json, os, pickle, sys
         
-        def decode_cdn_url(url):
-            if not url:
-                return url
-            
-            # Preserve $$ pattern
-            url = url.replace("$$", "__DOUBLE_DOLLAR_PLACEHOLDER__")
-            
-            try:
-                decoded = urllib.parse.unquote(url)
-                
-                # Handle _ENC patterns
-                if "_ENC(" in decoded:
-                    final_url = decoded
-                else:
-                    if "_ENC%28" in decoded:
-                        decoded = decoded.replace("_ENC%28", "_ENC(")
-                    if "%29" in decoded:
-                        decoded = decoded.replace("%29", ")")
-                    final_url = decoded
-                
-                # Restore $$ pattern
-                final_url = final_url.replace("__DOUBLE_DOLLAR_PLACEHOLDER__", "$$")
-                return final_url
-            except:
-                url = url.replace("__DOUBLE_DOLLAR_PLACEHOLDER__", "$$")
-                return url
+        parser = argparse.ArgumentParser()
         
-        def download_from_cdn(url, output_path, description, bearer_token):
+        # Input URLs
+        parser.add_argument('--raw_train_data_url', type=str, required=True)
+        parser.add_argument('--raw_test_data_url', type=str, required=True)
+        parser.add_argument('--processed_train_data_url', type=str, required=True)
+        parser.add_argument('--processed_test_data_url', type=str, required=True)
+        parser.add_argument('--dataset_info_url', type=str, required=True)
+        parser.add_argument('--data_config_url', type=str, required=True)
+        parser.add_argument('--preprocess_metadata_url', type=str, required=True)
+        parser.add_argument('--upload_summary_url', type=str, required=True)
+        
+        # CDN credentials
+        parser.add_argument('--bearer_token', type=str, required=True)
+        
+        # Output paths
+        parser.add_argument('--raw_train_data', type=str, required=True)
+        parser.add_argument('--raw_test_data', type=str, required=True)
+        parser.add_argument('--processed_train_data', type=str, required=True)
+        parser.add_argument('--processed_test_data', type=str, required=True)
+        parser.add_argument('--dataset_info', type=str, required=True)
+        parser.add_argument('--data_config', type=str, required=True)
+        parser.add_argument('--preprocess_metadata', type=str, required=True)
+        parser.add_argument('--download_summary', type=str, required=True)
+        
+        args = parser.parse_args()
+        
+        # Read bearer token
+        with open(args.bearer_token, 'r') as f:
+            bearer_token = f.read().strip()
+        
+        print(f"=== DOWNLOAD ACTUAL DCGAN DATA FROM CDN ===")
+        
+        def download_from_cdn(url, output_path, description):
             if not url or url.strip() == "":
-                print(f"    Skipping {description}: No URL provided")
+                print(f"   Skipping {description}: No URL")
                 return False
             
-            decoded_url = decode_cdn_url(url)
             print(f"   Downloading {description}...")
             
             curl_command = [
                 "curl",
-                "--location", decoded_url,
+                "--location", url,
                 "--header", f"Authorization: Bearer {bearer_token}",
                 "--output", output_path,
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "120"
+                "--max-time", "300"  # Longer timeout for larger files
             ]
             
             try:
@@ -130,215 +118,119 @@ implementation:
                 
                 if os.path.exists(output_path):
                     size = os.path.getsize(output_path)
-                    print(f"     Downloaded: {size:,} bytes")
-                    return True
+                    size_mb = size / (1024 * 1024)
+                    print(f"    ✓ Downloaded: {size_mb:.2f} MB")
+                    
+                    # Verify it's valid pickle (actual data, not metadata)
+                    try:
+                        with open(output_path, 'rb') as f:
+                            data = pickle.load(f)
+                        print(f"    ✓ Valid pickle data loaded")
+                        return True
+                    except:
+                        print(f"    ✗ Invalid pickle file")
+                        return False
                 else:
-                    print(f"     Download failed: File not created")
+                    print(f"    ✗ File not created")
                     return False
                     
             except subprocess.CalledProcessError as e:
-                print(f"     Curl error: {e.returncode}")
-                print(f"    Error: {e.stderr[:200]}")
+                print(f"    ✗ Download error: {e.stderr[:200]}")
                 return False
         
-        parser = argparse.ArgumentParser(description="Download DCGAN data from CDN")
-        
-        # Input URLs
-        parser.add_argument('--train_data_url', type=str, required=True)
-        parser.add_argument('--test_data_url', type=str, required=True)
-        parser.add_argument('--dataset_info_url', type=str, required=True)
-        parser.add_argument('--data_config_url', type=str, required=True)
-        parser.add_argument('--processed_data_url', type=str, required=True)
-        parser.add_argument('--preprocess_metadata_url', type=str, required=True)
-        parser.add_argument('--upload_summary_url', type=str, default="")
-        
-        # CDN credentials
-        parser.add_argument('--bearer_token', type=str, required=True)
-        
-        # Output paths
-        parser.add_argument('--train_data', type=str, required=True)
-        parser.add_argument('--test_data', type=str, required=True)
-        parser.add_argument('--dataset_info', type=str, required=True)
-        parser.add_argument('--data_config', type=str, required=True)
-        parser.add_argument('--processed_data', type=str, required=True)
-        parser.add_argument('--preprocess_metadata', type=str, required=True)
-        parser.add_argument('--download_summary', type=str, required=True)
-        
-        args = parser.parse_args()
-        
-        # Read bearer token
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
-        
-        print(f"=== DCGAN Data Download from CDN ===")
-        print(f"Files to download: 6")
-        
-        # Ensure output directories exist
+        # Create output directories
         output_paths = [
-            args.train_data, args.test_data, args.dataset_info,
-            args.data_config, args.processed_data, args.preprocess_metadata,
-            args.download_summary
+            args.raw_train_data, args.raw_test_data,
+            args.processed_train_data, args.processed_test_data,
+            args.dataset_info, args.data_config,
+            args.preprocess_metadata, args.download_summary
         ]
         
         for path in output_paths:
-            dir_path = os.path.dirname(path)
-            if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         
         # Download all files
         download_results = {}
         
-        # 1. Train data
+        # Download raw data
+        print(f"\\nDownloading raw data...")
         success = download_from_cdn(
-            args.train_data_url, 
-            args.train_data, 
-            "Train dataset", 
-            bearer_token
+            args.raw_train_data_url, args.raw_train_data, "Raw train data"
         )
-        download_results['train_data'] = {
-            'success': success,
-            'path': args.train_data,
-            'size': os.path.getsize(args.train_data) if success else 0
-        }
+        download_results['raw_train_data'] = {'success': success}
         
-        # 2. Test data
         success = download_from_cdn(
-            args.test_data_url, 
-            args.test_data, 
-            "Test dataset", 
-            bearer_token
+            args.raw_test_data_url, args.raw_test_data, "Raw test data"
         )
-        download_results['test_data'] = {
-            'success': success,
-            'path': args.test_data,
-            'size': os.path.getsize(args.test_data) if success else 0
-        }
+        download_results['raw_test_data'] = {'success': success}
         
-        # 3. Dataset info
+        # Download processed data
+        print(f"\\nDownloading processed data...")
         success = download_from_cdn(
-            args.dataset_info_url, 
-            args.dataset_info, 
-            "Dataset info", 
-            bearer_token
+            args.processed_train_data_url, args.processed_train_data, "Processed train data"
         )
-        download_results['dataset_info'] = {
-            'success': success,
-            'path': args.dataset_info,
-            'size': os.path.getsize(args.dataset_info) if success else 0
-        }
+        download_results['processed_train_data'] = {'success': success}
         
-        # 4. Data config
         success = download_from_cdn(
-            args.data_config_url, 
-            args.data_config, 
-            "Data config", 
-            bearer_token
+            args.processed_test_data_url, args.processed_test_data, "Processed test data"
         )
-        download_results['data_config'] = {
-            'success': success,
-            'path': args.data_config,
-            'size': os.path.getsize(args.data_config) if success else 0
-        }
+        download_results['processed_test_data'] = {'success': success}
         
-        # 5. Processed data
+        # Download metadata
+        print(f"\\nDownloading metadata...")
         success = download_from_cdn(
-            args.processed_data_url, 
-            args.processed_data, 
-            "Processed data", 
-            bearer_token
+            args.dataset_info_url, args.dataset_info, "Dataset info"
         )
-        download_results['processed_data'] = {
-            'success': success,
-            'path': args.processed_data,
-            'size': os.path.getsize(args.processed_data) if success else 0
-        }
+        download_results['dataset_info'] = {'success': success}
         
-        # 6. Preprocess metadata
         success = download_from_cdn(
-            args.preprocess_metadata_url, 
-            args.preprocess_metadata, 
-            "Preprocess metadata", 
-            bearer_token
+            args.data_config_url, args.data_config, "Data config"
         )
-        download_results['preprocess_metadata'] = {
-            'success': success,
-            'path': args.preprocess_metadata,
-            'size': os.path.getsize(args.preprocess_metadata) if success else 0
-        }
+        download_results['data_config'] = {'success': success}
         
-        # Download summary if provided
-        if args.upload_summary_url and args.upload_summary_url.strip():
-            temp_summary = "/tmp/upload_summary.json"
-            success = download_from_cdn(
-                args.upload_summary_url,
-                temp_summary,
-                "Upload summary",
-                bearer_token
-            )
-            if success and os.path.exists(temp_summary):
-                with open(temp_summary, 'r') as f:
-                    original_summary = json.load(f)
+        success = download_from_cdn(
+            args.preprocess_metadata_url, args.preprocess_metadata, "Preprocess metadata"
+        )
+        download_results['preprocess_metadata'] = {'success': success}
         
         # Create download summary
+        successful = sum(1 for r in download_results.values() if r['success'])
+        
         summary = {
-            'total_files': len(download_results),
-            'successful_downloads': sum(1 for r in download_results.values() if r['success']),
-            'total_size_bytes': sum(r['size'] for r in download_results.values()),
-            'files': download_results,
-            'output_paths': {
-                'train_data': args.train_data,
-                'test_data': args.test_data,
-                'dataset_info': args.dataset_info,
-                'data_config': args.data_config,
-                'processed_data': args.processed_data,
-                'preprocess_metadata': args.preprocess_metadata
-            }
+            'total_downloads': len(download_results),
+            'successful_downloads': successful,
+            'download_results': download_results,
+            'critical_files_present': all([
+                download_results.get('processed_train_data', {}).get('success', False),
+                download_results.get('processed_test_data', {}).get('success', False)
+            ])
         }
         
-        # Save summary
         with open(args.download_summary, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        print(f"\\n Download Complete!")
-        successful = sum(1 for r in download_results.values() if r['success'])
-        print(f"   Successful downloads: {successful}/{len(download_results)}")
-        print(f"   Total size: {summary['total_size_bytes']:,} bytes")
-        print(f"\\n Download summary saved to: {args.download_summary}")
+        print(f"\\n✓ Download complete!")
+        print(f"  Successful: {successful}/{len(download_results)} files")
         
-        # Verify all outputs were created
-        print(f"\\n Output files created:")
-        for path in output_paths:
-            if os.path.exists(path):
-                size = os.path.getsize(path)
-                print(f"   ✓ {os.path.basename(path)}: {size:,} bytes")
-            else:
-                print(f"    {os.path.basename(path)}: NOT CREATED")
-        
-        # Exit with error if any critical files failed
-        critical_files = ['train_data', 'processed_data']
-        failed_critical = any(
-            not download_results[file]['success'] 
-            for file in critical_files 
-            if file in download_results
-        )
-        
-        if failed_critical:
-            print(f"\\n ERROR: Critical files failed to download!")
-            import sys
+        # Verify critical files
+        if not summary['critical_files_present']:
+            print(f"\\n✗ ERROR: Critical files missing!")
             sys.exit(1)
         
     args:
       # Input URLs
-      - --train_data_url
-      - {inputValue: train_data_url}
-      - --test_data_url
-      - {inputValue: test_data_url}
+      - --raw_train_data_url
+      - {inputValue: raw_train_data_url}
+      - --raw_test_data_url
+      - {inputValue: raw_test_data_url}
+      - --processed_train_data_url
+      - {inputValue: processed_train_data_url}
+      - --processed_test_data_url
+      - {inputValue: processed_test_data_url}
       - --dataset_info_url
       - {inputValue: dataset_info_url}
       - --data_config_url
       - {inputValue: data_config_url}
-      - --processed_data_url
-      - {inputValue: processed_data_url}
       - --preprocess_metadata_url
       - {inputValue: preprocess_metadata_url}
       - --upload_summary_url
@@ -349,16 +241,18 @@ implementation:
       - {inputPath: bearer_token}
       
       # Output paths
-      - --train_data
-      - {outputPath: train_data}
-      - --test_data
-      - {outputPath: test_data}
+      - --raw_train_data
+      - {outputPath: raw_train_data}
+      - --raw_test_data
+      - {outputPath: raw_test_data}
+      - --processed_train_data
+      - {outputPath: processed_train_data}
+      - --processed_test_data
+      - {outputPath: processed_test_data}
       - --dataset_info
       - {outputPath: dataset_info}
       - --data_config
       - {outputPath: data_config}
-      - --processed_data
-      - {outputPath: processed_data}
       - --preprocess_metadata
       - {outputPath: preprocess_metadata}
       - --download_summary
