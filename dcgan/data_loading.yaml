@@ -1,27 +1,32 @@
-name: Load Dataset v7
-description: Universal dataset loader with single master config
+name: Load Dataset v8
+description: Actually loads dataset images (not just metadata)
 inputs:
   - name: master_config
     type: String
-    description: "Master configuration JSON for entire pipeline"
+    description: "Master configuration JSON"
 outputs:
   - name: train_data
     type: Dataset
+    description: "ACTUAL training image tensors"
   - name: test_data
     type: Dataset
+    description: "ACTUAL test image tensors"
   - name: dataset_info
     type: DatasetInfo
+    description: "Dataset information"
   - name: data_config
     type: String
+    description: "Data configuration"
 
 implementation:
   container:
-    image: deepak0147/nessy-facotry:0.0.8
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -c
       - |
-        echo "Starting dataset loader..."
+        echo "Installing torchvision..."
+        pip install torchvision==0.17.0 > /dev/null 2>&1
         exec "$0" "$@"
       - python3
       - -u
@@ -31,6 +36,11 @@ implementation:
         import os
         import json
         import pickle
+        import torch
+        import torchvision.transforms as transforms
+        import torchvision.datasets as datasets
+        from torch.utils.data import Subset
+        import numpy as np
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--master_config', type=str, required=True)
@@ -41,7 +51,7 @@ implementation:
         args = parser.parse_args()
         
         print('=' * 80)
-        print('Load Dataset v6 - Configurable Version')
+        print('Load Dataset v8 - ACTUAL DATA LOADER')
         print('=' * 80)
         
         # ============================================================================
@@ -51,10 +61,8 @@ implementation:
         try:
             config = json.loads(args.master_config)
             print('✓ Config parsed successfully')
-            print(f'Config keys: {list(config.keys())}')
         except json.JSONDecodeError as e:
             print(f'✗ JSON parsing error: {e}')
-            print('Using empty config')
             config = {}
         
         # Get dataset config
@@ -75,87 +83,164 @@ implementation:
         print(f'  Train split: {train_split}')
         
         # ============================================================================
-        # Create train/test split based on config
+        # LOAD ACTUAL DATASET
         # ============================================================================
-        print('\\nCreating dataset split...')
+        print(f'\\nLoading actual {dataset_name.upper()} dataset...')
         
-        # Calculate train/test split
-        num_train = int(max_samples * train_split)
-        num_test = max_samples - num_train
+        def load_torchvision_dataset(name, train=True, image_size=64, channels=1):
+           
+            # Define transforms
+            transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,), (0.5,) if channels == 1 else (0.5, 0.5, 0.5))
+            ])
+            
+            # Load specific dataset
+            if name.lower() == 'mnist':
+                dataset = datasets.MNIST(
+                    root='./data',
+                    train=train,
+                    download=True,
+                    transform=transform
+                )
+            elif name.lower() == 'cifar10':
+                dataset = datasets.CIFAR10(
+                    root='./data',
+                    train=train,
+                    download=True,
+                    transform=transform
+                )
+            elif name.lower() == 'fashionmnist':
+                dataset = datasets.FashionMNIST(
+                    root='./data',
+                    train=train,
+                    download=True,
+                    transform=transform
+                )
+            else:
+                raise ValueError(f'Unknown dataset: {name}')
+            
+            return dataset
         
-        print(f'  Train samples: {num_train}')
-        print(f'  Test samples: {num_test}')
-        print(f'  Total samples: {max_samples}')
+        try:
+            # Load full training dataset
+            full_train_dataset = load_torchvision_dataset(
+                dataset_name, train=True, image_size=image_size, channels=channels
+            )
+            
+            # Load full test dataset
+            full_test_dataset = load_torchvision_dataset(
+                dataset_name, train=False, image_size=image_size, channels=channels
+            )
+            
+            print(f'✓ Full training dataset: {len(full_train_dataset)} samples')
+            print(f'✓ Full test dataset: {len(full_test_dataset)} samples')
+            
+            # Calculate actual splits based on max_samples
+            actual_max = min(max_samples, len(full_train_dataset) + len(full_test_dataset))
+            num_train = int(actual_max * train_split)
+            num_test = actual_max - num_train
+            
+            # Ensure we have enough training samples
+            num_train = min(num_train, len(full_train_dataset))
+            num_test = min(num_test, len(full_test_dataset))
+            
+            # Create subsets
+            train_indices = list(range(num_train))
+            test_indices = list(range(num_test))
+            
+            train_subset = Subset(full_train_dataset, train_indices)
+            test_subset = Subset(full_test_dataset, test_indices)
+            
+            print(f'\\nCreated subsets:')
+            print(f'  Training samples: {len(train_subset)}')
+            print(f'  Test samples: {len(test_subset)}')
+            print(f'  Total samples: {len(train_subset) + len(test_subset)}')
+            
+        except Exception as e:
+            print(f'✗ Error loading dataset: {e}')
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
         
         # ============================================================================
-        # Create minimal dataset info
+        # Create dataset wrapper classes
         # ============================================================================
-        print('\\nCreating dataset info...')
+        class ImageDatasetWrapper:
+          
+            def __init__(self, dataset, dataset_name='mnist'):
+                self.dataset = dataset
+                self.dataset_name = dataset_name
+            
+            def __len__(self):
+                return len(self.dataset)
+            
+            def __getitem__(self, idx):
+                # For GAN training, we only need images (not labels)
+                img, _ = self.dataset[idx]
+                return img
+            
+            def get_sample(self, idx):
+              
+                img, label = self.dataset[idx]
+                return {
+                    'image': img,
+                    'label': label,
+                    'index': idx,
+                    'dataset': self.dataset_name
+                }
         
         class DatasetInfoWrapper:
             def __init__(self, info_dict):
                 self.__dict__.update(info_dict)
         
+        # ============================================================================
+        # Create wrapped datasets
+        # ============================================================================
+        print('\\nCreating dataset wrappers...')
+        
+        train_wrapper = ImageDatasetWrapper(train_subset, dataset_name)
+        test_wrapper = ImageDatasetWrapper(test_subset, dataset_name)
+        
+        # Test that data is actual tensors
+        sample_train = train_wrapper[0]
+        sample_test = test_wrapper[0]
+        
+        print(f'✓ Train sample shape: {sample_train.shape}')
+        print(f'✓ Test sample shape: {sample_test.shape}')
+        print(f'✓ Data type: {type(sample_train)}')
+        print(f'✓ Value range: [{sample_train.min():.3f}, {sample_train.max():.3f}]')
+        
+        # ============================================================================
+        # Create dataset info
+        # ============================================================================
         dataset_info = DatasetInfoWrapper({
-            'total_samples': max_samples,
-            'train_samples': num_train,
-            'test_samples': num_test,
+            'total_samples': len(train_subset) + len(test_subset),
+            'train_samples': len(train_subset),
+            'test_samples': len(test_subset),
             'image_size': image_size,
             'channels': channels,
             'dataset_type': dataset_type,
             'dataset_name': dataset_name,
-            'requires_preprocessing': True,
-            'note': f'synthetic_dataset_{max_samples}_samples'
+            'requires_preprocessing': False,  # Already preprocessed
+            'note': f'actual_{dataset_name}_dataset_{len(train_subset)+len(test_subset)}_samples'
         })
-        
-        # ============================================================================
-        # Create simple train/test data (just metadata, no actual images)
-        # ============================================================================
-        print('\\nCreating train/test data...')
-        
-        train_data = []
-        test_data = []
-        
-        # Create train data
-        for i in range(num_train):
-            train_data.append({
-                'image_id': f'train_{i}',
-                'label': str(i % 10),
-                'dataset': dataset_name,
-                'image_size': image_size,
-                'channels': channels,
-                'note': f'placeholder_for_real_image_{i}'
-            })
-        
-        # Create test data
-        for i in range(num_test):
-            test_data.append({
-                'image_id': f'test_{i}',
-                'label': str(i % 10),
-                'dataset': dataset_name,
-                'image_size': image_size,
-                'channels': channels,
-                'note': f'placeholder_for_real_image_{i+num_train}'
-            })
-        
-        print(f'Created {len(train_data)} train entries')
-        print(f'Created {len(test_data)} test entries')
         
         # ============================================================================
         # Create data config
         # ============================================================================
-        print('\\nCreating data config...')
-        
         data_config = {
             'dataset': dataset_cfg,
             'loaded_samples': {
-                'train': len(train_data),
-                'test': len(test_data),
-                'total': len(train_data) + len(test_data)
+                'train': len(train_subset),
+                'test': len(test_subset),
+                'total': len(train_subset) + len(test_subset)
             },
-            'requires_preprocessing': True,
-            'config_source': 'master_config',
-            'config_keys': list(config.keys())
+            'requires_preprocessing': False,
+            'data_type': 'actual_images',
+            'sample_shape': list(sample_train.shape),
+            'value_range': [float(sample_train.min()), float(sample_train.max())]
         }
         
         # ============================================================================
@@ -169,15 +254,17 @@ implementation:
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
         
-        # Save train data
+        # Save train data (ACTUAL IMAGES)
         with open(args.train_data, 'wb') as f:
-            pickle.dump(train_data, f)
+            pickle.dump(train_wrapper, f)
         print(f'✓ Train data saved: {args.train_data}')
+        print(f'  File size: {os.path.getsize(args.train_data):,} bytes')
         
-        # Save test data
+        # Save test data (ACTUAL IMAGES)
         with open(args.test_data, 'wb') as f:
-            pickle.dump(test_data, f)
+            pickle.dump(test_wrapper, f)
         print(f'✓ Test data saved: {args.test_data}')
+        print(f'  File size: {os.path.getsize(args.test_data):,} bytes')
         
         # Save dataset info
         with open(args.dataset_info, 'wb') as f:
@@ -190,17 +277,46 @@ implementation:
         print(f'✓ Data config saved: {args.data_config}')
         
         # ============================================================================
+        # Verification
+        # ============================================================================
+        print('\\n' + '=' * 80)
+        print('VERIFICATION')
+        print('=' * 80)
+        
+        # Load back and verify
+        with open(args.train_data, 'rb') as f:
+            loaded_train = pickle.load(f)
+        
+        with open(args.test_data, 'rb') as f:
+            loaded_test = pickle.load(f)
+        
+        print(f'Train dataset loaded back: {len(loaded_train)} samples')
+        print(f'Test dataset loaded back: {len(loaded_test)} samples')
+        
+        # Test a few samples
+        for i in range(min(3, len(loaded_train))):
+            sample = loaded_train[i]
+            print(f'Train sample {i}: shape={sample.shape}, '
+                  f'range=[{sample.min():.3f}, {sample.max():.3f}]')
+        
+        # ============================================================================
         # Final summary
         # ============================================================================
         print('\\n' + '=' * 80)
         print('LOAD DATASET COMPLETE!')
         print('=' * 80)
         print(f'Output files created:')
-        print(f'  1. Train data: {args.train_data}')
-        print(f'  2. Test data: {args.test_data}')
+        print(f'  1. Train data (ACTUAL IMAGES): {args.train_data}')
+        print(f'     - Samples: {len(train_subset)}')
+        print(f'     - Shape: {sample_train.shape}')
+        print(f'  2. Test data (ACTUAL IMAGES): {args.test_data}')
+        print(f'     - Samples: {len(test_subset)}')
+        print(f'     - Shape: {sample_test.shape}')
         print(f'  3. Dataset info: {args.dataset_info}')
         print(f'  4. Data config: {args.data_config}')
-        print('\\nReady for preprocessing!')
+        print(f'\\nData ready for:')
+        print(f'  - Train data → Preprocess → Train DCGAN')
+        print(f'  - Test data → Evaluate DCGAN')
         
     args:
       - --master_config
