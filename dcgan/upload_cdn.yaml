@@ -1,55 +1,76 @@
-name: Upload Data To CDN v12
-description: Uploads actual dataset outputs (images, not metadata) to CDN
+name: Upload Data To CDN v12 - FULL SET
+description: Uploads complete dataset set for next pipeline continuation
 inputs:
-  # From Load Dataset v9 - ACTUAL DATA
+  # From Load Raw Dataset v1 - RAW DATA
   - name: raw_train_data
     type: Dataset
-    description: "Raw train dataset (actual images)"
+    description: "RawDatasetWrapper with raw train images"
   - name: raw_test_data
     type: Dataset
-    description: "Raw test dataset (actual images)"
+    description: "RawDatasetWrapper with raw test images"
   - name: dataset_info
     type: DatasetInfo
+    description: "DatasetInfoWrapper with metadata"
   - name: data_config
     type: String
+    description: "Data configuration JSON"
   
-  # From Preprocess v5 - PROCESSED DATA
+  # From Preprocess v1 - PROCESSED DATA
   - name: processed_train_data
     type: Dataset
-    description: "Preprocessed train data (GAN-ready)"
+    description: "PreprocessedDataset with processed train data"
   - name: preprocess_metadata
     type: String
+    description: "Preprocessing metadata JSON"
+  - name: preprocessor_params
+    type: String
+    description: "Preprocessor parameters JSON (for test preprocessing)"
   
   # CDN credentials
   - name: bearer_token
     type: String
+    description: "Bearer token for authentication"
   - name: domain
     type: String
+    description: "API domain"
   - name: get_cdn
     type: String
+    description: "CDN base URL"
 
 outputs:
+  # COMPLETE SET FOR NEXT PIPELINE
   # Raw data URLs
   - name: raw_train_data_url
     type: String
+    description: "URL to raw train dataset"
   - name: raw_test_data_url
     type: String
+    description: "URL to raw test dataset"
   - name: dataset_info_url
     type: String
+    description: "URL to dataset info"
   - name: data_config_url
     type: String
+    description: "URL to data config"
   
   # Processed data URLs
   - name: processed_train_data_url
     type: String
+    description: "URL to processed train data"
   - name: preprocess_metadata_url
     type: String
+    description: "URL to preprocess metadata"
+  - name: preprocessor_params_url
+    type: String
+    description: "URL to preprocessor parameters (CRITICAL for test preprocessing)"
   
   # Summary
   - name: upload_summary
     type: String
+    description: "Local upload summary"
   - name: upload_summary_url
     type: String
+    description: "URL to upload summary"
 
 implementation:
   container:
@@ -68,15 +89,16 @@ implementation:
         
         parser = argparse.ArgumentParser()
         
-        # Raw data from Load Dataset
+        # Raw data from Load Raw Dataset v1
         parser.add_argument('--raw_train_data', type=str, required=True)
         parser.add_argument('--raw_test_data', type=str, required=True)
         parser.add_argument('--dataset_info', type=str, required=True)
         parser.add_argument('--data_config', type=str, required=True)
         
-        # Processed data from Preprocess
+        # Processed data from Preprocess v1
         parser.add_argument('--processed_train_data', type=str, required=True)
         parser.add_argument('--preprocess_metadata', type=str, required=True)
+        parser.add_argument('--preprocessor_params', type=str, required=True)  
         
         # CDN credentials
         parser.add_argument('--bearer_token', type=str, required=True)
@@ -90,10 +112,15 @@ implementation:
         parser.add_argument('--data_config_url', type=str, required=True)
         parser.add_argument('--processed_train_data_url', type=str, required=True)
         parser.add_argument('--preprocess_metadata_url', type=str, required=True)
+        parser.add_argument('--preprocessor_params_url', type=str, required=True)  
         parser.add_argument('--upload_summary', type=str, required=True)
         parser.add_argument('--upload_summary_url', type=str, required=True)
         
         args = parser.parse_args()
+        
+        print("=" * 80)
+        print("UPLOAD DATA TO CDN v12 - COMPLETE SET FOR NEXT PIPELINE")
+        print("=" * 80)
         
         # Read bearer token
         with open(args.bearer_token, 'r') as f:
@@ -101,22 +128,78 @@ implementation:
         
         upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
         
-        print(f"=== UPLOAD ACTUAL DCGAN DATA TO CDN ===")
-        print(f"Files to upload: 8")
+        # ============================================================================
+        # File verification
+        # ============================================================================
+        print("\\nVerifying input files...")
         
-        def upload_file_to_cdn(file_path, output_url_path, description, file_type="data"):
+        def check_file(file_path, file_type):
             if not os.path.exists(file_path):
-                print(f"   ✗ File not found: {file_path}")
-                return None
+                print(f"✗ Missing: {file_path}")
+                return False, 0
             
             file_size = os.path.getsize(file_path)
-            size_mb = file_size / (1024 * 1024)
+            size_kb = file_size / 1024
             
-            print(f"   Uploading {description} ({size_mb:.2f} MB)...")
+            try:
+                if file_type == 'pickle':
+                    with open(file_path, 'rb') as f:
+                        obj = pickle.load(f)
+                    class_name = obj.__class__.__name__
+                    print(f"✓ {os.path.basename(file_path)}: {class_name} ({size_kb:.1f} KB)")
+                    return True, size_kb
+                elif file_type == 'json':
+                    with open(file_path, 'r') as f:
+                        json.load(f)
+                    print(f"✓ {os.path.basename(file_path)}: JSON ({size_kb:.1f} KB)")
+                    return True, size_kb
+                else:
+                    print(f"✓ {os.path.basename(file_path)}: ({size_kb:.1f} KB)")
+                    return True, size_kb
+            except Exception as e:
+                print(f"✗ Error in {file_path}: {str(e)[:100]}")
+                return False, size_kb
+        
+        # Check all files
+        files_to_check = [
+            (args.raw_train_data, 'pickle', 'Raw train data'),
+            (args.raw_test_data, 'pickle', 'Raw test data'),
+            (args.dataset_info, 'pickle', 'Dataset info'),
+            (args.data_config, 'json', 'Data config'),
+            (args.processed_train_data, 'pickle', 'Processed train data'),
+            (args.preprocess_metadata, 'json', 'Preprocess metadata'),
+            (args.preprocessor_params, 'json', 'Preprocessor params')  
+        ]
+        
+        all_valid = True
+        total_size = 0
+        
+        for file_path, file_type, description in files_to_check:
+            valid, size_kb = check_file(file_path, file_type)
+            if not valid:
+                all_valid = False
+            total_size += size_kb
+        
+        if not all_valid:
+            print("\\n✗ Some input files are invalid!")
+            sys.exit(1)
+        
+        print(f"\\n✓ All files verified")
+        print(f"  Total size: {total_size:.1f} KB")
+        
+        # ============================================================================
+        # Upload function
+        # ============================================================================
+        def upload_file_to_cdn(file_path, output_url_path, description, file_tag):
+            file_size = os.path.getsize(file_path)
+            size_kb = file_size / 1024
             
-            # Generate filename
+            print(f"  Uploading {description} ({size_kb:.1f} KB)...")
+            
+            # Generate unique filename
             unique_id = str(uuid.uuid4())[:8]
-            cdn_filename = f"dcgan_{file_type}_{unique_id}.pkl"
+            timestamp = uuid.uuid4().hex[:6]  # Short timestamp
+            cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}.pkl" if file_tag.endswith('_data') else f"dcgan_{file_tag}_{timestamp}_{unique_id}.json"
             
             curl_command = [
                 "curl",
@@ -127,7 +210,7 @@ implementation:
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "300"  # Longer timeout for larger files
+                "--max-time", "120"
             ]
             
             try:
@@ -142,13 +225,13 @@ implementation:
                 relative_cdn_url = response_json.get("cdnUrl", "")
                 
                 if not relative_cdn_url:
-                    print(f"    Error: No cdnUrl in response")
+                    print(f"    ✗ Error: No cdnUrl in response")
                     return None
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"    ✓ Uploaded: {full_url[:100]}...")
+                print(f"    ✓ Uploaded: {full_url[:80]}...")
                 
-                # Save URL
+                # Save URL locally
                 os.makedirs(os.path.dirname(output_url_path) or '.', exist_ok=True)
                 with open(output_url_path, "w") as f:
                     f.write(full_url)
@@ -156,106 +239,172 @@ implementation:
                 return {
                     'url': full_url,
                     'size_bytes': file_size,
-                    'size_mb': size_mb,
-                    'description': description
+                    'size_kb': size_kb,
+                    'description': description,
+                    'file_tag': file_tag
                 }
                 
             except subprocess.CalledProcessError as e:
-                print(f"    ✗ Curl error: {e.stderr[:200]}")
+                print(f"    ✗ Upload failed: {e.stderr[:100]}")
+                return None
+            except Exception as e:
+                print(f"    ✗ Error: {str(e)[:100]}")
                 return None
         
-        # Upload all files
+        # ============================================================================
+        # Upload ALL files needed for next pipeline
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("UPLOADING COMPLETE DATASET SET")
+        print("=" * 80)
+        
         upload_results = {}
+        files_to_upload = [
+            # Raw data (from Load Raw Dataset v1)
+            (args.raw_train_data, args.raw_train_data_url, "Raw train dataset", "raw_train_data"),
+            (args.raw_test_data, args.raw_test_data_url, "Raw test dataset", "raw_test_data"),
+            (args.dataset_info, args.dataset_info_url, "Dataset information", "dataset_info"),
+            (args.data_config, args.data_config_url, "Data configuration", "data_config"),
+            
+            # Processed data (from Preprocess v1)
+            (args.processed_train_data, args.processed_train_data_url, "Processed train data", "processed_train_data"),
+            (args.preprocess_metadata, args.preprocess_metadata_url, "Preprocessing metadata", "preprocess_metadata"),
+            (args.preprocessor_params, args.preprocessor_params_url, "Preprocessor parameters", "preprocessor_params")
+        ]
         
-        print(f"\\nUploading raw data...")
+        # Upload each file
+        for file_path, url_path, description, tag in files_to_upload:
+            result = upload_file_to_cdn(file_path, url_path, description, tag)
+            if result:
+                upload_results[tag] = result
         
-        # 1. Raw train data (ACTUAL IMAGES - could be large)
-        result = upload_file_to_cdn(
-            args.raw_train_data, args.raw_train_data_url,
-            "Raw train dataset (actual images)", "raw_train"
-        )
-        if result:
-            upload_results['raw_train_data'] = result
+        # ============================================================================
+        # Create and upload summary
+        # ============================================================================
+        print("\\nCreating upload summary...")
         
-        # 2. Raw test data
-        result = upload_file_to_cdn(
-            args.raw_test_data, args.raw_test_data_url,
-            "Raw test dataset (actual images)", "raw_test"
-        )
-        if result:
-            upload_results['raw_test_data'] = result
-        
-        # 3. Dataset info
-        result = upload_file_to_cdn(
-            args.dataset_info, args.dataset_info_url,
-            "Dataset info", "info"
-        )
-        if result:
-            upload_results['dataset_info'] = result
-        
-        # 4. Data config
-        result = upload_file_to_cdn(
-            args.data_config, args.data_config_url,
-            "Data config", "config"
-        )
-        if result:
-            upload_results['data_config'] = result
-        
-        print(f"\\nUploading processed data...")
-        
-        # 5. Processed train data
-        result = upload_file_to_cdn(
-            args.processed_train_data, args.processed_train_data_url,
-            "Processed train data (GAN-ready)", "processed_train"
-        )
-        if result:
-            upload_results['processed_train_data'] = result
-        
-        
-        # 6. Preprocess metadata
-        result = upload_file_to_cdn(
-            args.preprocess_metadata, args.preprocess_metadata_url,
-            "Preprocess metadata", "preprocess_meta"
-        )
-        if result:
-            upload_results['preprocess_metadata'] = result
-        
-        # Create summary
-        total_size = sum(r['size_bytes'] for r in upload_results.values())
         successful = len(upload_results)
+        total_files = len(files_to_upload)
+        total_bytes = sum(r['size_bytes'] for r in upload_results.values())
         
         summary = {
-            'total_files': 7,
+            'pipeline_stage': 'data_loading_preprocessing',
+            'upload_complete': successful == total_files,
+            'total_files': total_files,
             'successful_uploads': successful,
-            'total_size_bytes': total_size,
-            'total_size_mb': total_size / (1024 * 1024),
-            'files': {k: {
-                'size_mb': v['size_mb'],
-                'description': v['description']
-            } for k, v in upload_results.items()},
-            'urls': {k: v['url'] for k, v in upload_results.items()}
+            'total_size_bytes': total_bytes,
+            'total_size_kb': total_bytes / 1024,
+            'files': {},
+            'urls': {},
+            'notes': 'Complete dataset set for DCGAN training pipeline continuation',
+            'critical_files': [
+                'raw_test_data',  # For evaluation
+                'processed_train_data',  # For training
+                'preprocessor_params'  # For test preprocessing during evaluation
+            ],
+            'timestamp': uuid.uuid4().hex[:16]
         }
+        
+        # Add file details
+        for tag, result in upload_results.items():
+            summary['files'][tag] = {
+                'description': result['description'],
+                'size_kb': result['size_kb'],
+                'uploaded': True
+            }
+            summary['urls'][tag] = result['url']
         
         # Save summary locally
         with open(args.upload_summary, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        # 8. Upload summary
-        result = upload_file_to_cdn(
+        print(f"✓ Summary saved: {args.upload_summary}")
+        
+        # Upload summary itself
+        print("\\nUploading summary...")
+        summary_result = upload_file_to_cdn(
             args.upload_summary, args.upload_summary_url,
-            "Upload summary", "summary"
+            "Upload summary", "upload_summary"
         )
-        if result:
-            upload_results['upload_summary'] = result
-            summary['upload_summary_url'] = result['url']
+        
+        if summary_result:
+            upload_results['upload_summary'] = summary_result
+            summary['urls']['upload_summary'] = summary_result['url']
             
-            # Update local summary with URL
+            # Update local summary with its own URL
             with open(args.upload_summary, 'w') as f:
                 json.dump(summary, f, indent=2)
         
-        print(f"\\n✓ Upload complete!")
-        print(f"  Successful: {successful}/7 files")
-        print(f"  Total size: {total_size/(1024*1024):.2f} MB")
+        # ============================================================================
+        # Final verification
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("FINAL VERIFICATION")
+        print("=" * 80)
+        
+        # Check critical files
+        critical_files = ['raw_test_data', 'processed_train_data', 'preprocessor_params']
+        missing_critical = [f for f in critical_files if f not in upload_results]
+        
+        if missing_critical:
+            print("✗ MISSING CRITICAL FILES:")
+            for f in missing_critical:
+                print(f"  - {f}")
+            print("\\n  Next pipeline may fail!")
+        else:
+            print("✓ All critical files uploaded successfully")
+        
+        # Verify URLs are saved
+        url_files = [
+            (args.raw_train_data_url, 'raw_train_data_url'),
+            (args.raw_test_data_url, 'raw_test_data_url'),
+            (args.dataset_info_url, 'dataset_info_url'),
+            (args.data_config_url, 'data_config_url'),
+            (args.processed_train_data_url, 'processed_train_data_url'),
+            (args.preprocess_metadata_url, 'preprocess_metadata_url'),
+            (args.preprocessor_params_url, 'preprocessor_params_url'),  
+            (args.upload_summary_url, 'upload_summary_url')
+        ]
+        
+        url_count = 0
+        for url_path, name in url_files:
+            if os.path.exists(url_path):
+                with open(url_path, 'r') as f:
+                    url = f.read().strip()
+                if url and url.startswith('http'):
+                    url_count += 1
+                else:
+                    print(f"  {name}: Invalid URL")
+            else:
+                print(f"✗ {name}: File not created")
+        
+        print(f"\\nURLs saved: {url_count}/{len(url_files)}")
+        
+        # ============================================================================
+        # Pipeline continuation instructions
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("NEXT PIPELINE REQUIREMENTS")
+        print("=" * 80)
+        print("These URLs will be sent to the DCGAN training pipeline:")
+        print("\\n1. FOR TRAINING:")
+        print("   • processed_train_data_url: Preprocessed training data")
+        print("   • preprocess_metadata_url: Preprocessing details")
+        print("\\n2. FOR EVALUATION:")
+        print("   • raw_test_data_url: Raw test data (will be preprocessed)")
+        print("   • preprocessor_params_url: Parameters for test preprocessing")
+        print("\\n3. FOR REFERENCE:")
+        print("   • raw_train_data_url: Original raw training data")
+        print("   • dataset_info_url: Dataset metadata")
+        print("   • data_config_url: Configuration")
+        print("   • upload_summary_url: This summary")
+        print("\\n✓ Complete dataset set ready for pipeline continuation!")
+        
+        if successful == total_files + 1:  # +1 for summary
+            print(f"\\n ALL {successful} files uploaded successfully!")
+        else:
+            print(f"\\n  Upload incomplete: {successful}/{total_files + 1} files")
+            sys.exit(1)
         
     args:
       # Raw data inputs
@@ -273,6 +422,8 @@ implementation:
       - {inputPath: processed_train_data}
       - --preprocess_metadata
       - {inputPath: preprocess_metadata}
+      - --preprocessor_params
+      - {inputPath: preprocessor_params}  
       
       # CDN credentials
       - --bearer_token
@@ -293,8 +444,10 @@ implementation:
       - {outputPath: data_config_url}
       - --processed_train_data_url
       - {outputPath: processed_train_data_url}
-      - --preprocessed_metadata_url
+      - --preprocess_metadata_url
       - {outputPath: preprocess_metadata_url}
+      - --preprocessor_params_url
+      - {outputPath: preprocessor_params_url}  
       - --upload_summary
       - {outputPath: upload_summary}
       - --upload_summary_url
