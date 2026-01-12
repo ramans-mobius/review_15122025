@@ -1,5 +1,5 @@
-name: Build DCGAN Model v6
-description: Builds DCGAN model with multiple load options (schema, CDN, or new build)
+name: Build DCGAN Model v6 - FIXED
+description: Builds DCGAN model compatible with Backprop, CAFO, and Forward-Forward
 inputs:
   - name: master_config
     type: String
@@ -79,10 +79,11 @@ implementation:
             from nesy_factory.GANs.dcgan import (
                 DCGANConfig, TrainingAlgorithm, DCGANLayerConfig,
                 ActivationConfig, LossConfig, OptimizerConfig,
-                BlockTrainingConfig, BalancedTrainingConfig,
+                BlockTrainingConfig, BalancedTrainingConfig, AdversarialTrainingConfig,
                 create_dcgan, validate_config,
                 FullyConfigurableDCGANGenerator,
-                FullyConfigurableDCGANDiscriminator
+                FullyConfigurableDCGANDiscriminator,
+                EnhancedDCGANTrainer
             )
             print(" Successfully imported DCGAN modules")
         except ImportError as e:
@@ -106,8 +107,8 @@ implementation:
         load_from_schema = args.load_from_schema.lower() == 'true'
         load_from_cdn = args.load_from_cdn.lower() == 'true'
         
-        # BARE MINIMUM DCGAN CONFIG FOR FAST TESTING
-        MINIMAL_DCGAN_CONFIG = {
+        # DEFAULT DCGAN CONFIG FOR ALL ALGORITHMS
+        DEFAULT_DCGAN_CONFIG = {
             "model_type": "dcgan",
             "dataset": {
                 "name": "mnist",
@@ -146,13 +147,24 @@ implementation:
                     "output_activation": "sigmoid",
                     "use_batchnorm": False,
                     "use_attention": False
+                },
+                "block_training": {
+                    "enabled": False,
+                    "num_blocks": 3,
+                    "epochs_per_block": 3,
+                    "block_learning_rate": 0.001
+                },
+                "balanced_training": {
+                    "enabled": True,
+                    "discriminator_steps": 1,
+                    "generator_steps": 1,
+                    "label_smoothing": 0.1
                 }
             },
-            "model_source": "bare_minimum_dcgan_test_config"
+            "model_source": "default_dcgan_config"
         }
         
         def get_schema_url(schema_id, model_id, execution_id):
-            
             # This is a placeholder - implement your schema service logic here
             schema_service_url = "https://your-schema-service.example.com"
             
@@ -180,15 +192,23 @@ implementation:
                 gen_cfg = gan_cfg.get('generator', {})
                 disc_cfg = gan_cfg.get('discriminator', {})
                 train_cfg = gan_cfg.get('training', {})
+                block_cfg = gan_cfg.get('block_training', {})
+                balanced_cfg = gan_cfg.get('balanced_training', {})
                 
                 # Determine algorithm
                 algorithm = train_cfg.get('algorithm', 'backprop')
                 algorithm_map = {
                     'backprop': TrainingAlgorithm.BACKPROP,
                     'cafo': TrainingAlgorithm.CAFO,
-                    'forward_forward': TrainingAlgorithm.FORWARD_FORWARD
+                    'forward_forward': TrainingAlgorithm.FORWARD_FORWARD,
+                    'hybrid': TrainingAlgorithm.HYBRID
                 }
                 training_algorithm = algorithm_map.get(algorithm, TrainingAlgorithm.BACKPROP)
+                
+                # Set algorithm flags based on algorithm
+                use_cafo = algorithm == 'cafo'
+                use_forward_forward = algorithm == 'forward_forward'
+                use_hybrid = algorithm == 'hybrid'
                 
                 # Create generator layers
                 generator_layers = []
@@ -210,17 +230,37 @@ implementation:
                         padding=layer['padding']
                     ))
                 
-                # Set algorithm flags
-                use_cafo = algorithm == 'cafo'
-                use_forward_forward = algorithm == 'forward_forward'
-                use_hybrid = False
-                
-                # Create block training config if needed
+                # Create block training config
                 block_training = BlockTrainingConfig(
-                    enabled=use_cafo or use_forward_forward,
-                    num_blocks=min(2, len(generator_layers) - 1),
-                    epochs_per_block=1,
-                    block_learning_rate=0.001
+                    enabled=block_cfg.get('enabled', use_cafo or use_forward_forward),
+                    num_blocks=block_cfg.get('num_blocks', min(3, len(generator_layers) - 1)),
+                    epochs_per_block=block_cfg.get('epochs_per_block', 3),
+                    block_learning_rate=block_cfg.get('block_learning_rate', 0.001),
+                    freeze_previous_blocks=block_cfg.get('freeze_previous_blocks', True),
+                    train_generator_blocks=block_cfg.get('train_generator_blocks', True),
+                    train_discriminator_blocks=block_cfg.get('train_discriminator_blocks', True),
+                    ff_threshold=block_cfg.get('ff_threshold', 2.0),
+                    ff_goodness_dim=block_cfg.get('ff_goodness_dim', 32)
+                )
+                
+                # Create balanced training config
+                balanced_training = BalancedTrainingConfig(
+                    enabled=balanced_cfg.get('enabled', True),
+                    discriminator_steps=balanced_cfg.get('discriminator_steps', 1),
+                    generator_steps=balanced_cfg.get('generator_steps', 1),
+                    discriminator_lr_multiplier=balanced_cfg.get('discriminator_lr_multiplier', 0.5),
+                    label_smoothing=balanced_cfg.get('label_smoothing', 0.1),
+                    feature_matching=balanced_cfg.get('feature_matching', False),
+                    feature_matching_weight=balanced_cfg.get('feature_matching_weight', 10.0)
+                )
+                
+                # Create adversarial training config
+                adversarial_training = AdversarialTrainingConfig(
+                    n_critic=balanced_cfg.get('discriminator_steps', 1),
+                    generator_steps=balanced_cfg.get('generator_steps', 1),
+                    discriminator_steps=balanced_cfg.get('discriminator_steps', 1),
+                    gradient_penalty_weight=balanced_cfg.get('gradient_penalty_weight', 10.0),
+                    gradient_penalty_interval=1
                 )
                 
                 # Create config
@@ -235,6 +275,8 @@ implementation:
                     use_forward_forward=use_forward_forward,
                     use_hybrid=use_hybrid,
                     block_training=block_training,
+                    balanced_training=balanced_training,
+                    adversarial_training=adversarial_training,
                     generator_activation=ActivationConfig(
                         name=gen_cfg.get('activation', 'leaky_relu'),
                         negative_slope=0.2
@@ -251,10 +293,12 @@ implementation:
                     ),
                     generator_use_batchnorm=gen_cfg.get('use_batchnorm', True),
                     discriminator_use_batchnorm=disc_cfg.get('use_batchnorm', False),
+                    generator_spectral_norm=gen_cfg.get('spectral_norm', False),
+                    discriminator_spectral_norm=disc_cfg.get('spectral_norm', False),
                     batch_size=train_cfg.get('batch_size', 16),
                     epochs=train_cfg.get('epochs', 2),
                     device=train_cfg.get('device', 'auto'),
-                    seed=42
+                    seed=train_cfg.get('seed', 42)
                 )
                 
                 return config
@@ -270,17 +314,17 @@ implementation:
                 provided_config = json.loads(args.master_config)
                 print("Using provided master config")
                 
-                # Merge provided config with minimal defaults
-                config = deep_merge(MINIMAL_DCGAN_CONFIG, provided_config)
+                # Merge provided config with defaults
+                config = deep_merge(DEFAULT_DCGAN_CONFIG, provided_config)
                 config['model_source'] = 'user_provided_merged'
                 
             except json.JSONDecodeError as e:
                 print(f"ERROR: Invalid JSON in master_config: {e}")
-                print("Falling back to bare minimum DCGAN config")
-                config = MINIMAL_DCGAN_CONFIG
+                print("Falling back to default DCGAN config")
+                config = DEFAULT_DCGAN_CONFIG
         else:
-            config = MINIMAL_DCGAN_CONFIG
-            print("Using bare minimum DCGAN config for fast testing")
+            config = DEFAULT_DCGAN_CONFIG
+            print("Using default DCGAN config")
         
         # Create output directories
         os.makedirs(os.path.dirname(args.model_out), exist_ok=True)
@@ -418,7 +462,7 @@ implementation:
                         print(f"  - {error}")
                     sys.exit(1)
                 
-                # Create models directly (not through trainer)
+                # Create models directly
                 print(f"\\nCreating Generator...")
                 generator = FullyConfigurableDCGANGenerator(dcgan_config)
                 
@@ -445,6 +489,13 @@ implementation:
                     channels = block.out_channels if hasattr(block, 'out_channels') else 'N/A'
                     print(f"    Block {i}: {block_type} (channels: {channels})")
                 
+                print(f"\\n TRAINING CONFIGURATION:")
+                print(f"  Algorithm: {dcgan_config.training_algorithm.value}")
+                print(f"  Block training: {'Enabled' if dcgan_config.block_training.enabled else 'Disabled'}")
+                if dcgan_config.block_training.enabled:
+                    print(f"  Blocks: {dcgan_config.block_training.num_blocks}")
+                    print(f"  Epochs per block: {dcgan_config.block_training.epochs_per_block}")
+                
                 # Create model info
                 model_info = {
                     'model_type': 'dcgan',
@@ -458,6 +509,7 @@ implementation:
                     'image_size': generator.config.image_size,
                     'generator_blocks': len(generator.blocks),
                     'discriminator_blocks': len(discriminator.blocks),
+                    'block_training_enabled': dcgan_config.block_training.enabled,
                     'training_config': {
                         'algorithm': dcgan_config.training_algorithm.value,
                         'batch_size': dcgan_config.batch_size,
@@ -485,7 +537,7 @@ implementation:
                 model_file_size = get_file_size(args.model_out)
                 model_info['model_file_size'] = model_file_size
                 
-                # Save updated config
+                # Save updated config (DCGAN config)
                 with open(args.config_updated, 'w') as f:
                     json.dump(dcgan_config.to_dict(), f, indent=2)
                     
