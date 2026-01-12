@@ -25,8 +25,6 @@ implementation:
       - sh
       - -c
       - |
-        echo "Installing torchvision..."
-        pip install torchvision==0.17.0 > /dev/null 2>&1
         exec "$0" "$@"
       - python3
       - -u
