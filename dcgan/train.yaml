@@ -36,7 +36,7 @@ outputs:
 
 implementation:
   container:
-    image: deepak0147/nessy-facotry:0.0.8
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -c
