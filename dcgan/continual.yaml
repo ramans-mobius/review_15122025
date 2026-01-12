@@ -1,4 +1,4 @@
-name: Continual Tasks Generator 
+name: Continual Tasks Generator - FIXED
 description: Creates continual learning tasks for DCGAN with consistent format
 inputs:
   - name: data_pickle
@@ -21,17 +21,13 @@ outputs:
 
 implementation:
   container:
-    image: deepak0147/nessy-facotry:0.0.8
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -c
       - |
-        echo "Checking for torchvision..."
-        python3 -c "import torchvision; print(f'torchvision version: {torchvision.__version__}')" 2>/dev/null || {
-          echo "torchvision not found, installing 0.17.0..."
-          pip install torchvision==0.17.0 pillow
-        }
-        echo "Starting DCGAN Continual Tasks Generator"
+        echo "Installing required packages..."
+        pip install pillow > /dev/null 2>&1
         exec "$0" "$@"
       - python3
       - -u
@@ -40,146 +36,17 @@ implementation:
         import argparse, os, pickle, json, sys
         import numpy as np
         import torch
+        import torch.nn.functional as F
         from torch.utils.data import Dataset, DataLoader
         from typing import Dict, List, Any
         
         # ============================================================================
-        # CONSISTENT CLASSES (Match Preprocess brick)
+        # COMPATIBLE CLASSES FOR DCGAN PIPELINE
         # ============================================================================
         
-        class GANDataset(Dataset):
-           
-            def __init__(self, data_list, transform=None, image_size=64, channels=3):
-                self.data_list = data_list
-                self.transform = transform
-                self.image_size = image_size
-                self.channels = channels
-            
-            def __len__(self):
-                return len(self.data_list)
-            
-            def __getitem__(self, idx):
-                return self.data_list[idx]
-        
-        class GANDataWrapper:
-        
-            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
-                        transform_params=None):
-                self.dataset = dataset
-                self.model_type = model_type
-                self.image_size = image_size
-                self.channels = channels
-                self.transform_params = transform_params or {}
-                self.num_samples = len(dataset)
-            
-            def __len__(self):
-                return len(self.dataset)
-            
-            def __getitem__(self, idx):
-                return self.dataset[idx]
-        
-        class TasksWrapper:
-            
-            def __init__(self, tasks):
-                self.tasks = tasks
-                self.num_tasks = len(tasks)
-            
-            def __len__(self):
-                return len(self.tasks)
-            
-            def __getitem__(self, idx):
-                return self.tasks[idx]
-        
-        # Safe unpickler for loading data
-        class SafeUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                try:
-                    return super().find_class(module, name)
-                except:
-                    if name == 'GANDataset':
-                        return GANDataset
-                    elif name == 'GANDataWrapper':
-                        return GANDataWrapper
-                    elif name == 'TasksWrapper':
-                        return TasksWrapper
-                    elif name == 'PreprocessMetadata':
-                        # Define this class for compatibility
-                        class PreprocessMetadata:
-                            def __init__(self, image_size=64, channels=3, model_type='dcgan',
-                                        mean=(0.5,), std=(0.5,), transform_params=None):
-                                self.image_size = image_size
-                                self.channels = channels
-                                self.model_type = model_type
-                                self.mean = mean
-                                self.std = std
-                                self.transform_params = transform_params or {}
-                        return PreprocessMetadata
-                    else:
-                        class FallbackClass:
-                            def __init__(self, *args, **kwargs):
-                                pass
-                        return FallbackClass
-        
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--data_pickle', type=str, required=True, help='Input DCGAN data pickle path')
-        parser.add_argument('--splitting_strategy', type=str, default='domain_split', help='Split strategy')
-        parser.add_argument('--num_tasks', type=int, default=3, help='Number of tasks to create')
-        parser.add_argument('--tasks_pickle', type=str, required=True, help='Output pickle for tasks')
-        parser.add_argument('--task_descriptions', type=str, required=True, help='Output task descriptions')
-        parser.add_argument('--config', type=str, required=True, help='Configuration JSON string')
-        args = parser.parse_args()
-        
-        print("Starting DCGAN Continual Tasks Generator")
-        print(f"Strategy: {args.splitting_strategy}, Num tasks: {args.num_tasks}")
-        
-        # Load data with safe unpickler
-        try:
-            with open(args.data_pickle, 'rb') as f:
-                raw_data = f.read()
-            import io
-            data = SafeUnpickler(io.BytesIO(raw_data)).load()
-            print("Data loaded successfully")
-            
-            # Extract dataset from wrapper
-            if hasattr(data, 'dataset'):
-                dataset = data.dataset
-                image_size = data.image_size
-                channels = data.channels
-                print(f"Dataset: {len(dataset)} samples, {image_size}x{image_size}, {channels} channels")
-            elif isinstance(data, dict) and 'dataset' in data:
-                dataset = data['dataset']
-                image_size = data.get('image_size', 64)
-                channels = data.get('channels', 3)
-                print(f"Dataset: {len(dataset)} samples (dict format)")
-            else:
-                dataset = data
-                image_size = 64
-                channels = 3
-                print(f"Dataset: {len(dataset)} samples (raw format)")
-                
-        except Exception as e:
-            print(f"Error loading data: {e}")
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
-        
-        # Parse config
-        try:
-            config = json.loads(args.config)
-            print("Config loaded successfully")
-        except Exception as e:
-            print(f"Error loading config: {e}")
-            sys.exit(1)
-        
-        # Get GAN config
-        gan_config = config.get('gan_config', {})
-        image_size = gan_config.get('dataset', {}).get('resize_size', image_size)
-        channels = gan_config.get('generator', {}).get('image_channels', channels)
-        
-        print(f"Image size: {image_size}, Channels: {channels}")
-        
-        # Create DCGAN task dataset
         class DCGANTaskDataset(Dataset):
+           
+            
             def __init__(self, images, task_id=0, domain_factor=0.0, style='original'):
                 self.images = images
                 self.task_id = task_id
@@ -199,71 +66,321 @@ implementation:
                 return img
             
             def apply_gan_domain_shift(self, img, factor, style):
+                
                 img = img.clone()
                 
                 if style == 'noise':
+                    # Add Gaussian noise
                     noise_level = 0.1 + factor * 0.3
-                    img = img + torch.randn_like(img) * noise_level
-                    img = torch.clamp(img, -1, 1)
-                
+                    noise = torch.randn_like(img) * noise_level
+                    img = img + noise
+                    img = torch.clamp(img, -1, 1)  # DCGAN uses [-1, 1] range
+                    
                 elif style == 'blur':
-                    from torch.nn.functional import avg_pool2d
-                    kernel_size = int(3 + factor * 7)
+                    # Apply Gaussian blur (simulated with pooling)
+                    kernel_size = int(3 + factor * 5)
                     if kernel_size % 2 == 0:
                         kernel_size += 1
                     
                     if img.dim() == 3:
-                        img = avg_pool2d(img.unsqueeze(0), kernel_size=kernel_size, stride=1, padding=kernel_size//2).squeeze(0)
+                        # Apply blur using average pooling
+                        img = F.avg_pool2d(img.unsqueeze(0), 
+                                          kernel_size=kernel_size, 
+                                          stride=1, 
+                                          padding=kernel_size//2).squeeze(0)
                 
                 elif style == 'contrast':
+                    # Adjust contrast
                     mean = img.mean()
-                    contrast_factor = 1.0 + factor * 1.0
+                    contrast_factor = 1.0 + factor * 1.5
                     img = (img - mean) * contrast_factor + mean
                     img = torch.clamp(img, -1, 1)
                 
+                elif style == 'brightness':
+                    # Adjust brightness
+                    brightness_shift = factor * 0.4
+                    img = img + brightness_shift
+                    img = torch.clamp(img, -1, 1)
+                
                 elif style == 'color_shift' and img.shape[0] == 3:
+                    # RGB color shift
                     shift = torch.tensor([
-                        factor * 0.4,   # Red
-                        factor * 0.2,   # Green
-                        -factor * 0.3   # Blue
-                    ]).view(3, 1, 1)
+                        factor * 0.3,   # Red shift
+                        factor * 0.2,   # Green shift  
+                        -factor * 0.25  # Blue shift
+                    ]).view(3, 1, 1).to(img.device)
                     img = img + shift
                     img = torch.clamp(img, -1, 1)
                 
                 return img
         
-        # Split into continual tasks
+        class TasksWrapper:
+      
+            def __init__(self, tasks):
+                self.tasks = tasks
+                self.num_tasks = len(tasks)
+            
+            def __len__(self):
+                return len(self.tasks)
+            
+            def __getitem__(self, idx):
+                return self.tasks[idx]
+            
+            def get_task(self, task_id):
+           
+                for task in self.tasks:
+                    if task['task_id'] == task_id:
+                        return task
+                return None
+        
+        # Safe unpickler for loading various data formats
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                try:
+                    return super().find_class(module, name)
+                except:
+                    # Handle common classes from DCGAN pipeline
+                    if name == 'RawDatasetWrapper':
+                        class RawDatasetWrapper:
+                            def __init__(self, *args, **kwargs):
+                                self.images = kwargs.get('images', [])
+                                self.labels = kwargs.get('labels', [])
+                                self.dataset_name = kwargs.get('dataset_name', 'unknown')
+                            def __len__(self): return len(self.images)
+                            def __getitem__(self, idx): return self.images[idx]
+                        return RawDatasetWrapper
+                    
+                    elif name == 'PreprocessedDataset':
+                        class PreprocessedDataset:
+                            def __init__(self, *args, **kwargs):
+                                self.images = kwargs.get('images', [])
+                                self.labels = kwargs.get('labels', [])
+                                self.dataset_name = kwargs.get('dataset_name', 'unknown')
+                                self.preprocessed = True
+                            def __len__(self): return len(self.images)
+                            def __getitem__(self, idx): return self.images[idx]
+                        return PreprocessedDataset
+                    
+                    elif name == 'GANDataset' or name == 'DCGANDataset':
+                        return DCGANTaskDataset
+                    
+                    elif name == 'TasksWrapper':
+                        return TasksWrapper
+                    
+                    else:
+                        # Return a generic class for unknown types
+                        class GenericClass:
+                            def __init__(self, *args, **kwargs):
+                                self.data = args[0] if args else kwargs
+                            def __len__(self):
+                                if hasattr(self.data, '__len__'):
+                                    return len(self.data)
+                                return 0
+                            def __getitem__(self, idx):
+                                if hasattr(self.data, '__getitem__'):
+                                    return self.data[idx]
+                                return None
+                        return GenericClass
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--data_pickle', type=str, required=True, help='Input DCGAN data pickle path')
+        parser.add_argument('--splitting_strategy', type=str, default='domain_split', help='Split strategy')
+        parser.add_argument('--num_tasks', type=int, default=3, help='Number of tasks to create')
+        parser.add_argument('--tasks_pickle', type=str, required=True, help='Output pickle for tasks')
+        parser.add_argument('--task_descriptions', type=str, required=True, help='Output task descriptions')
+        parser.add_argument('--config', type=str, required=True, help='Configuration JSON string')
+        args = parser.parse_args()
+        
+        print("=" * 80)
+        print("DCGAN CONTINUAL TASKS GENERATOR - FIXED")
+        print("=" * 80)
+        print(f"Strategy: {args.splitting_strategy}")
+        print(f"Num tasks: {args.num_tasks}")
+        
+        # ============================================================================
+        # LOAD DATA
+        # ============================================================================
+        
+        print("\\nLoading data...")
+        
+        try:
+            with open(args.data_pickle, 'rb') as f:
+                raw_data = f.read()
+            
+            import io
+            data = SafeUnpickler(io.BytesIO(raw_data)).load()
+            print("✓ Data loaded successfully")
+            
+            # Extract images from various data formats
+            images = []
+            
+            if hasattr(data, 'images'):
+                # PreprocessedDataset or RawDatasetWrapper format
+                images = data.images
+                if torch.is_tensor(images):
+                    images = [images[i] for i in range(len(images))]
+                print(f"  Format: DatasetWrapper with {len(images)} images")
+                
+            elif hasattr(data, 'dataset'):
+                # GANDataWrapper format
+                dataset_obj = data.dataset
+                if hasattr(dataset_obj, '__len__'):
+                    images = [dataset_obj[i] for i in range(len(dataset_obj))]
+                print(f"  Format: Wrapper with dataset ({len(images)} images)")
+                
+            elif isinstance(data, list):
+                # Direct list of tensors
+                images = data
+                print(f"  Format: List of tensors ({len(images)} images)")
+                
+            elif isinstance(data, dict) and 'images' in data:
+                # Dictionary format
+                images = data['images']
+                print(f"  Format: Dictionary with images key ({len(images)} images)")
+                
+            elif hasattr(data, '__len__'):
+                # Direct dataset
+                images = [data[i] for i in range(len(data))]
+                print(f"  Format: Direct dataset ({len(images)} images)")
+                
+            else:
+                print(f"  ⚠️ Unknown data format: {type(data)}")
+                # Try to convert whatever we have
+                if torch.is_tensor(data):
+                    images = [data[i] for i in range(len(data))]
+                else:
+                    images = [data]
+            
+            if not images:
+                print("❌ Error: No images found in data")
+                sys.exit(1)
+            
+            # Get image properties
+            sample_img = images[0]
+            if torch.is_tensor(sample_img):
+                if len(sample_img.shape) == 3:
+                    channels = sample_img.shape[0]
+                    height = sample_img.shape[1]
+                    width = sample_img.shape[2]
+                elif len(sample_img.shape) == 2:
+                    channels = 1
+                    height, width = sample_img.shape
+                else:
+                    channels = 3
+                    height = width = 64
+            else:
+                channels = 3
+                height = width = 64
+            
+            print(f"✓ Extracted {len(images)} images")
+            print(f"  Image size: {height}x{width}")
+            print(f"  Channels: {channels}")
+            
+            # Ensure all images are tensors
+            tensor_images = []
+            for img in images:
+                if torch.is_tensor(img):
+                    tensor_images.append(img)
+                elif isinstance(img, np.ndarray):
+                    tensor_images.append(torch.from_numpy(img).float())
+                else:
+                    # Try to convert
+                    try:
+                        tensor_images.append(torch.tensor(img, dtype=torch.float32))
+                    except:
+                        print(f"   Could not convert image type: {type(img)}")
+            
+            if not tensor_images:
+                print(" Error: Could not convert images to tensors")
+                sys.exit(1)
+            
+            images = tensor_images
+            
+        except Exception as e:
+            print(f" Error loading data: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        
+        # ============================================================================
+        # PARSE CONFIG
+        # ============================================================================
+        
+        print("\\nParsing configuration...")
+        
+        try:
+            config = json.loads(args.config)
+            
+            # Get GAN config
+            gan_config = config.get('gan', {})
+            dataset_config = config.get('dataset', {})
+            train_config = gan_config.get('training', {})
+            
+            # Get image properties from config
+            image_size = dataset_config.get('image_size', height)
+            channels = dataset_config.get('channels', channels)
+            batch_size = train_config.get('batch_size', 32)
+            
+            print(f"✓ Config parsed")
+            print(f"  Image size from config: {image_size}")
+            print(f"  Channels from config: {channels}")
+            print(f"  Batch size: {batch_size}")
+            
+        except Exception as e:
+            print(f" Error parsing config: {e}")
+            print("  Using default values")
+            image_size = height
+            batch_size = 32
+        
+        # ============================================================================
+        # CREATE CONTINUAL LEARNING TASKS
+        # ============================================================================
+        
+        print(f"\\nCreating {args.num_tasks} continual learning tasks...")
+        
+        data_size = len(images)
+        if data_size == 0:
+            print(" Error: Empty dataset")
+            sys.exit(1)
+        
+        # Calculate task sizes
+        task_size = max(1, data_size // args.num_tasks)
+        remaining = data_size % args.num_tasks
+        
+        print(f"  Total images: {data_size}")
+        print(f"  Images per task: ~{task_size}")
+        print(f"  Strategy: {args.splitting_strategy}")
+        
         tasks = []
         task_descriptions_list = []
         
-        data_size = len(dataset)
-        if data_size == 0:
-            print("Error: Empty dataset")
-            sys.exit(1)
-        
-        task_size = max(1, data_size // args.num_tasks)
-        
-        print(f"\\nSplitting {data_size} samples into {args.num_tasks} tasks (~{task_size} samples each)")
-        
         if args.splitting_strategy == 'domain_split':
-            print(f"Using domain_split strategy...")
+            print(f"\\nUsing DOMAIN_SPLIT strategy...")
             
-            styles = ['original', 'noise', 'blur', 'contrast', 'color_shift']
+            styles = ['original', 'noise', 'blur', 'contrast', 'brightness', 'color_shift']
             
+            start_idx = 0
             for task_id in range(args.num_tasks):
-                start_idx = task_id * task_size
-                end_idx = min((task_id + 1) * task_size, data_size)
+                # Calculate task size with remainder distribution
+                current_task_size = task_size + (1 if task_id < remaining else 0)
+                end_idx = start_idx + current_task_size
                 
-                # Get subset
+                if start_idx >= data_size:
+                    print(f"  ⚠️ Not enough data for task {task_id}")
+                    break
+                
+                end_idx = min(end_idx, data_size)
                 task_indices = list(range(start_idx, end_idx))
-                task_data = [dataset[i] for i in task_indices if i < len(dataset)]
                 
-                if not task_data:
-                    print(f"Warning: No data for task {task_id}")
+                if not task_indices:
+                    print(f"  ⚠️ Empty task {task_id}")
                     continue
                 
+                # Get task data
+                task_data = [images[i] for i in task_indices]
+                
                 # Create domain shift
-                domain_factor = task_id * 0.25
+                domain_factor = task_id * 0.2  # Increasing difficulty
                 style = styles[task_id % len(styles)]
                 
                 # Create task dataset
@@ -275,42 +392,57 @@ implementation:
                 )
                 
                 # Create data loader
-                batch_size = config.get('train', {}).get('batch_size', 32)
-                train_loader = DataLoader(task_dataset, batch_size=batch_size, shuffle=True)
+                actual_batch_size = min(batch_size, max(1, len(task_dataset)))
+                train_loader = DataLoader(
+                    task_dataset, 
+                    batch_size=actual_batch_size, 
+                    shuffle=True,
+                    drop_last=False
+                )
                 
-                tasks.append({
+                # Create task info
+                task_info = {
                     'task_id': task_id,
                     'dataset': task_dataset,
                     'train_loader': train_loader,
                     'domain_factor': domain_factor,
                     'style': style,
                     'size': len(task_dataset),
-                    'description': f'Domain {task_id+1}: {style} (shift: {domain_factor:.2f})'
-                })
+                    'start_idx': start_idx,
+                    'end_idx': end_idx,
+                    'description': f'Domain Task {task_id+1}: {style} (factor: {domain_factor:.2f})',
+                    'batch_size': actual_batch_size
+                }
                 
-                desc = f"Task {task_id+1}: {len(task_dataset)} samples, Style: {style}, Domain shift: {domain_factor:.2f}"
+                tasks.append(task_info)
+                
+                desc = f"Task {task_id+1}: {len(task_dataset)} images, Style: {style}, Domain factor: {domain_factor:.2f}"
                 task_descriptions_list.append(desc)
                 
-                print(f"  Task {task_id+1}: {len(task_dataset)} samples, Style: {style}, Domain factor: {domain_factor:.2f}")
+                print(f"  ✓ Task {task_id+1}: {len(task_dataset)} images, Style: {style}, Factor: {domain_factor:.2f}")
+                
+                start_idx = end_idx
         
         elif args.splitting_strategy == 'class_split':
-            print(f"Using class_split strategy (simulated for GANs)...")
+            print(f"\\nUsing CLASS_SPLIT strategy (simulated)...")
             
-            # For GANs, simulate classes with different image characteristics
-            class_types = ['sharp', 'smooth', 'textured', 'simple', 'complex']
+            # For GANs, simulate classes with different visual characteristics
+            class_types = ['sharp', 'smooth', 'textured', 'simple', 'complex', 'high_freq']
             
+            start_idx = 0
             for task_id in range(args.num_tasks):
-                start_idx = task_id * task_size
-                end_idx = min((task_id + 1) * task_size, data_size)
+                current_task_size = task_size + (1 if task_id < remaining else 0)
+                end_idx = start_idx + current_task_size
+                end_idx = min(end_idx, data_size)
+                
+                if start_idx >= data_size:
+                    break
                 
                 task_indices = list(range(start_idx, end_idx))
-                task_data = [dataset[i] for i in task_indices if i < len(dataset)]
-                
-                if not task_data:
-                    continue
+                task_data = [images[i] for i in task_indices]
                 
                 class_type = class_types[task_id % len(class_types)]
-                class_factor = task_id * 0.2
+                class_factor = task_id * 0.15
                 
                 # Create class-specific dataset
                 task_dataset = DCGANTaskDataset(
@@ -320,36 +452,43 @@ implementation:
                     style=class_type
                 )
                 
-                batch_size = config.get('train', {}).get('batch_size', 32)
-                train_loader = DataLoader(task_dataset, batch_size=batch_size, shuffle=True)
+                actual_batch_size = min(batch_size, max(1, len(task_dataset)))
+                train_loader = DataLoader(task_dataset, batch_size=actual_batch_size, shuffle=True)
                 
-                tasks.append({
+                task_info = {
                     'task_id': task_id,
                     'dataset': task_dataset,
                     'train_loader': train_loader,
                     'class_type': class_type,
                     'class_factor': class_factor,
                     'size': len(task_dataset),
-                    'description': f'Class {task_id+1}: {class_type} images'
-                })
+                    'description': f'Class Task {task_id+1}: {class_type} images',
+                    'batch_size': actual_batch_size
+                }
                 
-                desc = f"Task {task_id+1}: {len(task_dataset)} samples, Class: {class_type}, Factor: {class_factor:.2f}"
+                tasks.append(task_info)
+                
+                desc = f"Task {task_id+1}: {len(task_dataset)} images, Class: {class_type}, Factor: {class_factor:.2f}"
                 task_descriptions_list.append(desc)
                 
-                print(f"  Task {task_id+1}: {len(task_dataset)} samples, Class: {class_type}, Factor: {class_factor:.2f}")
+                print(f"  ✓ Task {task_id+1}: {len(task_dataset)} images, Class: {class_type}, Factor: {class_factor:.2f}")
+                
+                start_idx = end_idx
         
         elif args.splitting_strategy == 'temporal_split':
-            print(f"Using temporal_split strategy...")
+            print(f"\\nUsing TEMPORAL_SPLIT strategy...")
             
+            start_idx = 0
             for task_id in range(args.num_tasks):
-                start_idx = task_id * task_size
-                end_idx = min((task_id + 1) * task_size, data_size)
+                current_task_size = task_size + (1 if task_id < remaining else 0)
+                end_idx = start_idx + current_task_size
+                end_idx = min(end_idx, data_size)
+                
+                if start_idx >= data_size:
+                    break
                 
                 task_indices = list(range(start_idx, end_idx))
-                task_data = [dataset[i] for i in task_indices if i < len(dataset)]
-                
-                if not task_data:
-                    continue
+                task_data = [images[i] for i in task_indices]
                 
                 # Simulate temporal evolution
                 temporal_factor = task_id / (args.num_tasks - 1) if args.num_tasks > 1 else 0
@@ -361,49 +500,125 @@ implementation:
                     style='temporal'
                 )
                 
-                batch_size = config.get('train', {}).get('batch_size', 32)
-                train_loader = DataLoader(task_dataset, batch_size=batch_size, shuffle=True)
+                actual_batch_size = min(batch_size, max(1, len(task_dataset)))
+                train_loader = DataLoader(task_dataset, batch_size=actual_batch_size, shuffle=True)
                 
-                tasks.append({
+                task_info = {
                     'task_id': task_id,
                     'dataset': task_dataset,
                     'train_loader': train_loader,
                     'temporal_period': task_id,
                     'temporal_factor': temporal_factor,
                     'size': len(task_dataset),
-                    'description': f'Temporal Period {task_id+1}/{args.num_tasks}'
-                })
+                    'description': f'Temporal Task {task_id+1}/{args.num_tasks}',
+                    'batch_size': actual_batch_size
+                }
                 
-                desc = f"Task {task_id+1}: {len(task_dataset)} samples, Temporal period: {task_id+1}, Factor: {temporal_factor:.2f}"
+                tasks.append(task_info)
+                
+                desc = f"Task {task_id+1}: {len(task_dataset)} images, Temporal period: {task_id+1}, Factor: {temporal_factor:.2f}"
                 task_descriptions_list.append(desc)
                 
-                print(f"  Task {task_id+1}: {len(task_dataset)} samples, Temporal factor: {temporal_factor:.2f}")
+                print(f"  ✓ Task {task_id+1}: {len(task_dataset)} images, Temporal factor: {temporal_factor:.2f}")
+                
+                start_idx = end_idx
         
         else:
             print(f" Unknown splitting strategy: {args.splitting_strategy}")
+            print("  Available strategies: domain_split, class_split, temporal_split")
             sys.exit(1)
+        
+        if not tasks:
+            print(" Error: No tasks created")
+            sys.exit(1)
+        
+        # ============================================================================
+        # CREATE TASK WRAPPER AND SAVE OUTPUTS
+        # ============================================================================
+        
+        print(f"\\nCreating task wrapper...")
         
         tasks_wrapper = TasksWrapper(tasks)
         
         # Save tasks
-        os.makedirs(os.path.dirname(args.tasks_pickle) or ".", exist_ok=True)
-        with open(args.tasks_pickle, "wb") as f:
-            pickle.dump(tasks_wrapper, f)
+        try:
+            os.makedirs(os.path.dirname(args.tasks_pickle) or ".", exist_ok=True)
+            with open(args.tasks_pickle, "wb") as f:
+                pickle.dump(tasks_wrapper, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            file_size = os.path.getsize(args.tasks_pickle)
+            print(f"✓ Tasks saved to: {args.tasks_pickle}")
+            print(f"  File size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
+            
+        except Exception as e:
+            print(f"❌ Error saving tasks: {e}")
+            sys.exit(1)
         
         # Save task descriptions
-        os.makedirs(os.path.dirname(args.task_descriptions) or ".", exist_ok=True)
-        with open(args.task_descriptions, "w") as f:
-            json.dump({
+        try:
+            os.makedirs(os.path.dirname(args.task_descriptions) or ".", exist_ok=True)
+            
+            descriptions_data = {
                 'num_tasks': len(tasks),
                 'strategy': args.splitting_strategy,
+                'total_images': data_size,
+                'images_per_task': [t['size'] for t in tasks],
                 'descriptions': task_descriptions_list,
-                'total_samples': sum(t['size'] for t in tasks)
-            }, f, indent=2)
+                'task_details': [
+                    {
+                        'task_id': t['task_id'],
+                        'size': t['size'],
+                        'description': t['description'],
+                        'batch_size': t['batch_size']
+                    } for t in tasks
+                ],
+                'image_properties': {
+                    'height': height,
+                    'width': width,
+                    'channels': channels
+                }
+            }
+            
+            with open(args.task_descriptions, "w") as f:
+                json.dump(descriptions_data, f, indent=2)
+            
+            print(f"✓ Task descriptions saved to: {args.task_descriptions}")
+            
+        except Exception as e:
+            print(f" Error saving descriptions: {e}")
+            sys.exit(1)
         
-        print(f"\\n Saved {len(tasks)} continual learning tasks to {args.tasks_pickle}")
-        print(f" Task descriptions saved to {args.task_descriptions}")
+        # ============================================================================
+        # FINAL SUMMARY
+        # ============================================================================
+        
+        print(f"\\n" + "="*80)
+        print("CONTINUAL TASKS GENERATION COMPLETE")
+        print("="*80)
+        print(f"Total tasks created: {len(tasks)}")
+        print(f"Total images used: {sum(t['size'] for t in tasks)} / {data_size}")
+        print(f"Splitting strategy: {args.splitting_strategy}")
+        print(f"\\nTask summary:")
+        
         for i, task in enumerate(tasks):
-            print(f"Task {i}: {task['description']}")
+            task_desc = task['description']
+            task_size = task['size']
+            if 'style' in task:
+                style = task['style']
+                factor = task['domain_factor']
+                print(f"  Task {i+1}: {task_size} images, {style} (factor: {factor:.2f})")
+            elif 'class_type' in task:
+                class_type = task['class_type']
+                factor = task['class_factor']
+                print(f"  Task {i+1}: {task_size} images, {class_type} class (factor: {factor:.2f})")
+            else:
+                print(f"  Task {i+1}: {task_size} images, {task_desc}")
+        
+        print(f"\\nOutput files:")
+        print(f"  Tasks pickle: {args.tasks_pickle}")
+        print(f"  Task descriptions: {args.task_descriptions}")
+        print("="*80)
+        
     args:
       - --data_pickle
       - {inputPath: data_pickle}
