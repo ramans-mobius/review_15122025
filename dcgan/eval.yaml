@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v7 - FIXED
+name: Evaluate DCGAN v7 - FIXED WITH METRICS
 description: Evaluates DCGAN with comprehensive metrics (FID, SSIM, PSNR, Diversity)
 inputs:
   - name: trained_model
@@ -18,6 +18,8 @@ outputs:
     type: String
   - name: metrics_visualization
     type: String
+  - name: rlaf_metrics
+    type: Metrics  # NEW: For RLAF brick
 
 implementation:
   container:
@@ -50,6 +52,7 @@ implementation:
         parser.add_argument('--generated_samples', type=str, required=True)
         parser.add_argument('--evaluation_summary', type=str, required=True)
         parser.add_argument('--metrics_visualization', type=str, required=True)
+        parser.add_argument('--rlaf_metrics', type=str, required=True)  # NEW: RLAF metrics output
         args = parser.parse_args()
         
         print("=" * 80)
@@ -235,6 +238,95 @@ implementation:
             return metrics
         
         # ============================================================================
+        # CREATE RLAF-COMPATIBLE METRICS
+        # ============================================================================
+        
+        def create_rlaf_metrics(metrics_dict, algorithm, model_info):
+           
+            rlaf_metrics = {
+                'evaluation_timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'algorithm': algorithm,
+                'model_info': model_info,
+                
+                # Primary metrics for RLAF optimization
+                'primary_metrics': {
+                    'fid_score': metrics_dict.get('fid_score', float('nan')),
+                    'ssim_mean': metrics_dict.get('ssim_mean', 0.0),
+                    'psnr_mean': metrics_dict.get('psnr_mean', 0.0),
+                    'diversity_score': metrics_dict.get('diversity_score', 0.0),
+                    'generator_quality_score': 0.0,  # Will calculate
+                    'discriminator_quality_score': 0.0  # Will calculate
+                },
+                
+                # Secondary metrics (for reference)
+                'secondary_metrics': {
+                    'mae': metrics_dict.get('mae', 0.0),
+                    'mse': metrics_dict.get('mse', 0.0),
+                    'histogram_correlation': metrics_dict.get('histogram_correlation', 0.0),
+                    'real_mean': metrics_dict.get('real_stats', {}).get('mean', 0.0),
+                    'fake_mean': metrics_dict.get('fake_stats', {}).get('mean', 0.0),
+                    'real_std': metrics_dict.get('real_stats', {}).get('std', 0.0),
+                    'fake_std': metrics_dict.get('fake_stats', {}).get('std', 0.0)
+                },
+                
+                # Composite scores for RLAF
+                'composite_scores': {
+                    'overall_quality': 0.0,
+                    'image_fidelity': 0.0,
+                    'diversity_quality': 0.0
+                },
+                
+                # Metrics specifically formatted for DQN parameters
+                'dqn_parameters': []
+            }
+            
+            # Calculate composite scores
+            fid = metrics_dict.get('fid_score', float('nan'))
+            ssim = metrics_dict.get('ssim_mean', 0.0)
+            psnr = metrics_dict.get('psnr_mean', 0.0)
+            diversity = metrics_dict.get('diversity_score', 0.0)
+            
+            # Normalize and calculate scores
+            if not np.isnan(fid) and fid > 0:
+                # For FID, lower is better, so invert and normalize
+                fid_score = max(0, 100 - min(fid, 100)) / 100
+            else:
+                fid_score = 0.5
+            
+            # SSIM and PSNR are already in good ranges
+            ssim_score = min(ssim, 1.0)
+            psnr_score = min(psnr / 50.0, 1.0)  # Normalize PSNR (50 dB is excellent)
+            diversity_score = min(diversity / 10.0, 1.0)  # Normalize diversity
+            
+            # Calculate composite scores
+            rlaf_metrics['composite_scores']['image_fidelity'] = (ssim_score + psnr_score) / 2
+            rlaf_metrics['composite_scores']['diversity_quality'] = diversity_score
+            
+            # Overall quality (weighted average)
+            overall = (fid_score * 0.3 + ssim_score * 0.3 + psnr_score * 0.2 + diversity_score * 0.2)
+            rlaf_metrics['composite_scores']['overall_quality'] = overall
+            
+            # Update primary metrics with calculated scores
+            rlaf_metrics['primary_metrics']['generator_quality_score'] = overall
+            rlaf_metrics['primary_metrics']['discriminator_quality_score'] = fid_score
+            
+            # Create DQN parameters with appropriate signs
+            dqn_params = [
+                {'key': 'fid_score', 'sign': '-', 'value': fid if not np.isnan(fid) else 0.0, 'weight': 0.3},
+                {'key': 'ssim_mean', 'sign': '+', 'value': ssim, 'weight': 0.3},
+                {'key': 'psnr_mean', 'sign': '+', 'value': psnr, 'weight': 0.2},
+                {'key': 'diversity_score', 'sign': '+', 'value': diversity, 'weight': 0.2},
+                {'key': 'overall_quality', 'sign': '+', 'value': overall, 'weight': 1.0},
+                {'key': 'generator_quality_score', 'sign': '+', 'value': overall, 'weight': 0.8},
+                {'key': 'image_fidelity', 'sign': '+', 'value': rlaf_metrics['composite_scores']['image_fidelity'], 'weight': 0.6},
+                {'key': 'diversity_quality', 'sign': '+', 'value': diversity_score, 'weight': 0.4}
+            ]
+            
+            rlaf_metrics['dqn_parameters'] = dqn_params
+            
+            return rlaf_metrics
+        
+        # ============================================================================
         # MAIN EVALUATION LOGIC
         # ============================================================================
         
@@ -358,6 +450,26 @@ implementation:
         metrics['calculation_time'] = time.time() - start_time
         
         # ============================================================================
+        # CREATE RLAF METRICS
+        # ============================================================================
+        print("\\nCreating RLAF-compatible metrics...")
+        
+        model_info = {
+            'latent_dim': generator.latent_dim,
+            'image_size': dcgan_config.image_size,
+            'channels': dcgan_config.channels,
+            'algorithm': algorithm,
+            'num_eval_samples': num_eval_samples
+        }
+        
+        rlaf_metrics = create_rlaf_metrics(metrics, algorithm, model_info)
+        
+        print(f"✓ RLAF metrics created:")
+        print(f"  Overall quality: {rlaf_metrics['composite_scores']['overall_quality']:.3f}")
+        print(f"  Image fidelity: {rlaf_metrics['composite_scores']['image_fidelity']:.3f}")
+        print(f"  Diversity quality: {rlaf_metrics['composite_scores']['diversity_quality']:.3f}")
+        
+        # ============================================================================
         # CREATE VISUALIZATION
         # ============================================================================
         print("\\nCreating metrics visualization...")
@@ -464,6 +576,11 @@ implementation:
             json.dump(metrics, f, indent=2)
         print(f"✓ Evaluation metrics saved: {args.evaluation_metrics}")
         
+        # Save RLAF metrics
+        with open(args.rlaf_metrics, 'w') as f:
+            json.dump(rlaf_metrics, f, indent=2)
+        print(f"✓ RLAF metrics saved: {args.rlaf_metrics}")
+        
         # Save generated samples
         generated_data = {
             'samples': fake_tensor.numpy().tolist(),
@@ -498,13 +615,14 @@ implementation:
                 'mae': metrics.get('mae'),
                 'mse': metrics.get('mse')
             },
+            'rlaf_scores': {
+                'overall_quality': rlaf_metrics['composite_scores']['overall_quality'],
+                'image_fidelity': rlaf_metrics['composite_scores']['image_fidelity'],
+                'diversity_quality': rlaf_metrics['composite_scores']['diversity_quality']
+            },
             'calculation_time': metrics.get('calculation_time'),
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-            'model_info': {
-                'latent_dim': generator.latent_dim,
-                'image_size': dcgan_config.image_size,
-                'channels': dcgan_config.channels
-            }
+            'model_info': model_info
         }
         
         with open(args.evaluation_summary, 'w') as f:
@@ -528,6 +646,10 @@ implementation:
         print(f"  MAE: {metrics.get('mae', 0):.4f}")
         print(f"  MSE: {metrics.get('mse', 0):.4f}")
         print(f"  Histogram Correlation: {metrics.get('histogram_correlation', 0):.3f}")
+        print("\\n RLAF SCORES:")
+        print(f"  Overall Quality: {rlaf_metrics['composite_scores']['overall_quality']:.3f}")
+        print(f"  Image Fidelity: {rlaf_metrics['composite_scores']['image_fidelity']:.3f}")
+        print(f"  Diversity Quality: {rlaf_metrics['composite_scores']['diversity_quality']:.3f}")
         print("\\n STATISTICS:")
         print(f"  Real - Mean: {metrics['real_stats']['mean']:.3f}, "
               f"Std: {metrics['real_stats']['std']:.3f}")
@@ -552,3 +674,5 @@ implementation:
       - {outputPath: evaluation_summary}
       - --metrics_visualization
       - {outputPath: metrics_visualization}
+      - --rlaf_metrics
+      - {outputPath: rlaf_metrics}
