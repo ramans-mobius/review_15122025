@@ -87,6 +87,65 @@ implementation:
       - |
         import argparse, subprocess, json, os, uuid, pickle, sys
         
+        # ============================================================================
+        # INCLUDE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
+        # ============================================================================
+        import torch
+        
+        class RawDatasetWrapper:
+            def __init__(self, images, labels, dataset_name='mnist'):
+                self.images = images  # Raw images
+                self.labels = labels  # Raw labels
+                self.dataset_name = dataset_name
+                self.preprocessed = False  # Mark as raw
+                self._num_samples = len(images)
+            
+            def __len__(self):
+                return self._num_samples
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed
+                }
+        
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+        
+        class PreprocessedDataset:
+            def __init__(self, images, labels, dataset_name, preprocessor_params):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = True
+                self.preprocessor_params = preprocessor_params
+            
+            def __len__(self):
+                return len(self.images)
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': True,
+                    'preprocessor_params': self.preprocessor_params
+                }
+        
+        # ============================================================================
+        # MAIN EXECUTION CODE
+        # ============================================================================
         parser = argparse.ArgumentParser()
         
         # Raw data from Load Raw Dataset v1
@@ -122,14 +181,42 @@ implementation:
         print("UPLOAD DATA TO CDN v12 - COMPLETE SET FOR NEXT PIPELINE")
         print("=" * 80)
         
+        # ============================================================================
+        # Create ALL output directories before doing anything
+        # ============================================================================
+        print("\\nCreating output directories...")
+        
+        output_paths = [
+            args.raw_train_data_url,
+            args.raw_test_data_url,
+            args.dataset_info_url,
+            args.data_config_url,
+            args.processed_train_data_url,
+            args.preprocess_metadata_url,
+            args.preprocessor_params_url,
+            args.upload_summary,
+            args.upload_summary_url
+        ]
+        
+        for path in output_paths:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"  Created: {dir_path}")
+        
+        print("✓ All output directories created")
+        
+        # ============================================================================
         # Read bearer token
+        # ============================================================================
         with open(args.bearer_token, 'r') as f:
             bearer_token = f.read().strip()
         
         upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
         
         # ============================================================================
-        # File verification
+        # File verification - NOW WITH CLASS DEFINITIONS AVAILABLE
         # ============================================================================
         print("\\nVerifying input files...")
         
@@ -146,7 +233,11 @@ implementation:
                     with open(file_path, 'rb') as f:
                         obj = pickle.load(f)
                     class_name = obj.__class__.__name__
-                    print(f"✓ {os.path.basename(file_path)}: {class_name} ({size_kb:.1f} KB)")
+                    if hasattr(obj, '__len__'):
+                        sample_count = len(obj)
+                        print(f"✓ {os.path.basename(file_path)}: {class_name} ({sample_count} samples, {size_kb:.1f} KB)")
+                    else:
+                        print(f"✓ {os.path.basename(file_path)}: {class_name} ({size_kb:.1f} KB)")
                     return True, size_kb
                 elif file_type == 'json':
                     with open(file_path, 'r') as f:
@@ -199,7 +290,10 @@ implementation:
             # Generate unique filename
             unique_id = str(uuid.uuid4())[:8]
             timestamp = uuid.uuid4().hex[:6]  # Short timestamp
-            cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}.pkl" if file_tag.endswith('_data') else f"dcgan_{file_tag}_{timestamp}_{unique_id}.json"
+            
+            # Determine extension based on file type
+            file_ext = '.pkl' if file_tag.endswith('_data') or 'dataset' in file_tag else '.json'
+            cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}{file_ext}"
             
             curl_command = [
                 "curl",
@@ -232,7 +326,6 @@ implementation:
                 print(f"    ✓ Uploaded: {full_url[:80]}...")
                 
                 # Save URL locally
-                os.makedirs(os.path.dirname(output_url_path) or '.', exist_ok=True)
                 with open(output_url_path, "w") as f:
                     f.write(full_url)
                 
@@ -241,7 +334,8 @@ implementation:
                     'size_bytes': file_size,
                     'size_kb': size_kb,
                     'description': description,
-                    'file_tag': file_tag
+                    'file_tag': file_tag,
+                    'cdn_filename': cdn_filename
                 }
                 
             except subprocess.CalledProcessError as e:
@@ -277,6 +371,8 @@ implementation:
             result = upload_file_to_cdn(file_path, url_path, description, tag)
             if result:
                 upload_results[tag] = result
+            else:
+                print(f"✗ Failed to upload: {tag}")
         
         # ============================================================================
         # Create and upload summary
@@ -285,7 +381,7 @@ implementation:
         
         successful = len(upload_results)
         total_files = len(files_to_upload)
-        total_bytes = sum(r['size_bytes'] for r in upload_results.values())
+        total_bytes = sum(r['size_bytes'] for r in upload_results.values() if r)
         
         summary = {
             'pipeline_stage': 'data_loading_preprocessing',
@@ -307,18 +403,21 @@ implementation:
         
         # Add file details
         for tag, result in upload_results.items():
-            summary['files'][tag] = {
-                'description': result['description'],
-                'size_kb': result['size_kb'],
-                'uploaded': True
-            }
-            summary['urls'][tag] = result['url']
+            if result:
+                summary['files'][tag] = {
+                    'description': result['description'],
+                    'size_kb': result['size_kb'],
+                    'uploaded': True,
+                    'cdn_filename': result.get('cdn_filename', '')
+                }
+                summary['urls'][tag] = result['url']
         
         # Save summary locally
         with open(args.upload_summary, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        print(f"✓ Summary saved: {args.upload_summary}")
+        summary_size = os.path.getsize(args.upload_summary)
+        print(f"✓ Summary saved: {args.upload_summary} ({summary_size/1024:.1f} KB)")
         
         # Upload summary itself
         print("\\nUploading summary...")
@@ -373,8 +472,9 @@ implementation:
                     url = f.read().strip()
                 if url and url.startswith('http'):
                     url_count += 1
+                    print(f"  ✓ {name}: URL saved")
                 else:
-                    print(f"  {name}: Invalid URL")
+                    print(f"  ✗ {name}: Invalid URL")
             else:
                 print(f"✗ {name}: File not created")
         
@@ -398,12 +498,15 @@ implementation:
         print("   • dataset_info_url: Dataset metadata")
         print("   • data_config_url: Configuration")
         print("   • upload_summary_url: This summary")
-        print("\\n✓ Complete dataset set ready for pipeline continuation!")
         
-        if successful == total_files + 1:  # +1 for summary
-            print(f"\\n ALL {successful} files uploaded successfully!")
+        if successful == total_files and summary_result:
+            print("\\n" + "=" * 80)
+            print("✓ COMPLETE DATASET SET UPLOADED SUCCESSFULLY!")
+            print("=" * 80)
+            print(f"All {successful} data files + summary uploaded successfully!")
         else:
-            print(f"\\n  Upload incomplete: {successful}/{total_files + 1} files")
+            print(f"\\n✗ Upload incomplete: {successful}/{total_files} data files")
+            print("  Summary uploaded: " + ("Yes" if summary_result else "No"))
             sys.exit(1)
         
     args:
