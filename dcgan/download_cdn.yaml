@@ -1,4 +1,4 @@
-name: Download DCGAN Data From CDN v2
+name: Download DCGAN Data From CDN v3
 description: Downloads actual image datasets from CDN
 inputs:
   # Input URLs from Upload
@@ -7,8 +7,6 @@ inputs:
   - name: raw_test_data_url
     type: String
   - name: processed_train_data_url
-    type: String
-  - name: processed_test_data_url
     type: String
   - name: dataset_info_url
     type: String
@@ -31,8 +29,6 @@ outputs:
     type: Dataset
   - name: processed_train_data
     type: Dataset
-  - name: processed_test_data
-    type: Dataset
   - name: dataset_info
     type: DatasetInfo
   - name: data_config
@@ -44,7 +40,7 @@ outputs:
 
 implementation:
   container:
-    image: deepak0147/nessy-facotry:0.0.8
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -ec
@@ -63,7 +59,6 @@ implementation:
         parser.add_argument('--raw_train_data_url', type=str, required=True)
         parser.add_argument('--raw_test_data_url', type=str, required=True)
         parser.add_argument('--processed_train_data_url', type=str, required=True)
-        parser.add_argument('--processed_test_data_url', type=str, required=True)
         parser.add_argument('--dataset_info_url', type=str, required=True)
         parser.add_argument('--data_config_url', type=str, required=True)
         parser.add_argument('--preprocess_metadata_url', type=str, required=True)
@@ -76,7 +71,6 @@ implementation:
         parser.add_argument('--raw_train_data', type=str, required=True)
         parser.add_argument('--raw_test_data', type=str, required=True)
         parser.add_argument('--processed_train_data', type=str, required=True)
-        parser.add_argument('--processed_test_data', type=str, required=True)
         parser.add_argument('--dataset_info', type=str, required=True)
         parser.add_argument('--data_config', type=str, required=True)
         parser.add_argument('--preprocess_metadata', type=str, required=True)
@@ -141,7 +135,7 @@ implementation:
         # Create output directories
         output_paths = [
             args.raw_train_data, args.raw_test_data,
-            args.processed_train_data, args.processed_test_data,
+            args.processed_train_data, 
             args.dataset_info, args.data_config,
             args.preprocess_metadata, args.download_summary
         ]
@@ -171,11 +165,6 @@ implementation:
         )
         download_results['processed_train_data'] = {'success': success}
         
-        success = download_from_cdn(
-            args.processed_test_data_url, args.processed_test_data, "Processed test data"
-        )
-        download_results['processed_test_data'] = {'success': success}
-        
         # Download metadata
         print(f"\\nDownloading metadata...")
         success = download_from_cdn(
@@ -201,8 +190,7 @@ implementation:
             'successful_downloads': successful,
             'download_results': download_results,
             'critical_files_present': all([
-                download_results.get('processed_train_data', {}).get('success', False),
-                download_results.get('processed_test_data', {}).get('success', False)
+                download_results.get('processed_train_data', {}).get('success', False)
             ])
         }
         
@@ -225,8 +213,6 @@ implementation:
       - {inputValue: raw_test_data_url}
       - --processed_train_data_url
       - {inputValue: processed_train_data_url}
-      - --processed_test_data_url
-      - {inputValue: processed_test_data_url}
       - --dataset_info_url
       - {inputValue: dataset_info_url}
       - --data_config_url
@@ -247,8 +233,6 @@ implementation:
       - {outputPath: raw_test_data}
       - --processed_train_data
       - {outputPath: processed_train_data}
-      - --processed_test_data
-      - {outputPath: processed_test_data}
       - --dataset_info
       - {outputPath: dataset_info}
       - --data_config
