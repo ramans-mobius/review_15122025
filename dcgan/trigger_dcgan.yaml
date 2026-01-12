@@ -1,4 +1,4 @@
-name: Trigger Pipeline v16
+name: Trigger Pipeline v17
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -99,7 +99,7 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, subprocess, json, os, urllib.parse, time
+        import argparse, subprocess, json, os, urllib.parse, time, sys
         
         parser = argparse.ArgumentParser()
         
@@ -129,7 +129,8 @@ implementation:
         parser.add_argument('--load_from_schema', type=str, required=True)
         parser.add_argument('--cdn_url', type=str, required=True)
         parser.add_argument('--get_cdn', type=str, required=True)
-        
+        parser.add_argument('--train_schema', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)
         
         # IAM authentication
         parser.add_argument('--userName', type=str, required=True)
@@ -144,8 +145,6 @@ implementation:
         parser.add_argument('--dqn_pipeline_id', type=str, required=True)
         parser.add_argument('--rlaf_schema', type=str, required=True)
         parser.add_argument('--model_id', type=str, required=True)
-        parser.add_argument('--train_schema', type=str, required=True)
-        parser.add_argument('--execution_id', type=str, required=True)
         
         # Outputs
         parser.add_argument('--trigger_response', type=str, required=True)
@@ -195,8 +194,25 @@ implementation:
                 return url
         
         print("=" * 100)
-        print("TRIGGER PIPELINE v11 - UPDATED FOR NEW DATA FORMAT")
+        print("TRIGGER PIPELINE v15 - UPDATED FOR NEW DATA FORMAT")
         print("=" * 100)
+        
+        # ============================================================================
+        # Create ALL output directories FIRST
+        # ============================================================================
+        print("\\nCreating output directories...")
+        output_paths = [
+            args.trigger_response,
+            args.run_id,
+            args.trigger_status
+        ]
+        
+        for path in output_paths:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"  Created: {dir_path}")
         
         # Read access token
         with open(args.access_token, 'r') as f:
@@ -212,14 +228,19 @@ implementation:
             'data_config_url': args.data_config_url,
             'preprocess_metadata_url': args.preprocess_metadata_url,
             'upload_summary_url': args.upload_summary_url,
-            'preprocessor_params_url':args.preprocessor_params_url
+            'preprocessor_params_url': args.preprocessor_params_url
         }
         
         fixed_urls = {}
         for key, url in urls_to_fix.items():
-            print(f"  {key}:")
+            print(f"  Processing {key}...")
             fixed_url = fix_cdn_url(url)
             fixed_urls[key] = fixed_url
+            if fixed_url:
+                print(f"    Fixed URL length: {len(fixed_url)} chars")
+                print(f"    URL preview: {fixed_url[:80]}...")
+            else:
+                print(f"    WARNING: Empty URL for {key}")
         
         # Build trigger URL
         trigger_url = f"{args.domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={args.pipeline_id}"
@@ -279,6 +300,8 @@ implementation:
         print(f"Experiment ID: {args.experiment_id}")
         print(f"Number of URLs: {len(fixed_urls)}")
         print(f"Master config length: {len(args.master_config)} chars")
+        print(f"train_schema: {args.train_schema[:50]}..." if len(args.train_schema) > 50 else f"train_schema: {args.train_schema}")
+        print(f"execution_id: {args.execution_id}")
         
         # Trigger pipeline
         print(f"\\nTriggering pipeline...")
@@ -311,14 +334,16 @@ implementation:
             run_id = response.get('run_id', response.get('id', 'unknown'))
             
             print(f"Run ID: {run_id}")
+            print(f"Response keys: {list(response.keys())}")
             
-            # Save outputs
-            os.makedirs(os.path.dirname(args.trigger_response) or '.', exist_ok=True)
+            # Save outputs - NOW directories exist
             with open(args.trigger_response, 'w') as f:
                 json.dump(response, f, indent=2)
+            print(f"✓ Saved trigger response to: {args.trigger_response}")
             
             with open(args.run_id, 'w') as f:
                 f.write(str(run_id))
+            print(f"✓ Saved run_id to: {args.run_id}")
             
             # Create status summary
             status_summary = {
@@ -327,20 +352,23 @@ implementation:
                 'pipeline_id': args.pipeline_id,
                 'experiment_id': args.experiment_id,
                 'urls_provided': list(fixed_urls.keys()),
+                'response_keys': list(response.keys()),
                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
             }
             
             with open(args.trigger_status, 'w') as f:
                 json.dump(status_summary, f, indent=2)
+            print(f"✓ Saved trigger status to: {args.trigger_status}")
             
             print(f"\\n✓ Trigger completed successfully")
             
         except subprocess.CalledProcessError as e:
             print(f"✗ Trigger failed: {e.stderr[:200]}")
+            print(f"Exit code: {e.returncode}")
             
             error_info = {
                 'status': 'failed',
-                'error': e.stderr[:500],
+                'error': e.stderr[:500] if e.stderr else str(e),
                 'exit_code': e.returncode,
                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
             }
@@ -353,6 +381,28 @@ implementation:
             
             with open(args.trigger_status, 'w') as f:
                 json.dump({'status': 'failed'}, f, indent=2)
+            
+            print("✗ Pipeline trigger failed")
+            sys.exit(1)
+        except Exception as e:
+            print(f"✗ Unexpected error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            error_info = {
+                'status': 'error',
+                'error': str(e),
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            }
+            
+            with open(args.trigger_response, 'w') as f:
+                json.dump(error_info, f, indent=2)
+            
+            with open(args.run_id, 'w') as f:
+                f.write("error")
+            
+            with open(args.trigger_status, 'w') as f:
+                json.dump({'status': 'error'}, f, indent=2)
             
             sys.exit(1)
         
@@ -402,6 +452,10 @@ implementation:
       - {inputValue: cdn_url}
       - --get_cdn
       - {inputValue: get_cdn}
+      - --train_schema
+      - {inputValue: train_schema}
+      - --execution_id
+      - {inputValue: execution_id}
       
       # IAM authentication
       - --userName
@@ -424,12 +478,8 @@ implementation:
       - {inputValue: dqn_pipeline_id}
       - --rlaf_schema
       - {inputValue: rlaf_schema}
-      - --train_schema
-      - {inputValue: train_schema}
       - --model_id
       - {inputValue: model_id}
-      - --execution_id
-      - {inputValue: execution_id}
       
       # Outputs
       - --trigger_response
