@@ -1,4 +1,4 @@
-name: Preprocess v2 - TRAIN ONLY
+name: Preprocess v1 - TRAIN ONLY
 description: Preprocesses TRAINING data only, saves parameters for test preprocessing
 inputs:
   - name: raw_train_data
@@ -241,37 +241,44 @@ implementation:
         }
         
         # ============================================================================
-        # Save outputs
+        # Save outputs - FIXED: Create all directories first
         # ============================================================================
         print("\\nSaving outputs...")
-        os.makedirs(os.path.dirname(args.processed_train_data) or '.', exist_ok=True)
         
+        # Create all output directories
+        output_paths = [
+            args.processed_train_data,
+            args.preprocess_metadata,
+            args.preprocessor_params
+        ]
+        
+        for path in output_paths:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"  Created directory: {dir_path}")
+        
+        # Save processed train data
         with open(args.processed_train_data, 'wb') as f:
             pickle.dump(processed_train_wrapper, f, protocol=4)
         
+        # Save metadata as JSON
         with open(args.preprocess_metadata, 'w') as f:
             json.dump(preprocess_metadata, f, indent=2)
         
+        # Save preprocessor params as JSON
         with open(args.preprocessor_params, 'w') as f:
             json.dump(preprocessor_params, f, indent=2)
         
         # Verify save
-        if os.path.exists(args.processed_train_data):
-            file_size = os.path.getsize(args.processed_train_data)
-            print(f"✓ Processed train data saved: {args.processed_train_data}")
-            print(f"  Size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
-        else:
-            print(f"✗ Failed to save: {args.processed_train_data}")
-        
-        if os.path.exists(args.preprocess_metadata):
-            print(f"✓ Preprocess metadata saved: {args.preprocess_metadata}")
-        else:
-            print(f"✗ Failed to save: {args.preprocess_metadata}")
-        
-        if os.path.exists(args.preprocessor_params):
-            print(f"✓ Preprocessor params saved: {args.preprocessor_params}")
-        else:
-            print(f"✗ Failed to save: {args.preprocessor_params}")
+        print(f"\\n✓ Outputs saved:")
+        for path in output_paths:
+            if os.path.exists(path):
+                file_size = os.path.getsize(path)
+                print(f"  {os.path.basename(path)}: {file_size:,} bytes ({file_size/1024:.1f} KB)")
+            else:
+                print(f"  ✗ Failed to save: {path}")
         
         # ============================================================================
         # Verification
