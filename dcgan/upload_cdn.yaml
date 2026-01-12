@@ -1,4 +1,4 @@
-name: Upload Data To CDN v11
+name: Upload Data To CDN v12
 description: Uploads actual dataset outputs (images, not metadata) to CDN
 inputs:
   # From Load Dataset v9 - ACTUAL DATA
@@ -292,8 +292,8 @@ implementation:
       - --data_config_url
       - {outputPath: data_config_url}
       - --processed_train_data_url
-      - {outputPath: preprocess_train_data_url}
-      - --processed_metadata_url
+      - {outputPath: processed_train_data_url}
+      - --preprocessed_metadata_url
       - {outputPath: preprocess_metadata_url}
       - --upload_summary
       - {outputPath: upload_summary}
