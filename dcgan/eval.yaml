@@ -1,14 +1,24 @@
-name: Evaluate DCGAN v7 - FIXED WITH METRICS
-description: Evaluates DCGAN with comprehensive metrics (FID, SSIM, PSNR, Diversity)
+name: Evaluate DCGAN v8 - FIXED WITH COMPATIBILITY
+description: Evaluates DCGAN with comprehensive metrics and full compatibility
 inputs:
   - name: trained_model
     type: Model
   - name: raw_test_data
     type: Dataset
-  - name: preprocess_metadata
+  - name: preprocessor_params
     type: String
+    description: "Preprocessing parameters JSON from preprocess brick"
   - name: master_config
     type: String
+  - name: bearer_token
+    type: String
+    description: "Bearer token for CDN upload"
+  - name: domain
+    type: String
+    description: "CDN upload domain"
+  - name: get_cdn
+    type: String
+    description: "CDN download prefix"
 outputs:
   - name: evaluation_metrics
     type: String
@@ -19,7 +29,10 @@ outputs:
   - name: metrics_visualization
     type: String
   - name: rlaf_metrics
-    type: Metrics  # NEW: For RLAF brick
+    type: Metrics
+  - name: evaluation_results_url
+    type: String
+    description: "URL to evaluation results on CDN"
 
 implementation:
   container:
@@ -29,13 +42,14 @@ implementation:
       - -c
       - |
         echo "Installing required packages for metrics..."
+        apt-get update > /dev/null && apt-get install -y curl > /dev/null
         pip install scikit-image scipy pillow matplotlib > /dev/null 2>&1
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
-        import argparse, pickle, json, os, torch, time
+        import argparse, pickle, json, os, torch, time, sys, uuid, subprocess
         import torchvision.transforms as transforms
         import numpy as np
         from PIL import Image
@@ -43,21 +57,106 @@ implementation:
         import warnings
         warnings.filterwarnings('ignore')
         
+        # ============================================================================
+        # INCLUDE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
+        # ============================================================================
+        
+        # Classes from Load Data Brick
+        class RawDatasetWrapper:
+            def __init__(self, images, labels, dataset_name='mnist'):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = False
+                self._num_samples = len(images)
+            
+            def __len__(self):
+                return self._num_samples
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed
+                }
+        
+        # Classes from Preprocess Brick
+        class PreprocessedDataset:
+            def __init__(self, images, labels, dataset_name, preprocessor_params):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = True
+                self.preprocessor_params = preprocessor_params
+            
+            def __len__(self):
+                return len(self.images)
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': True
+                }
+        
+        # Dataset info wrapper
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+        
+        # ============================================================================
+        # MAIN CODE
+        # ============================================================================
+        
         parser = argparse.ArgumentParser()
         parser.add_argument('--trained_model', type=str, required=True)
         parser.add_argument('--raw_test_data', type=str, required=True)
-        parser.add_argument('--preprocess_metadata', type=str, required=True)
+        parser.add_argument('--preprocessor_params', type=str, required=True)
         parser.add_argument('--master_config', type=str, required=True)
+        parser.add_argument('--bearer_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--get_cdn', type=str, required=True)
         parser.add_argument('--evaluation_metrics', type=str, required=True)
         parser.add_argument('--generated_samples', type=str, required=True)
         parser.add_argument('--evaluation_summary', type=str, required=True)
         parser.add_argument('--metrics_visualization', type=str, required=True)
-        parser.add_argument('--rlaf_metrics', type=str, required=True)  # NEW: RLAF metrics output
+        parser.add_argument('--rlaf_metrics', type=str, required=True)
+        parser.add_argument('--evaluation_results_url', type=str, required=True)
         args = parser.parse_args()
         
         print("=" * 80)
-        print("EVALUATE DCGAN v7 - COMPREHENSIVE METRICS")
+        print("EVALUATE DCGAN v8 - FIXED WITH COMPATIBILITY")
         print("=" * 80)
+        
+        # ============================================================================
+        # CREATE ALL OUTPUT DIRECTORIES FIRST
+        # ============================================================================
+        print("\\nCreating output directories...")
+        output_paths = [
+            args.evaluation_metrics,
+            args.generated_samples,
+            args.evaluation_summary,
+            args.metrics_visualization,
+            args.rlaf_metrics,
+            args.evaluation_results_url
+        ]
+        
+        for path in output_paths:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"  Created: {dir_path}")
         
         # ============================================================================
         # METRICS CALCULATION FUNCTIONS
@@ -242,7 +341,6 @@ implementation:
         # ============================================================================
         
         def create_rlaf_metrics(metrics_dict, algorithm, model_info):
-           
             rlaf_metrics = {
                 'evaluation_timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'algorithm': algorithm,
@@ -254,19 +352,15 @@ implementation:
                     'ssim_mean': metrics_dict.get('ssim_mean', 0.0),
                     'psnr_mean': metrics_dict.get('psnr_mean', 0.0),
                     'diversity_score': metrics_dict.get('diversity_score', 0.0),
-                    'generator_quality_score': 0.0,  # Will calculate
-                    'discriminator_quality_score': 0.0  # Will calculate
+                    'generator_quality_score': 0.0,
+                    'discriminator_quality_score': 0.0
                 },
                 
-                # Secondary metrics (for reference)
+                # Secondary metrics
                 'secondary_metrics': {
                     'mae': metrics_dict.get('mae', 0.0),
                     'mse': metrics_dict.get('mse', 0.0),
-                    'histogram_correlation': metrics_dict.get('histogram_correlation', 0.0),
-                    'real_mean': metrics_dict.get('real_stats', {}).get('mean', 0.0),
-                    'fake_mean': metrics_dict.get('fake_stats', {}).get('mean', 0.0),
-                    'real_std': metrics_dict.get('real_stats', {}).get('std', 0.0),
-                    'fake_std': metrics_dict.get('fake_stats', {}).get('std', 0.0)
+                    'histogram_correlation': metrics_dict.get('histogram_correlation', 0.0)
                 },
                 
                 # Composite scores for RLAF
@@ -288,15 +382,13 @@ implementation:
             
             # Normalize and calculate scores
             if not np.isnan(fid) and fid > 0:
-                # For FID, lower is better, so invert and normalize
                 fid_score = max(0, 100 - min(fid, 100)) / 100
             else:
                 fid_score = 0.5
             
-            # SSIM and PSNR are already in good ranges
             ssim_score = min(ssim, 1.0)
-            psnr_score = min(psnr / 50.0, 1.0)  # Normalize PSNR (50 dB is excellent)
-            diversity_score = min(diversity / 10.0, 1.0)  # Normalize diversity
+            psnr_score = min(psnr / 50.0, 1.0)
+            diversity_score = min(diversity / 10.0, 1.0)
             
             # Calculate composite scores
             rlaf_metrics['composite_scores']['image_fidelity'] = (ssim_score + psnr_score) / 2
@@ -306,20 +398,17 @@ implementation:
             overall = (fid_score * 0.3 + ssim_score * 0.3 + psnr_score * 0.2 + diversity_score * 0.2)
             rlaf_metrics['composite_scores']['overall_quality'] = overall
             
-            # Update primary metrics with calculated scores
+            # Update primary metrics
             rlaf_metrics['primary_metrics']['generator_quality_score'] = overall
             rlaf_metrics['primary_metrics']['discriminator_quality_score'] = fid_score
             
-            # Create DQN parameters with appropriate signs
+            # Create DQN parameters
             dqn_params = [
                 {'key': 'fid_score', 'sign': '-', 'value': fid if not np.isnan(fid) else 0.0, 'weight': 0.3},
                 {'key': 'ssim_mean', 'sign': '+', 'value': ssim, 'weight': 0.3},
                 {'key': 'psnr_mean', 'sign': '+', 'value': psnr, 'weight': 0.2},
                 {'key': 'diversity_score', 'sign': '+', 'value': diversity, 'weight': 0.2},
-                {'key': 'overall_quality', 'sign': '+', 'value': overall, 'weight': 1.0},
-                {'key': 'generator_quality_score', 'sign': '+', 'value': overall, 'weight': 0.8},
-                {'key': 'image_fidelity', 'sign': '+', 'value': rlaf_metrics['composite_scores']['image_fidelity'], 'weight': 0.6},
-                {'key': 'diversity_quality', 'sign': '+', 'value': diversity_score, 'weight': 0.4}
+                {'key': 'overall_quality', 'sign': '+', 'value': overall, 'weight': 1.0}
             ]
             
             rlaf_metrics['dqn_parameters'] = dqn_params
@@ -327,10 +416,74 @@ implementation:
             return rlaf_metrics
         
         # ============================================================================
+        # CDN UPLOAD FUNCTION
+        # ============================================================================
+        
+        def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix):
+            if not os.path.exists(file_path):
+                print(f"    File not found: {file_path}")
+                return None
+            
+            file_size = os.path.getsize(file_path)
+            print(f"  Uploading {description} ({file_size:,} bytes)...")
+            
+            # Generate unique filename
+            unique_id = str(uuid.uuid4())[:8]
+            cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.png"
+            
+            upload_url = f"{domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
+            
+            curl_command = [
+                "curl",
+                "--location", upload_url,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--form", f"file=@{file_path}",
+                "--form", f"filename={cdn_filename}",
+                "--fail",
+                "--show-error",
+                "--connect-timeout", "30",
+                "--max-time", "120"
+            ]
+            
+            try:
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                response_json = json.loads(process.stdout)
+                relative_cdn_url = response_json.get("cdnUrl", "")
+                
+                if not relative_cdn_url:
+                    print(f"    Error: No cdnUrl in response")
+                    return None
+                
+                full_url = f"{get_cdn_prefix}{relative_cdn_url}"
+                print(f"    Uploaded: {full_url[:80]}...")
+                return full_url
+                
+            except subprocess.CalledProcessError as e:
+                print(f"    Upload error: {e.stderr[:200]}")
+                return None
+            except json.JSONDecodeError:
+                return None
+        
+        # ============================================================================
         # MAIN EVALUATION LOGIC
         # ============================================================================
         
         print("\\nLoading inputs...")
+        
+        # Check file existence
+        for path, name in [(args.trained_model, 'trained_model'), 
+                          (args.raw_test_data, 'raw_test_data'),
+                          (args.preprocessor_params, 'preprocessor_params'),
+                          (args.bearer_token, 'bearer_token')]:
+            if not os.path.exists(path):
+                print(f"ERROR: {name} file does not exist: {path}")
+                sys.exit(1)
         
         # Load trained model
         checkpoint = torch.load(args.trained_model, map_location='cpu')
@@ -343,12 +496,28 @@ implementation:
         # Load raw test data
         with open(args.raw_test_data, 'rb') as f:
             raw_test_dataset = pickle.load(f)
-        print(f"✓ Raw test data loaded: {len(raw_test_dataset)} samples")
         
-        # Load preprocess metadata
-        with open(args.preprocess_metadata, 'r') as f:
-            preprocess_meta = json.load(f)
-        print(f"✓ Preprocess metadata loaded")
+        # Handle different data wrapper types
+        if hasattr(raw_test_dataset, 'images'):
+            # RawDatasetWrapper from Load Data brick
+            raw_images = raw_test_dataset.images
+            raw_labels = raw_test_dataset.labels if hasattr(raw_test_dataset, 'labels') else None
+            print(f"✓ Raw test data loaded (RawDatasetWrapper): {len(raw_images)} samples")
+        elif hasattr(raw_test_dataset, '__len__'):
+            # Direct dataset
+            if isinstance(raw_test_dataset, (list, tuple)):
+                raw_images = raw_test_dataset
+            else:
+                raw_images = [raw_test_dataset[i] for i in range(len(raw_test_dataset))]
+            print(f"✓ Raw test data loaded: {len(raw_images)} samples")
+        else:
+            print(f"ERROR: Unsupported data format")
+            sys.exit(1)
+        
+        # Load preprocessor params
+        with open(args.preprocessor_params, 'r') as f:
+            preprocess_params = json.load(f)
+        print(f"✓ Preprocessor parameters loaded")
         
         # ============================================================================
         # APPLY PREPROCESSING TO TEST DATA
@@ -356,36 +525,26 @@ implementation:
         print("\\nApplying preprocessing to test data...")
         
         # Extract preprocessing parameters
-        preprocessing_params = preprocess_meta.get('preprocessing_parameters', {})
-        normalization = preprocessing_params.get('normalization', {})
-        
+        normalization = preprocess_params.get('normalization', {})
         scale = normalization.get('scale', 1.0)
         shift = normalization.get('shift', 0.0)
         
         print(f"  Preprocessing parameters: scale={scale:.6f}, shift={shift:.6f}")
         
-        # Determine dataset structure
-        if hasattr(raw_test_dataset, 'images'):
-            # RawDatasetWrapper format from Load Raw Dataset v1
-            raw_images = raw_test_dataset.images
-            raw_labels = raw_test_dataset.labels if hasattr(raw_test_dataset, 'labels') else None
-        elif hasattr(raw_test_dataset, '__len__'):
-            # Direct dataset format
-            raw_images = []
-            for i in range(len(raw_test_dataset)):
-                if isinstance(raw_test_dataset[i], tuple):
-                    img, label = raw_test_dataset[i]
-                else:
-                    img = raw_test_dataset[i]
-                    label = None
-                raw_images.append(img)
-            raw_images = torch.stack(raw_images)
+        # Convert raw images to tensor if needed
+        if isinstance(raw_images, list):
+            # Stack list of tensors
+            if isinstance(raw_images[0], torch.Tensor):
+                raw_tensor = torch.stack(raw_images)
+            else:
+                # Convert to tensors first
+                raw_tensor = torch.stack([torch.tensor(img) for img in raw_images])
         else:
-            raw_images = raw_test_dataset
+            raw_tensor = raw_images
         
         # Apply same preprocessing as training
         print(f"  Applying normalization: x * {scale:.6f} + {shift:.6f}")
-        processed_images = raw_images * scale + shift
+        processed_images = raw_tensor * scale + shift
         
         # ============================================================================
         # LOAD GENERATOR AND GENERATE SAMPLES
@@ -393,23 +552,58 @@ implementation:
         print("\\nLoading generator and generating samples...")
         
         try:
-            from nesy_factory.GANs.dcgan import (
-                DCGANConfig,
-                FullyConfigurableDCGANGenerator
-            )
+            # Check if generator exists in checkpoint
+            if 'generator_state_dict' not in checkpoint:
+                print("ERROR: No generator state dict in checkpoint")
+                sys.exit(1)
             
-            # Recreate config
-            config_dict = checkpoint['config']
-            dcgan_config = DCGANConfig.from_dict(config_dict)
+            # Import nesy_factory modules
+            try:
+                from nesy_factory.GANs.dcgan import DCGANConfig
+                from nesy_factory.GANs.dcgan import FullyConfigurableDCGANGenerator
+                
+                # Recreate config from checkpoint
+                config_dict = checkpoint.get('config', {})
+                if not config_dict:
+                    # Create minimal config
+                    config_dict = {
+                        'image_size': 32,
+                        'channels': 1,
+                        'latent_dim': 100
+                    }
+                
+                # Create config
+                dcgan_config = DCGANConfig.from_dict(config_dict)
+                
+                # Create generator
+                generator = FullyConfigurableDCGANGenerator(dcgan_config)
+                generator.load_state_dict(checkpoint['generator_state_dict'])
+                
+                print(f"✓ Generator loaded via nesy_factory")
+                
+            except ImportError:
+                print("⚠️ nesy_factory not available, using fallback generator loading")
+                # Create simple generator from state dict
+                generator = torch.nn.Sequential(
+                    torch.nn.Linear(100, 128 * 8 * 8),
+                    torch.nn.ReLU(),
+                    torch.nn.Unflatten(1, (128, 8, 8)),
+                    torch.nn.ConvTranspose2d(128, 64, 4, 2, 1),
+                    torch.nn.BatchNorm2d(64),
+                    torch.nn.ReLU(),
+                    torch.nn.ConvTranspose2d(64, 32, 4, 2, 1),
+                    torch.nn.BatchNorm2d(32),
+                    torch.nn.ReLU(),
+                    torch.nn.ConvTranspose2d(32, 1, 4, 2, 1),
+                    torch.nn.Tanh()
+                )
+                generator.load_state_dict(checkpoint['generator_state_dict'])
+                
+                # Set latent dim manually
+                generator.latent_dim = 100
+                print(f"✓ Generator loaded via fallback")
             
-            # Create generator
-            generator = FullyConfigurableDCGANGenerator(dcgan_config)
-            generator.load_state_dict(checkpoint['generator_state_dict'])
-            
-            print(f"✓ Generator loaded")
             print(f"  Latent dim: {generator.latent_dim}")
-            print(f"  Image size: {dcgan_config.image_size}")
-            print(f"  Channels: {dcgan_config.channels}")
             
         except Exception as e:
             print(f"ERROR loading generator: {e}")
@@ -423,7 +617,7 @@ implementation:
         generator.eval()
         
         # Determine number of samples
-        num_eval_samples = min(100, len(processed_images))
+        num_eval_samples = min(50, len(processed_images))
         print(f"  Using {num_eval_samples} samples for evaluation")
         
         # Prepare real samples
@@ -431,7 +625,20 @@ implementation:
         
         # Generate fake samples
         with torch.no_grad():
-            z = torch.randn(num_eval_samples, generator.latent_dim, device=device)
+            # Check generator input format
+            if hasattr(generator, 'latent_dim'):
+                latent_dim = generator.latent_dim
+            else:
+                latent_dim = 100
+            
+            # Create latent vectors
+            z = torch.randn(num_eval_samples, latent_dim, device=device)
+            
+            # Add spatial dimensions if needed
+            if len(z.shape) == 2:
+                # Add 1x1 spatial dimensions for DCGAN
+                z = z.unsqueeze(-1).unsqueeze(-1)
+            
             fake_tensor = generator(z).cpu()
         
         print(f"✓ Generated {num_eval_samples} fake samples")
@@ -455,11 +662,13 @@ implementation:
         print("\\nCreating RLAF-compatible metrics...")
         
         model_info = {
-            'latent_dim': generator.latent_dim,
-            'image_size': dcgan_config.image_size,
-            'channels': dcgan_config.channels,
+            'latent_dim': latent_dim,
+            'image_size': fake_tensor.shape[2] if len(fake_tensor.shape) > 2 else 32,
+            'channels': fake_tensor.shape[1] if len(fake_tensor.shape) > 1 else 1,
             'algorithm': algorithm,
-            'num_eval_samples': num_eval_samples
+            'num_eval_samples': num_eval_samples,
+            'preprocessing_applied': True,
+            'preprocessing_params': {'scale': scale, 'shift': shift}
         }
         
         rlaf_metrics = create_rlaf_metrics(metrics, algorithm, model_info)
@@ -477,29 +686,32 @@ implementation:
             fig, axes = plt.subplots(2, 3, figsize=(15, 10))
             
             # Plot 1: Real vs Fake sample comparison
-            ax = axes[0, 0]
-            if len(real_tensor.shape) == 4 and real_tensor.shape[1] == 1:
-                real_sample = real_tensor[0, 0].cpu().numpy()
-                fake_sample = fake_tensor[0, 0].numpy()
-            elif len(real_tensor.shape) == 4:
-                real_sample = real_tensor[0].permute(1, 2, 0).cpu().numpy()
-                fake_sample = fake_tensor[0].permute(1, 2, 0).numpy()
-            else:
-                real_sample = real_tensor[0].cpu().numpy()
-                fake_sample = fake_tensor[0].numpy()
-            
-            # Denormalize for display
-            real_sample = (real_sample + 1) / 2
-            fake_sample = (fake_sample + 1) / 2
-            
-            ax.imshow(real_sample, cmap='gray' if len(real_sample.shape) == 2 else None)
-            ax.set_title('Real Sample')
-            ax.axis('off')
-            
-            ax = axes[0, 1]
-            ax.imshow(fake_sample, cmap='gray' if len(fake_sample.shape) == 2 else None)
-            ax.set_title('Generated Sample')
-            ax.axis('off')
+            for i in range(2):
+                ax = axes[0, i]
+                if i == 0:
+                    sample_data = real_tensor[0].cpu()
+                    title = 'Real Sample'
+                else:
+                    sample_data = fake_tensor[0]
+                    title = 'Generated Sample'
+                
+                if len(sample_data.shape) == 3 and sample_data.shape[0] == 1:
+                    img_data = sample_data[0].numpy()
+                elif len(sample_data.shape) == 3:
+                    img_data = sample_data.permute(1, 2, 0).numpy()
+                else:
+                    img_data = sample_data.numpy()
+                
+                # Denormalize for display
+                img_data = (img_data + 1) / 2
+                
+                if len(img_data.shape) == 2 or (len(img_data.shape) == 3 and img_data.shape[2] == 1):
+                    ax.imshow(img_data, cmap='gray')
+                else:
+                    ax.imshow(img_data)
+                
+                ax.set_title(title)
+                ax.axis('off')
             
             # Plot 2: SSIM/PSNR
             ax = axes[0, 2]
@@ -554,17 +766,60 @@ implementation:
             plt.tight_layout()
             
             # Save visualization
-            viz_path = args.metrics_visualization
-            os.makedirs(os.path.dirname(viz_path) or '.', exist_ok=True)
-            plt.savefig(viz_path, dpi=150, bbox_inches='tight')
+            plt.savefig(args.metrics_visualization, dpi=150, bbox_inches='tight')
             plt.close()
             
-            print(f"✓ Visualization saved: {viz_path}")
+            print(f"✓ Visualization saved: {args.metrics_visualization}")
             
         except Exception as e:
             print(f"  Warning: Visualization failed: {e}")
             import traceback
             traceback.print_exc()
+        
+        # ============================================================================
+        # UPLOAD RESULTS TO CDN
+        # ============================================================================
+        print("\\nUploading evaluation results to CDN...")
+        
+        # Read bearer token
+        with open(args.bearer_token, 'r') as f:
+            bearer_token_content = f.read().strip()
+        
+        # Upload metrics visualization
+        viz_url = upload_to_cdn(
+            args.metrics_visualization, 
+            "evaluation_metrics_visualization",
+            bearer_token_content,
+            args.domain,
+            args.get_cdn
+        )
+        
+        # Create evaluation results package
+        results_package = {
+            'metrics': metrics,
+            'rlaf_metrics': rlaf_metrics,
+            'visualization_url': viz_url if viz_url else '',
+            'model_info': model_info,
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+        }
+        
+        # Save results package locally
+        results_package_path = "/tmp/evaluation_results_package.json"
+        with open(results_package_path, 'w') as f:
+            json.dump(results_package, f, indent=2)
+        
+        # Upload results package
+        results_package_url = upload_to_cdn(
+            results_package_path,
+            "evaluation_results_package",
+            bearer_token_content,
+            args.domain,
+            args.get_cdn
+        )
+        
+        # Save results URL
+        with open(args.evaluation_results_url, 'w') as f:
+            f.write(results_package_url if results_package_url else "")
         
         # ============================================================================
         # SAVE OUTPUTS
@@ -581,19 +836,16 @@ implementation:
             json.dump(rlaf_metrics, f, indent=2)
         print(f"✓ RLAF metrics saved: {args.rlaf_metrics}")
         
-        # Save generated samples
-        generated_data = {
-            'samples': fake_tensor.numpy().tolist(),
-            'real_samples': real_tensor.cpu().numpy().tolist(),
-            'latent_vectors': z.cpu().numpy().tolist(),
-            'num_samples': num_eval_samples,
-            'algorithm': algorithm,
-            'image_size': dcgan_config.image_size,
-            'channels': dcgan_config.channels
-        }
+        # Save generated samples in PreprocessedDataset format for compatibility
+        generated_dataset = PreprocessedDataset(
+            fake_tensor,
+            torch.zeros(len(fake_tensor)),  # Dummy labels
+            f"dcgan_{algorithm}_generated",
+            preprocess_params
+        )
         
         with open(args.generated_samples, 'wb') as f:
-            pickle.dump(generated_data, f)
+            pickle.dump(generated_dataset, f)
         print(f"✓ Generated samples saved: {args.generated_samples}")
         
         # Create evaluation summary
@@ -603,10 +855,7 @@ implementation:
             'test_samples_processed': len(processed_images),
             'evaluation_samples_used': num_eval_samples,
             'preprocessing_applied': True,
-            'preprocessing_params': {
-                'scale': scale,
-                'shift': shift
-            },
+            'preprocessing_params': {'scale': scale, 'shift': shift},
             'key_metrics': {
                 'fid_score': metrics.get('fid_score'),
                 'ssim_mean': metrics.get('ssim_mean'),
@@ -620,6 +869,8 @@ implementation:
                 'image_fidelity': rlaf_metrics['composite_scores']['image_fidelity'],
                 'diversity_quality': rlaf_metrics['composite_scores']['diversity_quality']
             },
+            'visualization_url': viz_url if viz_url else '',
+            'results_package_url': results_package_url if results_package_url else '',
             'calculation_time': metrics.get('calculation_time'),
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
             'model_info': model_info
@@ -633,7 +884,7 @@ implementation:
         # PRINT RESULTS
         # ============================================================================
         print("\\n" + "=" * 80)
-        print("EVALUATION RESULTS")
+        print("EVALUATION RESULTS SUMMARY")
         print("=" * 80)
         print(f"Algorithm: {algorithm.upper()}")
         print(f"Samples evaluated: {num_eval_samples}")
@@ -643,18 +894,13 @@ implementation:
         print(f"  SSIM: {metrics.get('ssim_mean', 0):.3f} ± {metrics.get('ssim_std', 0):.3f}")
         print(f"  PSNR: {metrics.get('psnr_mean', 0):.1f} dB ± {metrics.get('psnr_std', 0):.1f}")
         print(f"  Diversity: {metrics.get('diversity_score', 0):.3f}")
-        print(f"  MAE: {metrics.get('mae', 0):.4f}")
-        print(f"  MSE: {metrics.get('mse', 0):.4f}")
-        print(f"  Histogram Correlation: {metrics.get('histogram_correlation', 0):.3f}")
         print("\\n RLAF SCORES:")
         print(f"  Overall Quality: {rlaf_metrics['composite_scores']['overall_quality']:.3f}")
         print(f"  Image Fidelity: {rlaf_metrics['composite_scores']['image_fidelity']:.3f}")
         print(f"  Diversity Quality: {rlaf_metrics['composite_scores']['diversity_quality']:.3f}")
-        print("\\n STATISTICS:")
-        print(f"  Real - Mean: {metrics['real_stats']['mean']:.3f}, "
-              f"Std: {metrics['real_stats']['std']:.3f}")
-        print(f"  Fake - Mean: {metrics['fake_stats']['mean']:.3f}, "
-              f"Std: {metrics['fake_stats']['std']:.3f}")
+        print("\\n CDN UPLOADS:")
+        print(f"  Visualization: {'✅ Uploaded' if viz_url else '❌ Failed'}")
+        print(f"  Results Package: {'✅ Uploaded' if results_package_url else '❌ Failed'}")
         print("=" * 80)
         
     args:
@@ -662,10 +908,16 @@ implementation:
       - {inputPath: trained_model}
       - --raw_test_data
       - {inputPath: raw_test_data}
-      - --preprocess_metadata
-      - {inputPath: preprocess_metadata}
+      - --preprocessor_params
+      - {inputPath: preprocessor_params}
       - --master_config
       - {inputValue: master_config}
+      - --bearer_token
+      - {inputValue: bearer_token}
+      - --domain
+      - {inputValue: domain}
+      - --get_cdn
+      - {inputValue: get_cdn}
       - --evaluation_metrics
       - {outputPath: evaluation_metrics}
       - --generated_samples
@@ -676,3 +928,5 @@ implementation:
       - {outputPath: metrics_visualization}
       - --rlaf_metrics
       - {outputPath: rlaf_metrics}
+      - --evaluation_results_url
+      - {outputPath: evaluation_results_url}
