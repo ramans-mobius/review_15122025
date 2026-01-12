@@ -1,5 +1,5 @@
-name: Evaluate v4
-description: Evaluates DCGAN model using single master config with DCGANEvaluator
+name: Evaluate DCGAN v5
+description: Evaluates DCGAN model with comprehensive metrics
 inputs:
   - name: trained_model
     type: Model
@@ -17,68 +17,61 @@ outputs:
 
 implementation:
   container:
-    image: deepak0147/nessy-facotry:0.0.8
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -c
       - |
-        echo "Checking for torchvision..."
-        python3 -c "import torchvision; print(f'torchvision version: {torchvision.__version__}')" 2>/dev/null || {
-          echo "torchvision not found, installing 0.17.0..."
-          pip install torchvision==0.17.0 pillow
-        }
+        echo "Installing required packages..."
+        pip install scikit-image > /dev/null
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
         import torch
-        import argparse, pickle, json, os, io, traceback
+        import argparse, pickle, json, os, sys, traceback
         import numpy as np
-        import torchvision.transforms as transforms
-        from PIL import Image
         from torch.utils.data import DataLoader
+        import warnings
         
-        # ============================================================================
-        # Define classes needed for unpickling
-        # ============================================================================
+        warnings.filterwarnings('ignore')
+        
+        # Import DCGAN modules
+        print("Importing DCGAN modules...")
+        try:
+            from nesy_factory.GANs.dcgan import (
+                DCGANConfig, 
+                FullyConfigurableDCGANGenerator,
+                FullyConfigurableDCGANDiscriminator,
+                DCGANDataset
+            )
+            print(" Successfully imported DCGAN modules")
+        except ImportError as e:
+            print(f" ERROR importing DCGAN: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        # Define dataset classes for unpickling
         class GANDataset:
-            def __init__(self, data_list, transform=None, image_size=64, channels=3):
+            def __init__(self, data_list, transform=None):
                 self.data_list = data_list
                 self.transform = transform
-                self.image_size = image_size
-                self.channels = channels
             
             def __len__(self):
                 return len(self.data_list)
             
             def __getitem__(self, idx):
-                item = self.data_list[idx]
-                try:
-                    # Create a dummy image since we don't have real images
-                    if self.channels == 1:
-                        img = Image.new('L', (self.image_size, self.image_size), color=128)
-                    else:
-                        img = Image.new('RGB', (self.image_size, self.image_size), color=(128, 128, 128))
-                    
-                    if self.transform:
-                        img = self.transform(img)
-                    
-                    # Return (image, dummy_label) - GANs need this format
-                    return img, torch.tensor(0.0, dtype=torch.float32)
-                except Exception as e:
-                    print(f"Error creating dummy image {idx}: {e}")
-                    return torch.zeros(self.channels, self.image_size, self.image_size), torch.tensor(0.0, dtype=torch.float32)
+                img_tensor = self.data_list[idx]
+                if self.transform:
+                    img_tensor = self.transform(img_tensor)
+                return img_tensor
         
         class GANDataWrapper:
-            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
-                        transform_params=None):
+            def __init__(self, dataset, model_type='dcgan', **kwargs):
                 self.dataset = dataset
                 self.model_type = model_type
-                self.image_size = image_size
-                self.channels = channels
-                self.transform_params = transform_params or {}
-                self.num_samples = len(dataset)
+                self.__dict__.update(kwargs)
             
             def __len__(self):
                 return len(self.dataset)
@@ -86,30 +79,79 @@ implementation:
             def __getitem__(self, idx):
                 return self.dataset[idx]
         
-        # Define PreprocessMetadata class
-        class PreprocessMetadata:
-            def __init__(self, image_size=64, channels=3, model_type='dcgan',
-                        mean=(0.5,), std=(0.5,), transform_params=None):
-                self.image_size = image_size
-                self.channels = channels
-                self.model_type = model_type
-                self.mean = mean
-                self.std = std
-                self.transform_params = transform_params or {}
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if name in ['GANDataWrapper', 'GANDataset']:
+                    return globals()[name]
+                return super().find_class(module, name)
         
-        # ============================================================================
-        # Import DCGAN modules
-        # ============================================================================
-        try:
-            from nesy_factory.GANs.dcgan import (
-                create_dcgan,
-                DcganMetrics,
-                DCGANEvaluator
-            )
-            print(" Successfully imported DCGAN modules")
-        except ImportError as e:
-            print(f" ERROR: nesyfactory not available: {e}")
-            sys.exit(1)
+        class DCGANEvaluator:
+           
+            
+            def __init__(self, device='cpu'):
+                self.device = device
+            
+            def calculate_metrics(self, generator, discriminator, real_images, num_fake_samples=50):
+              
+                metrics = {}
+                
+                generator.eval()
+                discriminator.eval()
+                
+                with torch.no_grad():
+                    # Generate fake images
+                    z = torch.randn(num_fake_samples, generator.latent_dim, device=self.device)
+                    fake_images = generator(z)
+                    
+                    # Get discriminator scores
+                    real_scores = discriminator(real_images)
+                    fake_scores = discriminator(fake_images)
+                    
+                    # Basic discriminator metrics
+                    metrics['real_score_mean'] = real_scores.mean().item()
+                    metrics['fake_score_mean'] = fake_scores.mean().item()
+                    metrics['score_difference'] = abs(metrics['real_score_mean'] - metrics['fake_score_mean'])
+                    
+                    # Calculate discriminator accuracy (if using sigmoid)
+                    real_pred = (real_scores > 0.5).float().mean().item()
+                    fake_pred = (fake_scores < 0.5).float().mean().item()
+                    metrics['discriminator_accuracy'] = (real_pred + fake_pred) / 2
+                    
+                    # Calculate basic statistics
+                    metrics['real_images_mean'] = real_images.mean().item()
+                    metrics['real_images_std'] = real_images.std().item()
+                    metrics['fake_images_mean'] = fake_images.mean().item()
+                    metrics['fake_images_std'] = fake_images.std().item()
+                    
+                    # Calculate FID-like metric (simplified)
+                    real_flattened = real_images.view(real_images.size(0), -1).cpu().numpy()
+                    fake_flattened = fake_images.view(fake_images.size(0), -1).cpu().numpy()
+                    
+                    if len(real_flattened) > 1 and len(fake_flattened) > 1:
+                        mu_real = np.mean(real_flattened, axis=0)
+                        sigma_real = np.cov(real_flattened, rowvar=False)
+                        mu_fake = np.mean(fake_flattened, axis=0)
+                        sigma_fake = np.cov(fake_flattened, rowvar=False)
+                        
+                        # Simple distance metric (not actual FID)
+                        mean_diff = np.linalg.norm(mu_real - mu_fake)
+                        cov_diff = np.linalg.norm(sigma_real - sigma_fake)
+                        metrics['feature_distance'] = float(mean_diff + cov_diff)
+                    else:
+                        metrics['feature_distance'] = 0.0
+                    
+                    # Calculate diversity
+                    if len(fake_flattened) > 1:
+                        distances = []
+                        for i in range(len(fake_flattened)):
+                            for j in range(i+1, len(fake_flattened)):
+                                dist = np.linalg.norm(fake_flattened[i] - fake_flattened[j])
+                                distances.append(dist)
+                        metrics['diversity'] = float(np.mean(distances)) if distances else 0.0
+                    else:
+                        metrics['diversity'] = 0.0
+                
+                return metrics, fake_images
         
         parser = argparse.ArgumentParser()
         parser.add_argument("--trained_model", required=True)
@@ -120,241 +162,167 @@ implementation:
         parser.add_argument("--metrics_json", required=True)
         args = parser.parse_args()
         
-        print("=== STARTING DCGAN EVALUATION ===")
+        print("\\n" + "="*80)
+        print("DCGAN EVALUATION")
+        print("="*80)
         
-        # Define custom unpickler
-        class SafeUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                # Allow our custom classes
-                if name == 'GANDataWrapper':
-                    return GANDataWrapper
-                elif name == 'GANDataset':
-                    return GANDataset
-                elif name == 'PreprocessMetadata':
-                    return PreprocessMetadata
-                return super().find_class(module, name)
+        # ============================================================================
+        # LOAD DATA
+        # ============================================================================
         
-        # Load raw test data
-        with open(args.test_data, "rb") as f:
-            unpickler = SafeUnpickler(f)
-            test_data_raw = unpickler.load()
-        
-        print(f"Loaded test data: {len(test_data_raw) if hasattr(test_data_raw, '__len__') else 'unknown'} samples")
-        
-        # Load preprocessing metadata
-        with open(args.preprocess_metadata, "rb") as f:
-            unpickler = SafeUnpickler(f)
-            preprocess_meta = unpickler.load()
-        
-        print(f"Preprocessing metadata loaded:")
-        print(f"  Image size: {preprocess_meta.image_size}")
-        print(f"  Channels: {preprocess_meta.channels}")
-        
-        # Create the same transform used for training
-        if preprocess_meta.channels == 1:
-            transform = transforms.Compose([
-                transforms.Resize(preprocess_meta.image_size),
-                transforms.CenterCrop(preprocess_meta.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
-            ])
-        else:
-            transform = transforms.Compose([
-                transforms.Resize(preprocess_meta.image_size),
-                transforms.CenterCrop(preprocess_meta.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(preprocess_meta.mean, preprocess_meta.std)
-            ])
-        
-        # Create preprocessed test dataset
-        test_dataset = GANDataset(
-            test_data_raw,
-            transform=transform,
-            image_size=preprocess_meta.image_size,
-            channels=preprocess_meta.channels
-        )
-        
-        print(f"Preprocessed test dataset: {len(test_dataset)} samples")
+        try:
+            # Load test data
+            with open(args.test_data, "rb") as f:
+                test_data_raw = SafeUnpickler(f).load()
+            
+            # Load preprocessing metadata
+            with open(args.preprocess_metadata, "rb") as f:
+                preprocess_meta = SafeUnpickler(f).load()
+            
+            if hasattr(test_data_raw, 'dataset'):
+                test_dataset = test_data_raw.dataset
+            else:
+                test_dataset = test_data_raw
+            
+            print(f"Loaded test data: {len(test_dataset)} samples")
+            
+        except Exception as e:
+            print(f"ERROR loading data: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
         # ============================================================================
         # LOAD MODEL
         # ============================================================================
-        print("\\nLoading trained model...")
-        checkpoint = torch.load(args.trained_model, map_location='cpu')
-        
-        if isinstance(checkpoint, dict):
-            # Use the EXACT config from training
-            model_config = checkpoint.get('config', {})
-            training_mode = checkpoint.get('training_mode', 'unknown')
-            
-            print(f"Model config from checkpoint:")
-            print(f"  Training mode: {training_mode}")
-            
-            # Create DCGAN models WITH THE EXACT SAME CONFIG AS TRAINING
-            generator, discriminator, full_config = create_dcgan(model_config)
-            
-            # Load state dicts
-            if 'generator_state_dict' in checkpoint:
-                generator.load_state_dict(checkpoint['generator_state_dict'], strict=True)
-                print(f"✓ Generator state dict loaded")
-            if 'discriminator_state_dict' in checkpoint:
-                discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=True)
-                print(f"✓ Discriminator state dict loaded")
-                
-            print(f"✓ Model loaded successfully")
-            print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
-            print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
-        else:
-            print("✗ Invalid checkpoint format")
-            sys.exit(1)
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Device: {device}")
         
-        # Set device
-        generator.to(device)
-        discriminator.to(device)
-        
-        # Set to eval mode
-        generator.eval()
-        discriminator.eval()
-        
-        # Create data loader for DCGANEvaluator
-        batch_size = 4  # Small batch size
-        actual_batch_size = min(batch_size, max(1, len(test_dataset)))
-        test_loader = DataLoader(test_dataset, batch_size=actual_batch_size, shuffle=False)
+        try:
+            # Load trained model checkpoint
+            checkpoint = torch.load(args.trained_model, map_location='cpu')
+            
+            # Extract config
+            if 'config' in checkpoint:
+                config_dict = checkpoint['config']
+                dcgan_config = DCGANConfig.from_dict(config_dict)
+            else:
+                print("ERROR: No config in checkpoint")
+                sys.exit(1)
+            
+            # Create models
+            generator = FullyConfigurableDCGANGenerator(dcgan_config)
+            discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config)
+            
+            # Load weights
+            generator.load_state_dict(checkpoint['generator_state_dict'])
+            discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+            
+            # Move to device
+            generator.to(device)
+            discriminator.to(device)
+            
+            print(f"\\nModels loaded successfully:")
+            print(f"  Algorithm: {checkpoint.get('algorithm', 'unknown')}")
+            print(f"  Epochs trained: {checkpoint.get('epochs_trained', 'unknown')}")
+            print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
+            print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
+            
+        except Exception as e:
+            print(f"ERROR loading model: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
         # ============================================================================
-        # EVALUATE USING DCGANEvaluator
+        # EVALUATION
         # ============================================================================
-        print(f"\\nEvaluating DCGAN on {len(test_dataset)} test samples...")
+        
+        print(f"\\nStarting evaluation...")
         
         try:
-            # Create DCGANEvaluator
-            evaluator = DCGANEvaluator(full_config, device)
+            # Convert test data to tensor
+            test_images = []
+            for i in range(min(100, len(test_dataset))):  # Use up to 100 samples
+                img = test_dataset[i]
+                if isinstance(img, torch.Tensor):
+                    test_images.append(img)
+                elif isinstance(img, (list, tuple)):
+                    test_images.append(img[0])
             
-            # Use evaluate method which handles the (image, label) unpacking
-            dcgan_metrics = evaluator.evaluate(
-                generator, discriminator, test_loader,
-                num_batches=min(5, len(test_dataset) // max(1, actual_batch_size))
+            if not test_images:
+                print("ERROR: No valid test images found")
+                sys.exit(1)
+            
+            # Stack images
+            real_images = torch.stack(test_images).to(device)
+            print(f"Evaluation samples: {len(real_images)}")
+            
+            # Create evaluator
+            evaluator = DCGANEvaluator(device=device)
+            
+            # Calculate metrics
+            metrics, generated_images = evaluator.calculate_metrics(
+                generator, discriminator, real_images, num_fake_samples=50
             )
             
-            print("✓ DCGANEvaluator metrics calculated successfully")
-            for key, value in dcgan_metrics.items():
-                if isinstance(value, (int, float)) and not np.isnan(value):
+            # Add metadata
+            metrics['evaluation_samples'] = len(real_images)
+            metrics['algorithm'] = checkpoint.get('algorithm', 'unknown')
+            metrics['epochs_trained'] = checkpoint.get('epochs_trained', 0)
+            metrics['model_type'] = 'dcgan'
+            metrics['evaluation_success'] = True
+            
+            print(f"\\n EVALUATION METRICS:")
+            for key, value in metrics.items():
+                if isinstance(value, (int, float)):
                     print(f"  {key}: {value:.4f}")
-                    
+            
         except Exception as e:
-            print(f"✗ DCGANEvaluator failed: {e}")
+            print(f"ERROR during evaluation: {e}")
             traceback.print_exc()
-            print("  Falling back to basic metrics calculation...")
-            dcgan_metrics = {}
-        
-        # ============================================================================
-        # Basic metrics fallback
-        # ============================================================================
-        if not dcgan_metrics:
-            print("\\nCalculating basic metrics...")
             
-            all_preds, all_targets = [], []
-            total_g_loss = 0.0
-            total_d_loss = 0.0
-            total_batches = 0
-            
-            with torch.no_grad():
-                for batch_idx, (batch_images, batch_labels) in enumerate(test_loader):
-                    if batch_idx >= 5:
-                        break
-                        
-                    real_images = batch_images.to(device)
-                    batch_size = real_images.size(0)
-                    
-                    # Generate fake images
-                    z = torch.randn(batch_size, generator.z_dim, device=device)
-                    fake_images = generator(z)
-                    
-                    # Discriminator outputs
-                    real_output = discriminator(real_images)
-                    fake_output = discriminator(fake_images)
-                    
-                    # Generator loss
-                    g_loss = generator.calculate_loss(fake_output)
-                    
-                    # Discriminator loss
-                    d_loss = discriminator.calculate_loss(real_output, fake_output)
-                    
-                    total_g_loss += g_loss.item()
-                    total_d_loss += d_loss.item()
-                    total_batches += 1
-                    
-                    # Collect discriminator scores
-                    real_preds = (real_output > 0).float()
-                    fake_preds = (fake_output < 0).float()
-                    
-                    all_preds.extend(real_preds.cpu().numpy().tolist())
-                    all_preds.extend(fake_preds.cpu().numpy().tolist())
-                    
-                    all_targets.extend([1] * len(real_preds))
-                    all_targets.extend([0] * len(fake_preds))
-            
-            # Calculate accuracy
-            try:
-                correct = sum(1 for p, t in zip(all_preds, all_targets) if abs(p - t) < 0.5)
-                total = len(all_targets)
-                accuracy = float(correct / total) if total > 0 else 0.0
-            except Exception as e:
-                print(f"Warning: accuracy calculation failed: {e}")
-                accuracy = 0.0
-            
-            # Calculate average losses
-            avg_g_loss = float(total_g_loss / max(1, total_batches))
-            avg_d_loss = float(total_d_loss / max(1, total_batches))
-            
-            # Create basic metrics
-            dcgan_metrics = {
-                'accuracy': accuracy,
-                'generator_loss': avg_g_loss,
-                'discriminator_loss': avg_d_loss,
-                'num_samples': len(all_targets)
+            metrics = {
+                'evaluation_success': False,
+                'error': str(e),
+                'algorithm': checkpoint.get('algorithm', 'unknown'),
+                'model_type': 'dcgan'
             }
         
         # ============================================================================
-        # Combine all metrics
+        # SAVE OUTPUTS
         # ============================================================================
-        print("\\nCombining all metrics...")
         
-        metrics_output = {
-            "training_mode": training_mode,
-            "num_test_samples": len(test_dataset),
-            "evaluation_success": True
-        }
+        try:
+            os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
+            os.makedirs(os.path.dirname(args.metrics_json), exist_ok=True)
+            
+            # Save JSON metrics
+            with open(args.metrics_json, "w") as f:
+                json.dump(metrics, f, indent=2)
+            
+            # Save KFP metrics format
+            with open(args.metrics, "w") as f:
+                if metrics.get('evaluation_success', False):
+                    f.write(f"algorithm: {metrics.get('algorithm', 'unknown')}\\n")
+                    f.write(f"epochs_trained: {metrics.get('epochs_trained', 0)}\\n")
+                    f.write(f"real_score_mean: {metrics.get('real_score_mean', 0):.4f}\\n")
+                    f.write(f"fake_score_mean: {metrics.get('fake_score_mean', 0):.4f}\\n")
+                    f.write(f"discriminator_accuracy: {metrics.get('discriminator_accuracy', 0):.4f}\\n")
+                    f.write(f"diversity: {metrics.get('diversity', 0):.4f}\\n")
+                    f.write(f"feature_distance: {metrics.get('feature_distance', 0):.4f}\\n")
+                else:
+                    f.write(f"evaluation_error: {metrics.get('error', 'unknown')}\\n")
+            
+            print(f"\\n Evaluation completed successfully!")
+            print(f"  Metrics saved to: {args.metrics_json}")
+            
+        except Exception as e:
+            print(f"ERROR saving outputs: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
-        # Add all metrics from dcgan_metrics
-        for key, value in dcgan_metrics.items():
-            if isinstance(value, (int, float)) and not np.isnan(value):
-                metrics_output[key] = float(value)
-        
-        print(f"\\nFinal Metrics Summary:")
-        for key in ['accuracy', 'generator_loss', 'discriminator_loss', 'psnr', 'ssim', 'd_accuracy']:
-            if key in metrics_output:
-                print(f"  {key}: {metrics_output[key]:.4f}")
-        
-        # Save outputs
-        os.makedirs(os.path.dirname(args.metrics), exist_ok=True)
-        os.makedirs(os.path.dirname(args.metrics_json), exist_ok=True)
-        
-        with open(args.metrics_json, "w") as f:
-            json.dump(metrics_output, f, indent=2)
-        
-        # KFP metrics format
-        with open(args.metrics, "w") as f:
-            f.write(f"training_mode: {training_mode}\\n")
-            for key in ['accuracy', 'generator_loss', 'discriminator_loss']:
-                if key in metrics_output:
-                    f.write(f"{key}: {metrics_output[key]}\\n")
-        
-        print("\\n=== EVALUATION COMPLETE ===")
-        
+        print("\\n" + "="*80)
+
     args:
       - --trained_model
       - {inputPath: trained_model}
