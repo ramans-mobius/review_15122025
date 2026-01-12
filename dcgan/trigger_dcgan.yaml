@@ -1,4 +1,4 @@
-name: Trigger Pipeline v13
+name: Trigger Pipeline v14
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -18,6 +18,8 @@ inputs:
   - name: preprocess_metadata_url
     type: String
   - name: upload_summary_url
+    type: String
+  - name: preprocessor_params_url
     type: String
   
   # Authentication
@@ -109,6 +111,7 @@ implementation:
         parser.add_argument('--data_config_url', type=str, required=True)
         parser.add_argument('--preprocess_metadata_url', type=str, required=True)
         parser.add_argument('--upload_summary_url', type=str, required=True)
+        parser.add_argument('--preprocessor_params_url', type=str, required=True)
         
         # Authentication
         parser.add_argument('--access_token', type=str, required=True)
@@ -208,7 +211,8 @@ implementation:
             'dataset_info_url': args.dataset_info_url,
             'data_config_url': args.data_config_url,
             'preprocess_metadata_url': args.preprocess_metadata_url,
-            'upload_summary_url': args.upload_summary_url
+            'upload_summary_url': args.upload_summary_url,
+            'preprocessor_params_url':args.preprocessor_params_url
         }
         
         fixed_urls = {}
@@ -239,6 +243,7 @@ implementation:
                 "data_config_url": fixed_urls['data_config_url'],
                 "preprocess_metadata_url": fixed_urls['preprocess_metadata_url'],
                 "upload_summary_url": fixed_urls['upload_summary_url'],
+                "preprocessor_params_url": fixed_urls['preprocessor_params_url']
                 
                 # Model loading parameters
                 "load_from_cdn": args.load_from_cdn,
@@ -367,6 +372,8 @@ implementation:
       - {inputValue: preprocess_metadata_url}
       - --upload_summary_url
       - {inputValue: upload_summary_url}
+      - --preprocessor_params_url
+      - {inputValue: preprocessor_params_url}
       
       # Authentication
       - --access_token
