@@ -1,18 +1,36 @@
-name: Preprocess v4
-description: Simple preprocessing for already-loaded images
+name: Preprocess v1 
+description: Applies actual preprocessing for GAN training
 inputs:
-  - name: train_data
+  - name: raw_train_data
     type: Dataset
-    description: "Actual image tensors from Load Dataset"
+    description: "Raw training images"
+  - name: raw_test_data
+    type: Dataset
+    description: "Raw test images"
   - name: dataset_info
     type: DatasetInfo
+    description: "Dataset information"
   - name: master_config
     type: String
+    description: "Master configuration"
+  - name: normalization_range
+    type: String
+    default: "-1,1"
+    description: "Normalization range (e.g., '-1,1' or '0,1')"
+  - name: apply_augmentation
+    type: String
+    default: "false"
+    description: "Apply data augmentation"
 outputs:
-  - name: processed_data
+  - name: processed_train_data
     type: Dataset
+    description: "Preprocessed training dataset"
+  - name: processed_test_data
+    type: Dataset
+    description: "Preprocessed test dataset"
   - name: preprocess_metadata
     type: String
+    description: "Preprocessing metadata"
 
 implementation:
   container:
@@ -31,78 +49,408 @@ implementation:
         import json
         import pickle
         import torch
+        import numpy as np
         import time
+        import sys
         
         parser = argparse.ArgumentParser()
-        parser.add_argument('--train_data', type=str, required=True)
+        parser.add_argument('--raw_train_data', type=str, required=True)
+        parser.add_argument('--raw_test_data', type=str, required=True)
         parser.add_argument('--dataset_info', type=str, required=True)
         parser.add_argument('--master_config', type=str, required=True)
-        parser.add_argument('--processed_data', type=str, required=True)
+        parser.add_argument('--normalization_range', type=str, default="-1,1")
+        parser.add_argument('--apply_augmentation', type=str, default="false")
+        parser.add_argument('--processed_train_data', type=str, required=True)
+        parser.add_argument('--processed_test_data', type=str, required=True)
         parser.add_argument('--preprocess_metadata', type=str, required=True)
         args = parser.parse_args()
         
         print("=" * 80)
-        print("PREPROCESS v4 - SIMPLE PREPROCESSING")
+        print("PREPROCESS v1 - ACTUAL PREPROCESSING")
         print("=" * 80)
         
+        # ============================================================================
         # Load inputs
+        # ============================================================================
         print("\\nLoading inputs...")
         
-        with open(args.train_data, 'rb') as f:
-            train_wrapper = pickle.load(f)
+        try:
+            with open(args.raw_train_data, 'rb') as f:
+                raw_train = pickle.load(f)
+            
+            with open(args.raw_test_data, 'rb') as f:
+                raw_test = pickle.load(f)
+            
+            with open(args.dataset_info, 'rb') as f:
+                dataset_info_obj = pickle.load(f)
+            
+            print(f"✓ Loaded {len(raw_train)} raw train samples")
+            print(f"✓ Loaded {len(raw_test)} raw test samples")
+            print(f"✓ Data state: {'RAW' if not raw_train.preprocessed else 'Processed'}")
+            
+        except Exception as e:
+            print(f"✗ Error loading inputs: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
         
-        with open(args.dataset_info, 'rb') as f:
-            dataset_info = pickle.load(f)
+        # ============================================================================
+        # Extract raw data
+        # ============================================================================
+        print("\\nExtracting raw data...")
         
-        print(f"✓ Loaded {len(train_wrapper)} training samples")
+        # Extract images and labels from wrappers
+        def extract_from_wrapper(wrapper):
+            if hasattr(wrapper, 'images') and hasattr(wrapper, 'labels'):
+                return wrapper.images, wrapper.labels
+            else:
+                # Extract iteratively
+                images = []
+                labels = []
+                for i in range(len(wrapper)):
+                    images.append(wrapper[i])
+                    if hasattr(wrapper, 'get_sample'):
+                        sample = wrapper.get_sample(i)
+                        labels.append(sample.get('label', 0))
+                    else:
+                        labels.append(0)
+                return torch.stack(images) if images else torch.Tensor(), torch.tensor(labels)
         
-        # Verify data
-        sample = train_wrapper[0]
-        print(f"✓ Sample shape: {sample.shape}")
-        print(f"✓ Sample type: {type(sample)}")
+        raw_train_images, raw_train_labels = extract_from_wrapper(raw_train)
+        raw_test_images, raw_test_labels = extract_from_wrapper(raw_test)
         
-        # Create preprocessing wrapper
+        print(f"✓ Raw train shape: {raw_train_images.shape}")
+        print(f"✓ Raw test shape: {raw_test_images.shape}")
+        print(f"✓ Raw range: [{raw_train_images.min():.3f}, {raw_train_images.max():.3f}]")
+        
+        # ============================================================================
+        # ACTUAL PREPROCESSING PIPELINE
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("APPLYING PREPROCESSING")
+        print("=" * 80)
+        
+        preprocessing_steps = []
+        preprocessing_params = {}
+        
+        # ----------------------------------------------------------------------------
+        # 1. NORMALIZATION
+        # ----------------------------------------------------------------------------
+        print("\\n1. Normalization...")
+        
+        # Parse normalization range
+        try:
+            norm_min, norm_max = map(float, args.normalization_range.split(','))
+        except:
+            norm_min, norm_max = -1.0, 1.0  # Default for GANs
+        
+        print(f"  Target range: [{norm_min}, {norm_max}]")
+        
+        def normalize_images(images, source_min=None, source_max=None):
+         
+            if source_min is None:
+                source_min = images.min()
+            if source_max is None:
+                source_max = images.max()
+            
+            # Avoid division by zero
+            if source_max - source_min == 0:
+                return images
+            
+            # Linear normalization: [source_min, source_max] → [target_min, target_max]
+            normalized = (images - source_min) / (source_max - source_min)  # [0, 1]
+            normalized = normalized * (norm_max - norm_min) + norm_min  # [target_min, target_max]
+            
+            return normalized
+        
+        # Calculate global min/max across both train and test
+        global_min = min(raw_train_images.min(), raw_test_images.min())
+        global_max = max(raw_train_images.max(), raw_test_images.max())
+        
+        # Apply normalization
+        train_images_norm = normalize_images(raw_train_images, global_min, global_max)
+        test_images_norm = normalize_images(raw_test_images, global_min, global_max)
+        
+        preprocessing_steps.append(f'normalized_to_{norm_min}_{norm_max}')
+        preprocessing_params['normalization'] = {
+            'source_range': [float(global_min), float(global_max)],
+            'target_range': [norm_min, norm_max],
+            'method': 'linear'
+        }
+        
+        print(f"  ✓ Train range after: [{train_images_norm.min():.3f}, {train_images_norm.max():.3f}]")
+        print(f"  ✓ Test range after: [{test_images_norm.min():.3f}, {test_images_norm.max():.3f}]")
+        
+        # ----------------------------------------------------------------------------
+        # 2. DATA AUGMENTATION (Optional)
+        # ----------------------------------------------------------------------------
+        print("\\n2. Data augmentation...")
+        
+        apply_aug = args.apply_augmentation.lower() == "true"
+        
+        if apply_aug:
+            print("  Applying augmentation...")
+            
+            # Simple augmentation: random horizontal flip
+            # For GANs, we can flip some images
+            flip_mask = torch.rand(len(train_images_norm)) > 0.5
+            train_images_aug = train_images_norm.clone()
+            
+            # Flip horizontally (assuming shape is [N, C, H, W])
+            if len(train_images_aug.shape) == 4:
+                train_images_aug[flip_mask] = torch.flip(train_images_aug[flip_mask], dims=[3])
+                preprocessing_steps.append('horizontal_flip_augmentation')
+                preprocessing_params['augmentation'] = {
+                    'type': 'horizontal_flip',
+                    'probability': 0.5,
+                    'samples_augmented': int(flip_mask.sum().item())
+                }
+                print(f"  ✓ Flipped {int(flip_mask.sum().item())} samples horizontally")
+            else:
+                print("    Cannot augment: unexpected shape")
+                train_images_aug = train_images_norm
+        else:
+            print("  Skipping augmentation")
+            train_images_aug = train_images_norm
+            preprocessing_steps.append('no_augmentation')
+        
+        # Test data should NOT be augmented
+        test_images_aug = test_images_norm
+        
+        # ----------------------------------------------------------------------------
+        # 3. STANDARDIZATION (Optional - Zero mean, unit variance)
+        # ----------------------------------------------------------------------------
+        print("\\n3. Standardization...")
+        
+        # For GANs, normalization to [-1, 1] is usually sufficient
+        # But we can optionally standardize to zero mean, unit variance
+        
+        apply_standardization = False  # Configurable
+        
+        if apply_standardization:
+            print("  Applying standardization...")
+            # Calculate mean and std
+            train_mean = train_images_aug.mean()
+            train_std = train_images_aug.std()
+            
+            # Avoid division by zero
+            if train_std > 0:
+                train_images_std = (train_images_aug - train_mean) / train_std
+                test_images_std = (test_images_aug - train_mean) / train_std
+                
+                preprocessing_steps.append('standardized_zero_mean_unit_variance')
+                preprocessing_params['standardization'] = {
+                    'mean': float(train_mean),
+                    'std': float(train_std)
+                }
+                print(f"  ✓ Mean: {train_mean:.3f}, Std: {train_std:.3f}")
+            else:
+                train_images_std = train_images_aug
+                test_images_std = test_images_aug
+                print("    Skipping: zero standard deviation")
+        else:
+            print("  Skipping standardization (using normalization only)")
+            train_images_std = train_images_aug
+            test_images_std = test_images_aug
+        
+        # ----------------------------------------------------------------------------
+        # 4. FINAL PREPROCESSED DATA
+        # ----------------------------------------------------------------------------
+        processed_train_images = train_images_std
+        processed_test_images = test_images_std
+        
+        print(f"\\nFinal preprocessed data:")
+        print(f"  Train shape: {processed_train_images.shape}")
+        print(f"  Test shape: {processed_test_images.shape}")
+        print(f"  Train range: [{processed_train_images.min():.3f}, {processed_train_images.max():.3f}]")
+        print(f"  Test range: [{processed_test_images.min():.3f}, {processed_test_images.max():.3f}]")
+        
+        # ============================================================================
+        # Create preprocessed dataset wrappers
+        # ============================================================================
+        print("\\nCreating preprocessed dataset wrappers...")
+        
         class PreprocessedDataset:
-            def __init__(self, dataset):
-                self.dataset = dataset
+         
+            
+            def __init__(self, images, labels, dataset_name='mnist', preprocessing_info=None):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = True
+                self.preprocessing_info = preprocessing_info or {}
+                self._num_samples = len(images)
             
             def __len__(self):
-                return len(self.dataset)
+                return self._num_samples
             
             def __getitem__(self, idx):
-                return self.dataset[idx]
+              
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+            
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed,
+                    'preprocessing_info': self.preprocessing_info
+                }
         
-        class PreprocessMetadata:
-            def __init__(self):
-                self.preprocessing_applied = 'none'  # Already preprocessed by Load Dataset
-                self.timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ')
-                self.num_samples = len(train_wrapper)
+        # Get dataset name
+        dataset_name = 'unknown'
+        if hasattr(dataset_info_obj, 'dataset_name'):
+            dataset_name = dataset_info_obj.dataset_name
+        elif hasattr(raw_train, 'dataset_name'):
+            dataset_name = raw_train.dataset_name
         
-        # Create outputs
-        processed_dataset = PreprocessedDataset(train_wrapper)
-        preprocess_meta = PreprocessMetadata()
+        # Create preprocessed datasets
+        preprocessing_info = {
+            'steps': preprocessing_steps,
+            'params': preprocessing_params,
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+        }
         
+        processed_train_wrapper = PreprocessedDataset(
+            images=processed_train_images,
+            labels=raw_train_labels,
+            dataset_name=dataset_name,
+            preprocessing_info=preprocessing_info
+        )
+        
+        processed_test_wrapper = PreprocessedDataset(
+            images=processed_test_images,
+            labels=raw_test_labels,
+            dataset_name=dataset_name,
+            preprocessing_info=preprocessing_info
+        )
+        
+        print(f"✓ Created preprocessed datasets")
+        print(f"  Train: {len(processed_train_wrapper)} samples")
+        print(f"  Test: {len(processed_test_wrapper)} samples")
+        
+        # ============================================================================
+        # Create preprocessing metadata
+        # ============================================================================
+        print("\\nCreating preprocessing metadata...")
+        
+        # Update dataset info with preprocessing details
+        if hasattr(dataset_info_obj, '__dict__'):
+            updated_info = dataset_info_obj.__dict__.copy()
+        else:
+            updated_info = {}
+        
+        updated_info.update({
+            'preprocessing_applied': preprocessing_steps,
+            'preprocessing_timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'preprocessing_version': 'v1',
+            'value_range_after_preprocessing': [
+                float(processed_train_images.min()),
+                float(processed_train_images.max())
+            ],
+            'requires_preprocessing': False,  # Now preprocessed!
+            'data_state': 'preprocessed'
+        })
+        
+        preprocess_metadata = {
+            'dataset_info': updated_info,
+            'preprocessing_details': {
+                'steps': preprocessing_steps,
+                'parameters': preprocessing_params,
+                'input_samples': len(raw_train),
+                'output_samples': len(processed_train_wrapper),
+                'normalization_range': args.normalization_range,
+                'augmentation_applied': apply_aug
+            },
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'version': 'preprocess_v1'
+        }
+        
+        # ============================================================================
         # Save outputs
-        os.makedirs(os.path.dirname(args.processed_data) or '.', exist_ok=True)
+        # ============================================================================
+        print("\\nSaving outputs...")
         
-        with open(args.processed_data, 'wb') as f:
-            pickle.dump(processed_dataset, f)
+        # Create output directories
+        for output_path in [args.processed_train_data, args.processed_test_data, args.preprocess_metadata]:
+            dir_path = os.path.dirname(output_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
         
-        with open(args.preprocess_metadata, 'wb') as f:
-            pickle.dump(preprocess_meta, f)
+        # Save preprocessed datasets
+        with open(args.processed_train_data, 'wb') as f:
+            pickle.dump(processed_train_wrapper, f, protocol=4)
+        train_size = os.path.getsize(args.processed_train_data)
         
-        print(f"\\n✓ Preprocessing complete")
-        print(f"  Processed data saved: {args.processed_data}")
-        print(f"  Samples: {len(processed_dataset)}")
+        with open(args.processed_test_data, 'wb') as f:
+            pickle.dump(processed_test_wrapper, f, protocol=4)
+        test_size = os.path.getsize(args.processed_test_data)
+        
+        # Save metadata as JSON
+        with open(args.preprocess_metadata, 'w') as f:
+            json.dump(preprocess_metadata, f, indent=2)
+        
+        print(f"\\n✓ Outputs saved:")
+        print(f"  Processed train data: {args.processed_train_data}")
+        print(f"    Size: {train_size:,} bytes ({train_size/1024:.1f} KB)")
+        print(f"  Processed test data: {args.processed_test_data}")
+        print(f"    Size: {test_size:,} bytes ({test_size/1024:.1f} KB)")
+        print(f"  Preprocess metadata: {args.preprocess_metadata}")
+        
+        # ============================================================================
+        # Verification
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("VERIFICATION")
+        print("=" * 80)
+        
+        # Load back processed data
+        with open(args.processed_train_data, 'rb') as f:
+            loaded_processed = pickle.load(f)
+        
+        print(f"✓ Processed data loaded: {len(loaded_processed)} samples")
+        print(f"✓ Data state: {'PREPROCESSED' if loaded_processed.preprocessed else 'RAW'}")
+        
+        # Compare before/after
+        print(f"\\nBefore/After comparison:")
+        print(f"  Raw range: [{raw_train_images.min():.3f}, {raw_train_images.max():.3f}]")
+        print(f"  Processed range: [{loaded_processed[0].min():.3f}, {loaded_processed[0].max():.3f}]")
+        
+        # ============================================================================
+        # Final summary
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("PREPROCESSING COMPLETE!")
+        print("=" * 80)
+        print(f"Preprocessing steps applied:")
+        for step in preprocessing_steps:
+            print(f"  • {step}")
+        
+        print(f"\\nData transformation:")
+        print(f"  Input: {len(raw_train)} raw train, {len(raw_test)} raw test")
+        print(f"  Output: {len(processed_train_wrapper)} processed train, {len(processed_test_wrapper)} processed test")
+        print(f"  Normalization: {args.normalization_range}")
+        print(f"  Augmentation: {apply_aug}")
+        print(f"\\nReady for DCGAN training!")
         
     args:
-      - --train_data
-      - {inputPath: train_data}
+      - --raw_train_data
+      - {inputPath: raw_train_data}
+      - --raw_test_data
+      - {inputPath: raw_test_data}
       - --dataset_info
       - {inputPath: dataset_info}
       - --master_config
       - {inputValue: master_config}
-      - --processed_data
-      - {outputPath: processed_data}
+      - --normalization_range
+      - {inputValue: normalization_range}
+      - --apply_augmentation
+      - {inputValue: apply_augmentation}
+      - --processed_train_data
+      - {outputPath: processed_train_data}
+      - --processed_test_data
+      - {outputPath: processed_test_data}
       - --preprocess_metadata
       - {outputPath: preprocess_metadata}
