@@ -1,4 +1,4 @@
-name: Trigger Pipeline v14
+name: Trigger Pipeline v15
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -243,7 +243,7 @@ implementation:
                 "data_config_url": fixed_urls['data_config_url'],
                 "preprocess_metadata_url": fixed_urls['preprocess_metadata_url'],
                 "upload_summary_url": fixed_urls['upload_summary_url'],
-                "preprocessor_params_url": fixed_urls['preprocessor_params_url']
+                "preprocessor_params_url": fixed_urls['preprocessor_params_url'],
                 
                 # Model loading parameters
                 "load_from_cdn": args.load_from_cdn,
