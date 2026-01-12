@@ -1,9 +1,9 @@
-name: Train DCGAN v28
+name: Train DCGAN v28 - FIXED
 description: Trains DCGAN with Backprop, CAFO, or Forward-Forward using EnhancedDCGANTrainer
 inputs:
   - name: data_path
     type: Dataset
-    description: "Processed data from CDN (GANDataWrapper)"
+    description: "Processed data from CDN (Pickle file)"
   - name: master_config
     type: String
     description: "Master configuration JSON"
@@ -57,7 +57,7 @@ implementation:
         import subprocess
         from PIL import Image
         import torchvision.transforms as transforms
-        from torch.utils.data import DataLoader
+        from torch.utils.data import DataLoader, Dataset
         from io import BytesIO
         import matplotlib.pyplot as plt
         import warnings
@@ -78,9 +78,9 @@ implementation:
                 FullyConfigurableDCGANDiscriminator,
                 EnhancedDCGANTrainer,
                 validate_config,
-                create_dcgan,
                 DCGANDataset,
-                create_dataloader
+                create_dataloader,
+                DCGANConfig
             )
             print(" Successfully imported DCGAN modules")
         except ImportError as e:
@@ -104,7 +104,7 @@ implementation:
         args = parser.parse_args()
         
         print("\\n" + "="*80)
-        print("DCGAN TRAINING WITH ENHANCED TRAINER")
+        print("DCGAN TRAINING WITH ENHANCED TRAINER - FIXED")
         print("="*80)
         
         # ============================================================================
@@ -118,10 +118,12 @@ implementation:
             
             # Determine training algorithm
             algorithm = gan_cfg['training'].get('algorithm', 'backprop')
+            epochs = gan_cfg['training'].get('epochs', 2)
+            batch_size = gan_cfg['training'].get('batch_size', 16)
             
             print(f"Training Algorithm: {algorithm.upper()}")
-            print(f"Batch size: {gan_cfg['training'].get('batch_size', 16)}")
-            print(f"Epochs: {gan_cfg['training'].get('epochs', 2)}")
+            print(f"Epochs: {epochs}")
+            print(f"Batch size: {batch_size}")
             
         except Exception as e:
             print(f"ERROR parsing master_config: {e}")
@@ -133,60 +135,50 @@ implementation:
         # ============================================================================
         
         try:
-            # Define dataset classes for unpickling
-            class GANDataset:
-                def __init__(self, data_list, transform=None, image_size=64, channels=3):
-                    self.data_list = data_list
-                    self.transform = transform
-                    self.image_size = image_size
-                    self.channels = channels
-                
-                def __len__(self):
-                    return len(self.data_list)
-                
-                def __getitem__(self, idx):
-                    img_tensor = self.data_list[idx]
-                    if self.transform:
-                        img_tensor = self.transform(img_tensor)
-                    return img_tensor
+            # Load processed data from Preprocess v1
+            with open(args.data_path, 'rb') as f:
+                data_wrapper = pickle.load(f)
             
-            class GANDataWrapper:
-                def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, transform_params=None):
-                    self.dataset = dataset
-                    self.model_type = model_type
-                    self.image_size = image_size
-                    self.channels = channels
-                    self.transform_params = transform_params or {}
+            # Handle different data wrapper types
+            if hasattr(data_wrapper, 'images'):
+                # This is a PreprocessedDataset from Preprocess v1
+                images = data_wrapper.images
+                labels = data_wrapper.labels if hasattr(data_wrapper, 'labels') else None
                 
-                def __len__(self):
-                    return len(self.dataset)
+                # Convert to list of tensors for DCGANDataset
+                images_list = [images[i] for i in range(len(images))]
                 
-                def __getitem__(self, idx):
-                    return self.dataset[idx]
-            
-            class SafeUnpickler(pickle.Unpickler):
-                def find_class(self, module, name):
-                    if name in ['GANDataWrapper', 'GANDataset']:
-                        return globals()[name]
-                    return super().find_class(module, name)
-            
-            with open(args.data_path, "rb") as f:
-                data_wrapper = SafeUnpickler(f).load()
-            
-            if hasattr(data_wrapper, 'dataset'):
-                dataset = data_wrapper.dataset
-                image_size = data_wrapper.image_size
-                channels = data_wrapper.channels
-                print(f"\\nLoaded dataset:")
-                print(f"  Samples: {len(dataset)}")
+                # Determine image properties
+                if len(images.shape) == 4:
+                    channels = images.shape[1]
+                    image_size = images.shape[2]
+                else:
+                    channels = 1
+                    image_size = 64
+                
+                print(f"Loaded PreprocessedDataset:")
+                print(f"  Samples: {len(images_list)}")
                 print(f"  Image size: {image_size}")
                 print(f"  Channels: {channels}")
                 
                 # Create DCGANDataset
-                train_dataset = DCGANDataset(dataset, normalize=True)
+                train_dataset = DCGANDataset(images_list, normalize=False)  # Already normalized in Preprocess v1
+                
+            elif hasattr(data_wrapper, '__len__'):
+                # Direct list of tensors
+                images_list = [data_wrapper[i] for i in range(len(data_wrapper))]
+                image_size = images_list[0].shape[1] if len(images_list[0].shape) == 3 else 64
+                channels = images_list[0].shape[0] if len(images_list[0].shape) == 3 else 1
+                
+                print(f"Loaded tensor list:")
+                print(f"  Samples: {len(images_list)}")
+                print(f"  Image size: {image_size}")
+                print(f"  Channels: {channels}")
+                
+                train_dataset = DCGANDataset(images_list, normalize=True)
                 
             else:
-                raise ValueError("Invalid data format")
+                raise ValueError("Unsupported data format")
             
         except Exception as e:
             print(f"ERROR loading dataset: {e}")
@@ -194,7 +186,6 @@ implementation:
             sys.exit(1)
         
         # Create dataloader
-        batch_size = gan_cfg['training'].get('batch_size', 16)
         actual_batch_size = min(batch_size, max(1, len(train_dataset)))
         dataloader = DataLoader(
             train_dataset, 
@@ -203,13 +194,13 @@ implementation:
             drop_last=True
         )
         
-        print(f"Data loader created:")
+        print(f"\\nData loader created:")
         print(f"  Dataset size: {len(train_dataset)}")
         print(f"  Batch size: {actual_batch_size}")
         print(f"  Batches per epoch: {len(dataloader)}")
         
         # ============================================================================
-        # LOAD MODEL
+        # LOAD MODEL AND CREATE TRAINER
         # ============================================================================
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -231,10 +222,21 @@ implementation:
                     channels=channels,
                     latent_dim=gan_cfg.get('generator', {}).get('latent_dim', 100),
                     batch_size=actual_batch_size,
-                    epochs=gan_cfg['training'].get('epochs', 2),
+                    epochs=epochs,
                     device=device,
-                    training_algorithm=TrainingAlgorithm(algorithm)
                 )
+            
+            # Set algorithm
+            algorithm_map = {
+                'backprop': TrainingAlgorithm.BACKPROP,
+                'cafo': TrainingAlgorithm.CAFO,
+                'forward_forward': TrainingAlgorithm.FORWARD_FORWARD
+            }
+            dcgan_config.training_algorithm = algorithm_map.get(algorithm, TrainingAlgorithm.BACKPROP)
+            
+            # Enable block training for CAFO/Forward-Forward
+            if algorithm in ['cafo', 'forward_forward']:
+                dcgan_config.block_training.enabled = True
             
             # Validate config
             is_valid, errors = validate_config(dcgan_config)
@@ -244,43 +246,17 @@ implementation:
                     print(f"  - {error}")
                 sys.exit(1)
             
-            # Create models
-            generator = FullyConfigurableDCGANGenerator(dcgan_config)
-            discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config)
-            
-            # Load weights if available
-            if 'generator_state_dict' in checkpoint:
-                generator.load_state_dict(checkpoint['generator_state_dict'])
-                print("✓ Generator weights loaded")
-            if 'discriminator_state_dict' in checkpoint:
-                discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
-                print("✓ Discriminator weights loaded")
-            
-            # Move to device
-            generator.to(device)
-            discriminator.to(device)
-            
-            print(f"\\nModels loaded successfully:")
-            print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
-            print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
-            
-        except Exception as e:
-            print(f"ERROR loading model: {e}")
-            traceback.print_exc()
-            sys.exit(1)
-        
-        # ============================================================================
-        # CREATE TRAINER AND TRAIN
-        # ============================================================================
-        
-        try:
             # Create EnhancedDCGANTrainer
             print(f"\\nCreating EnhancedDCGANTrainer...")
             trainer = EnhancedDCGANTrainer(dcgan_config)
             
-            # Replace trainer's models with our loaded ones
-            trainer.generator = generator
-            trainer.discriminator = discriminator
+            # Load weights if available
+            if 'generator_state_dict' in checkpoint:
+                trainer.generator.load_state_dict(checkpoint['generator_state_dict'])
+                print("✓ Generator weights loaded")
+            if 'discriminator_state_dict' in checkpoint:
+                trainer.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+                print("✓ Discriminator weights loaded")
             
             print(f"✓ Trainer created for {algorithm.upper()} algorithm")
             print(f"  Block training: {'Enabled' if dcgan_config.block_training.enabled else 'Disabled'}")
@@ -301,8 +277,23 @@ implementation:
         start_time = time.time()
         
         try:
-            # Train
-            training_result = trainer.train(dataloader)
+            # Phase 1: Block training if enabled
+            if dcgan_config.block_training.enabled:
+                print(f"\\n PHASE 1: BLOCK-WISE PRE-TRAINING")
+                print("-" * 40)
+                
+                block_start = time.time()
+                block_results = trainer.train_blocks_with_logging(dataloader)
+                block_time = time.time() - block_start
+                
+                print(f"Block training completed in {block_time:.2f}s")
+            
+            # Phase 2: Adversarial training
+            print(f"\\n PHASE 2: ADVERSARIAL TRAINING")
+            print("=" * 40)
+            
+            # Train for configured epochs
+            training_result = trainer.train_adversarial_with_logging(dataloader)
             
             training_time = time.time() - start_time
             print(f"\\nTraining completed in {training_time:.2f}s")
@@ -344,18 +335,20 @@ implementation:
             
             return image_paths, samples
         
-        # Generate initial and final samples
+        # Generate initial samples (before training)
+        print("Generating initial samples...")
         init_samples_path, init_samples = generate_and_save_samples(
-            generator, num_samples=16, save_dir="/tmp/init_samples"
+            trainer.generator, num_samples=16, save_dir="/tmp/init_samples"
         )
         
-        # Generate final samples with trained generator
+        # Generate final samples (after training)
+        print("Generating final samples...")
         final_samples_path, final_samples = generate_and_save_samples(
             trainer.generator, num_samples=16, save_dir="/tmp/final_samples"
         )
         
         # ============================================================================
-        # CDN UPLOAD
+        # CDN UPLOAD FUNCTION
         # ============================================================================
         
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix):
@@ -365,6 +358,10 @@ implementation:
             file_size = os.path.getsize(file_path)
             print(f"  Uploading {description} ({file_size:,} bytes)...")
             
+            # Generate unique filename
+            unique_id = str(uuid.uuid4())[:8]
+            cdn_filename = f"dcgan_{description.replace(' ', '_')}_{unique_id}.png"
+            
             upload_url = f"{domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
             
             curl_command = [
@@ -372,6 +369,7 @@ implementation:
                 "--location", upload_url,
                 "--header", f"Authorization: Bearer {bearer_token}",
                 "--form", f"file=@{file_path}",
+                "--form", f"filename={cdn_filename}",
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
@@ -416,10 +414,13 @@ implementation:
             
             for i in range(min(16, len(samples))):
                 ax = axes[i]
-                if samples[i].shape[0] == 1:
-                    ax.imshow(samples[i][0], cmap='gray', vmin=0, vmax=1)
+                sample = samples[i]
+                if len(sample.shape) == 3 and sample.shape[0] == 1:
+                    ax.imshow(sample[0], cmap='gray', vmin=0, vmax=1)
+                elif len(sample.shape) == 3:
+                    ax.imshow(sample.permute(1, 2, 0))
                 else:
-                    ax.imshow(samples[i].permute(1, 2, 0))
+                    ax.imshow(sample, cmap='gray', vmin=0, vmax=1)
                 ax.axis('off')
                 ax.set_title(f"Sample {i+1}")
             
@@ -435,14 +436,14 @@ implementation:
         init_grid_path = "/tmp/init_grid.png"
         create_sample_grid(init_samples, "Initial Samples (Before Training)", init_grid_path)
         init_grid_url = upload_to_cdn(
-            init_grid_path, "Initial samples grid", 
+            init_grid_path, "initial_samples_grid", 
             bearer_token, args.domain, args.get_cdn
         )
         
         final_grid_path = "/tmp/final_grid.png"
         create_sample_grid(final_samples, "Final Samples (After Training)", final_grid_path)
         final_grid_url = upload_to_cdn(
-            final_grid_path, "Final samples grid", 
+            final_grid_path, "final_samples_grid", 
             bearer_token, args.domain, args.get_cdn
         )
         
@@ -452,24 +453,24 @@ implementation:
         
         print(f"\\nCreating outputs...")
         
-        # Extract metrics from trainer
-        metrics = trainer.training_history
+        # Get metrics from trainer
+        metrics_history = trainer.training_history
         
         # Create training history
         training_history_data = {
             'algorithm': algorithm,
             'epochs_completed': dcgan_config.epochs,
             'total_training_time': training_time,
-            'generator_losses': metrics.get('generator_losses', []),
-            'discriminator_losses': metrics.get('discriminator_losses', []),
-            'real_scores': metrics.get('real_scores', []),
-            'fake_scores': metrics.get('fake_scores', []),
-            'block_training_results': metrics.get('block_training_results', {}),
+            'generator_losses': metrics_history.get('generator_losses', []),
+            'discriminator_losses': metrics_history.get('discriminator_losses', []),
+            'real_scores': metrics_history.get('real_scores', []),
+            'fake_scores': metrics_history.get('fake_scores', []),
+            'block_training_results': metrics_history.get('block_training_results', {}),
             'final_metrics': {
-                'generator_loss': metrics.get('generator_losses', [-1])[-1] if metrics.get('generator_losses') else 0,
-                'discriminator_loss': metrics.get('discriminator_losses', [-1])[-1] if metrics.get('discriminator_losses') else 0,
-                'real_score': metrics.get('real_scores', [-1])[-1] if metrics.get('real_scores') else 0.5,
-                'fake_score': metrics.get('fake_scores', [-1])[-1] if metrics.get('fake_scores') else 0.5
+                'generator_loss': metrics_history.get('generator_losses', [-1])[-1] if metrics_history.get('generator_losses') else 0,
+                'discriminator_loss': metrics_history.get('discriminator_losses', [-1])[-1] if metrics_history.get('discriminator_losses') else 0,
+                'real_score': metrics_history.get('real_scores', [-1])[-1] if metrics_history.get('real_scores') else 0.5,
+                'fake_score': metrics_history.get('fake_scores', [-1])[-1] if metrics_history.get('fake_scores') else 0.5
             }
         }
         
@@ -488,10 +489,14 @@ implementation:
             'training_success': True,
             'image_size': image_size,
             'channels': channels,
-            'latent_dim': generator.latent_dim,
+            'latent_dim': trainer.generator.latent_dim,
             'batch_size': actual_batch_size,
             'device': str(device),
-            'block_training_enabled': dcgan_config.block_training.enabled
+            'block_training_enabled': dcgan_config.block_training.enabled,
+            'algorithm_specific': {
+                'use_cafo': algorithm == 'cafo',
+                'use_forward_forward': algorithm == 'forward_forward'
+            }
         }
         
         # Prepare generated samples for output
@@ -531,7 +536,9 @@ implementation:
             'algorithm': algorithm,
             'epochs_trained': dcgan_config.epochs,
             'final_metrics': training_history_data['final_metrics'],
-            'image_grid_urls': generated_images_urls_data['image_grids']
+            'image_grid_urls': generated_images_urls_data['image_grids'],
+            'training_time': training_time,
+            'block_training_used': dcgan_config.block_training.enabled
         }
         
         # Create trained model checkpoint
@@ -548,7 +555,8 @@ implementation:
             'training_metrics': training_metrics_data,
             'algorithm': algorithm,
             'epochs_trained': dcgan_config.epochs,
-            'master_config': config
+            'master_config': config,
+            'model_info': checkpoint.get('model_info', {})
         }
         
         # ============================================================================
@@ -606,6 +614,7 @@ implementation:
         print(f"Final Real Score: {training_history_data['final_metrics']['real_score']:.3f}")
         print(f"Final Fake Score: {training_history_data['final_metrics']['fake_score']:.3f}")
         print(f"Samples generated: {len(generated_samples_data)}")
+        print(f"Block training: {'Yes' if dcgan_config.block_training.enabled else 'No'}")
         print(f"Initial images URL: {init_grid_url if init_grid_url else 'Not uploaded'}")
         print(f"Final images URL: {final_grid_url if final_grid_url else 'Not uploaded'}")
         print("="*80)
