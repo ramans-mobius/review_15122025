@@ -1,4 +1,4 @@
-name: Preprocess v1 - TRAIN ONLY
+name: Preprocess v2 - TRAIN ONLY
 description: Preprocesses TRAINING data only, saves parameters for test preprocessing
 inputs:
   - name: raw_train_data
@@ -44,6 +44,39 @@ implementation:
         import time
         import sys
         
+        # ============================================================================
+        # INCLUDE ALL NECESSARY CLASS DEFINITIONS FROM LOAD DATA BRICK
+        # ============================================================================
+        class RawDatasetWrapper:
+            def __init__(self, images, labels, dataset_name='mnist'):
+                self.images = images  # Raw images
+                self.labels = labels  # Raw labels
+                self.dataset_name = dataset_name
+                self.preprocessed = False  # Mark as raw
+                self._num_samples = len(images)
+            
+            def __len__(self):
+                return self._num_samples
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed
+                }
+        
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+        
+        # ============================================================================
+        # MAIN EXECUTION CODE
+        # ============================================================================
         parser = argparse.ArgumentParser()
         parser.add_argument('--raw_train_data', type=str, required=True)
         parser.add_argument('--raw_test_data', type=str, required=True)
@@ -58,7 +91,10 @@ implementation:
         print("PREPROCESS v1 - TRAIN DATA ONLY")
         print("=" * 80)
         
-        # Load inputs
+        # ============================================================================
+        # Load inputs - Now RawDatasetWrapper class is defined
+        # ============================================================================
+        print("Loading raw data...")
         with open(args.raw_train_data, 'rb') as f:
             raw_train = pickle.load(f)
         
@@ -71,7 +107,10 @@ implementation:
         print(f"✓ Loaded {len(raw_train)} raw train samples")
         print(f"✓ Loaded {len(raw_test)} raw test samples (REFERENCE ONLY)")
         
+        # ============================================================================
         # Extract raw train data
+        # ============================================================================
+        print("\\nExtracting data from wrappers...")
         if hasattr(raw_train, 'images') and hasattr(raw_train, 'labels'):
             train_images = raw_train.images
             train_labels = raw_train.labels
@@ -172,7 +211,8 @@ implementation:
                     'label': self.labels[idx],
                     'index': idx,
                     'dataset': self.dataset_name,
-                    'preprocessed': True
+                    'preprocessed': True,
+                    'preprocessor_params': self.preprocessor_params
                 }
         
         # Get dataset name
@@ -203,6 +243,7 @@ implementation:
         # ============================================================================
         # Save outputs
         # ============================================================================
+        print("\\nSaving outputs...")
         os.makedirs(os.path.dirname(args.processed_train_data) or '.', exist_ok=True)
         
         with open(args.processed_train_data, 'wb') as f:
@@ -214,10 +255,42 @@ implementation:
         with open(args.preprocessor_params, 'w') as f:
             json.dump(preprocessor_params, f, indent=2)
         
-        print(f"\\n✓ Outputs saved:")
-        print(f"  Processed train data: {args.processed_train_data}")
-        print(f"  Preprocess metadata: {args.preprocess_metadata}")
-        print(f"  Preprocessor params: {args.preprocessor_params}")
+        # Verify save
+        if os.path.exists(args.processed_train_data):
+            file_size = os.path.getsize(args.processed_train_data)
+            print(f"✓ Processed train data saved: {args.processed_train_data}")
+            print(f"  Size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
+        else:
+            print(f"✗ Failed to save: {args.processed_train_data}")
+        
+        if os.path.exists(args.preprocess_metadata):
+            print(f"✓ Preprocess metadata saved: {args.preprocess_metadata}")
+        else:
+            print(f"✗ Failed to save: {args.preprocess_metadata}")
+        
+        if os.path.exists(args.preprocessor_params):
+            print(f"✓ Preprocessor params saved: {args.preprocessor_params}")
+        else:
+            print(f"✗ Failed to save: {args.preprocessor_params}")
+        
+        # ============================================================================
+        # Verification
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("VERIFICATION")
+        print("=" * 80)
+        
+        # Load back to verify
+        with open(args.processed_train_data, 'rb') as f:
+            loaded_processed = pickle.load(f)
+        
+        print(f"✓ Processed train data loaded: {len(loaded_processed)} samples")
+        print(f"✓ Data state: {'PROCESSED' if loaded_processed.preprocessed else 'RAW'}")
+        
+        # Test a processed sample
+        processed_sample = loaded_processed[0]
+        print(f"✓ Processed sample shape: {processed_sample.shape}")
+        print(f"✓ Processed sample range: [{processed_sample.min():.3f}, {processed_sample.max():.3f}]")
         
         # ============================================================================
         # Instructions for test data preprocessing
@@ -230,6 +303,9 @@ implementation:
         print(f"  shift = {shift:.6f}")
         print("\\nFormula: test_processed = test_raw * scale + shift")
         print("\\nThese parameters are saved in: preprocessor_params")
+        print("\\n" + "=" * 80)
+        print("PREPROCESSING COMPLETE!")
+        print("=" * 80)
         
     args:
       - --raw_train_data
