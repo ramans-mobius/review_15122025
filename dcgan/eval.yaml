@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v7
+name: Evaluate DCGAN v7 - FIXED
 description: Evaluates DCGAN with comprehensive metrics (FID, SSIM, PSNR, Diversity)
 inputs:
   - name: trained_model
@@ -17,7 +17,7 @@ outputs:
   - name: evaluation_summary
     type: String
   - name: metrics_visualization
-    type: String  # Optional: Save visualization plots
+    type: String
 
 implementation:
   container:
@@ -49,7 +49,7 @@ implementation:
         parser.add_argument('--evaluation_metrics', type=str, required=True)
         parser.add_argument('--generated_samples', type=str, required=True)
         parser.add_argument('--evaluation_summary', type=str, required=True)
-        parser.add_argument('--metrics_visualization', type=str, required=False)
+        parser.add_argument('--metrics_visualization', type=str, required=True)
         args = parser.parse_args()
         
         print("=" * 80)
@@ -61,7 +61,6 @@ implementation:
         # ============================================================================
         
         def calculate_ssim_psnr(real_images, fake_images):
-        
             try:
                 from skimage.metrics import structural_similarity as ssim
                 from skimage.metrics import peak_signal_noise_ratio as psnr
@@ -75,15 +74,24 @@ implementation:
                 num_samples = min(len(real_np), len(fake_np), 20)
                 
                 for i in range(num_samples):
-                    real_img = real_np[i, 0]
-                    fake_img = fake_np[i, 0]
+                    # Handle both grayscale and color images
+                    if len(real_np[i].shape) == 3 and real_np[i].shape[0] == 1:
+                        real_img = real_np[i][0]
+                        fake_img = fake_np[i][0]
+                    elif len(real_np[i].shape) == 3:
+                        real_img = real_np[i].transpose(1, 2, 0)
+                        fake_img = fake_np[i].transpose(1, 2, 0)
+                    else:
+                        real_img = real_np[i]
+                        fake_img = fake_np[i]
                     
                     # Denormalize from [-1, 1] to [0, 1]
                     real_img = (real_img + 1) / 2
                     fake_img = (fake_img + 1) / 2
                     
                     try:
-                        ssim_score = ssim(real_img, fake_img, data_range=1.0)
+                        ssim_score = ssim(real_img, fake_img, data_range=1.0, 
+                                          channel_axis=-1 if real_img.ndim == 3 else None)
                         ssim_scores.append(ssim_score)
                     except:
                         ssim_scores.append(0.0)
@@ -111,7 +119,6 @@ implementation:
                 }
         
         def calculate_diversity_score(images):
-           
             try:
                 images_np = images.cpu().numpy().reshape(images.shape[0], -1)
                 
@@ -134,7 +141,6 @@ implementation:
                 return 0.0
         
         def calculate_fid_simple(real_images, fake_images):
-           
             print("  Calculating simplified FID...")
             
             # Flatten images
@@ -169,8 +175,7 @@ implementation:
                 return float('nan')
         
         def calculate_all_metrics(real_images, fake_images, algorithm_name=""):
-          
-            print(f"\\n Calculating comprehensive metrics...")
+            print(f"\\nCalculating comprehensive metrics for {algorithm_name}...")
             
             metrics = {
                 'algorithm': algorithm_name,
@@ -249,8 +254,8 @@ implementation:
         print(f"✓ Raw test data loaded: {len(raw_test_dataset)} samples")
         
         # Load preprocess metadata
-        with open(args.preprocess_metadata, 'rb') as f:
-            preprocess_meta = pickle.load(f)
+        with open(args.preprocess_metadata, 'r') as f:
+            preprocess_meta = json.load(f)
         print(f"✓ Preprocess metadata loaded")
         
         # ============================================================================
@@ -259,62 +264,65 @@ implementation:
         print("\\nApplying preprocessing to test data...")
         
         # Extract preprocessing parameters
-        image_size = getattr(preprocess_meta, 'image_size', 64)
-        channels = getattr(preprocess_meta, 'channels', 1)
+        preprocessing_params = preprocess_meta.get('preprocessing_parameters', {})
+        normalization = preprocessing_params.get('normalization', {})
         
-        # Recreate the same transform used in training
-        transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.Normalize((0.5,), (0.5,) if channels == 1 else (0.5, 0.5, 0.5))
-        ])
+        scale = normalization.get('scale', 1.0)
+        shift = normalization.get('shift', 0.0)
         
-        class PreprocessedTestDataset:
-            def __init__(self, raw_dataset, transform):
-                self.raw_dataset = raw_dataset
-                self.transform = transform
-            
-            def __len__(self):
-                return len(self.raw_dataset)
-            
-            def __getitem__(self, idx):
-                img, label = self.raw_dataset[idx]
-                img = self.transform(img)
-                return img, label
+        print(f"  Preprocessing parameters: scale={scale:.6f}, shift={shift:.6f}")
         
-        # Create preprocessed test dataset
-        processed_test_dataset = PreprocessedTestDataset(raw_test_dataset, transform)
-        
-        # ============================================================================
-        # GENERATE SAMPLES FOR EVALUATION
-        # ============================================================================
-        print("\\nGenerating samples for evaluation...")
-        
-        # Load generator
-        if 'generator_state_dict' in checkpoint:
-            from nesy_factory.GANs.dcgan import FullyConfigurableDCGANGenerator
-            # You would need to recreate the generator architecture here
-            # For now, we'll skip if generator not directly available
-            generator = None
+        # Determine dataset structure
+        if hasattr(raw_test_dataset, 'images'):
+            # RawDatasetWrapper format from Load Raw Dataset v1
+            raw_images = raw_test_dataset.images
+            raw_labels = raw_test_dataset.labels if hasattr(raw_test_dataset, 'labels') else None
+        elif hasattr(raw_test_dataset, '__len__'):
+            # Direct dataset format
+            raw_images = []
+            for i in range(len(raw_test_dataset)):
+                if isinstance(raw_test_dataset[i], tuple):
+                    img, label = raw_test_dataset[i]
+                else:
+                    img = raw_test_dataset[i]
+                    label = None
+                raw_images.append(img)
+            raw_images = torch.stack(raw_images)
         else:
-            generator = checkpoint.get('generator')
+            raw_images = raw_test_dataset
         
-        if generator is None:
-            print("✗ Generator not found in checkpoint")
-            # Create dummy metrics
-            metrics = {
-                'error': 'Generator not found in checkpoint',
-                'algorithm': algorithm,
-                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
-            }
+        # Apply same preprocessing as training
+        print(f"  Applying normalization: x * {scale:.6f} + {shift:.6f}")
+        processed_images = raw_images * scale + shift
+        
+        # ============================================================================
+        # LOAD GENERATOR AND GENERATE SAMPLES
+        # ============================================================================
+        print("\\nLoading generator and generating samples...")
+        
+        try:
+            from nesy_factory.GANs.dcgan import (
+                DCGANConfig,
+                FullyConfigurableDCGANGenerator
+            )
             
-            # Save outputs
-            with open(args.evaluation_metrics, 'w') as f:
-                json.dump(metrics, f, indent=2)
+            # Recreate config
+            config_dict = checkpoint['config']
+            dcgan_config = DCGANConfig.from_dict(config_dict)
             
-            with open(args.evaluation_summary, 'w') as f:
-                json.dump({'error': 'Generator not found'}, f, indent=2)
+            # Create generator
+            generator = FullyConfigurableDCGANGenerator(dcgan_config)
+            generator.load_state_dict(checkpoint['generator_state_dict'])
             
-            print("\\nEvaluation failed - no generator found")
+            print(f"✓ Generator loaded")
+            print(f"  Latent dim: {generator.latent_dim}")
+            print(f"  Image size: {dcgan_config.image_size}")
+            print(f"  Channels: {dcgan_config.channels}")
+            
+        except Exception as e:
+            print(f"ERROR loading generator: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
         
         # Set up device
@@ -323,21 +331,15 @@ implementation:
         generator.eval()
         
         # Determine number of samples
-        num_eval_samples = min(100, len(processed_test_dataset))
+        num_eval_samples = min(100, len(processed_images))
         print(f"  Using {num_eval_samples} samples for evaluation")
         
-        # Collect real samples
-        real_samples = []
-        for i in range(num_eval_samples):
-            img, _ = processed_test_dataset[i]
-            real_samples.append(img)
-        real_tensor = torch.stack(real_samples)
+        # Prepare real samples
+        real_tensor = processed_images[:num_eval_samples].to(device)
         
         # Generate fake samples
-        latent_dim = checkpoint.get('latent_dim', 100)
-        
         with torch.no_grad():
-            z = torch.randn(num_eval_samples, latent_dim, device=device)
+            z = torch.randn(num_eval_samples, generator.latent_dim, device=device)
             fake_tensor = generator(z).cpu()
         
         print(f"✓ Generated {num_eval_samples} fake samples")
@@ -352,87 +354,105 @@ implementation:
         print("=" * 60)
         
         start_time = time.time()
-        metrics = calculate_all_metrics(real_tensor, fake_tensor, algorithm)
+        metrics = calculate_all_metrics(real_tensor.cpu(), fake_tensor, algorithm)
         metrics['calculation_time'] = time.time() - start_time
         
         # ============================================================================
-        # CREATE VISUALIZATION (Optional)
+        # CREATE VISUALIZATION
         # ============================================================================
-        if args.metrics_visualization:
-            print("\\nCreating metrics visualization...")
-            try:
-                fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-                
-                # Plot 1: Real vs Fake comparison
-                ax = axes[0, 0]
-                real_sample = real_tensor[0, 0].numpy()
+        print("\\nCreating metrics visualization...")
+        try:
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            
+            # Plot 1: Real vs Fake sample comparison
+            ax = axes[0, 0]
+            if len(real_tensor.shape) == 4 and real_tensor.shape[1] == 1:
+                real_sample = real_tensor[0, 0].cpu().numpy()
                 fake_sample = fake_tensor[0, 0].numpy()
-                
-                ax.plot(real_sample.flatten()[:100], label='Real', alpha=0.7)
-                ax.plot(fake_sample.flatten()[:100], label='Fake', alpha=0.7)
-                ax.set_title('Pixel Value Comparison')
-                ax.set_xlabel('Pixel Index')
-                ax.set_ylabel('Value')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                
-                # Plot 2: SSIM/PSNR
-                ax = axes[0, 1]
-                metric_values = [metrics.get('ssim_mean', 0), metrics.get('psnr_mean', 0)]
-                metric_names = ['SSIM', 'PSNR']
-                bars = ax.bar(metric_names, metric_values)
-                ax.set_title('Quality Metrics')
+            elif len(real_tensor.shape) == 4:
+                real_sample = real_tensor[0].permute(1, 2, 0).cpu().numpy()
+                fake_sample = fake_tensor[0].permute(1, 2, 0).numpy()
+            else:
+                real_sample = real_tensor[0].cpu().numpy()
+                fake_sample = fake_tensor[0].numpy()
+            
+            # Denormalize for display
+            real_sample = (real_sample + 1) / 2
+            fake_sample = (fake_sample + 1) / 2
+            
+            ax.imshow(real_sample, cmap='gray' if len(real_sample.shape) == 2 else None)
+            ax.set_title('Real Sample')
+            ax.axis('off')
+            
+            ax = axes[0, 1]
+            ax.imshow(fake_sample, cmap='gray' if len(fake_sample.shape) == 2 else None)
+            ax.set_title('Generated Sample')
+            ax.axis('off')
+            
+            # Plot 2: SSIM/PSNR
+            ax = axes[0, 2]
+            metric_values = [metrics.get('ssim_mean', 0), metrics.get('psnr_mean', 0)]
+            metric_names = ['SSIM', 'PSNR']
+            bars = ax.bar(metric_names, metric_values)
+            ax.set_title('Quality Metrics')
+            ax.set_ylabel('Score')
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            for bar, val in zip(bars, metric_values):
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                       f'{val:.3f}', ha='center', va='bottom')
+            
+            # Plot 3: FID Score
+            ax = axes[1, 0]
+            fid_score = metrics.get('fid_score', float('nan'))
+            if not np.isnan(fid_score):
+                ax.bar(['FID'], [fid_score])
+                ax.set_title('FID Score (Lower is Better)')
                 ax.set_ylabel('Score')
-                ax.grid(True, alpha=0.3, axis='y')
-                
-                for bar, val in zip(bars, metric_values):
-                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                           f'{val:.3f}', ha='center', va='bottom')
-                
-                # Plot 3: FID Score
-                ax = axes[0, 2]
-                fid_score = metrics.get('fid_score', float('nan'))
-                if not np.isnan(fid_score):
-                    ax.bar(['FID'], [fid_score])
-                    ax.set_title('FID Score (Lower is Better)')
-                    ax.set_ylabel('Score')
-                    ax.text(0.5, fid_score + 0.1, f'{fid_score:.1f}', 
-                           ha='center', va='bottom')
-                    ax.grid(True, alpha=0.3, axis='y')
-                
-                # Plot 4: Sample images
-                ax = axes[1, 0]
-                ax.imshow(real_sample, cmap='gray')
-                ax.set_title('Real Sample')
-                ax.axis('off')
-                
-                ax = axes[1, 1]
-                ax.imshow(fake_sample, cmap='gray')
-                ax.set_title('Generated Sample')
-                ax.axis('off')
-                
-                # Plot 5: Diversity Score
-                ax = axes[1, 2]
-                diversity = metrics.get('diversity_score', 0)
-                ax.bar(['Diversity'], [diversity])
-                ax.set_title('Diversity Score')
-                ax.set_ylabel('Score')
-                ax.text(0.5, diversity + 0.1, f'{diversity:.3f}', 
+                ax.text(0.5, fid_score + 0.1, f'{fid_score:.1f}', 
                        ha='center', va='bottom')
                 ax.grid(True, alpha=0.3, axis='y')
-                
-                plt.tight_layout()
-                
-                # Save visualization
-                viz_path = args.metrics_visualization
-                os.makedirs(os.path.dirname(viz_path) or '.', exist_ok=True)
-                plt.savefig(viz_path, dpi=150, bbox_inches='tight')
-                plt.close()
-                
-                print(f"✓ Visualization saved: {viz_path}")
-                
-            except Exception as e:
-                print(f"  Warning: Visualization failed: {e}")
+            else:
+                ax.text(0.5, 0.5, 'FID: N/A', ha='center', va='center')
+                ax.set_title('FID Score')
+                ax.axis('off')
+            
+            # Plot 4: Diversity Score
+            ax = axes[1, 1]
+            diversity = metrics.get('diversity_score', 0)
+            ax.bar(['Diversity'], [diversity])
+            ax.set_title('Diversity Score')
+            ax.set_ylabel('Score')
+            ax.text(0.5, diversity + 0.1, f'{diversity:.3f}', 
+                   ha='center', va='bottom')
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            # Plot 5: Pixel value distributions
+            ax = axes[1, 2]
+            real_vals = real_tensor.flatten().cpu().numpy()
+            fake_vals = fake_tensor.flatten().numpy()
+            ax.hist(real_vals, bins=50, alpha=0.5, label='Real', density=True)
+            ax.hist(fake_vals, bins=50, alpha=0.5, label='Fake', density=True)
+            ax.set_title('Pixel Value Distribution')
+            ax.set_xlabel('Value')
+            ax.set_ylabel('Density')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # Save visualization
+            viz_path = args.metrics_visualization
+            os.makedirs(os.path.dirname(viz_path) or '.', exist_ok=True)
+            plt.savefig(viz_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✓ Visualization saved: {viz_path}")
+            
+        except Exception as e:
+            print(f"  Warning: Visualization failed: {e}")
+            import traceback
+            traceback.print_exc()
         
         # ============================================================================
         # SAVE OUTPUTS
@@ -446,11 +466,13 @@ implementation:
         
         # Save generated samples
         generated_data = {
-            'samples': fake_tensor,
-            'latent_vectors': z.cpu(),
-            'real_samples': real_tensor,
+            'samples': fake_tensor.numpy().tolist(),
+            'real_samples': real_tensor.cpu().numpy().tolist(),
+            'latent_vectors': z.cpu().numpy().tolist(),
             'num_samples': num_eval_samples,
-            'algorithm': algorithm
+            'algorithm': algorithm,
+            'image_size': dcgan_config.image_size,
+            'channels': dcgan_config.channels
         }
         
         with open(args.generated_samples, 'wb') as f:
@@ -461,21 +483,28 @@ implementation:
         summary = {
             'evaluation_completed': True,
             'algorithm': algorithm,
-            'test_samples_processed': len(processed_test_dataset),
+            'test_samples_processed': len(processed_images),
             'evaluation_samples_used': num_eval_samples,
-            'preprocessing_applied': {
-                'image_size': image_size,
-                'channels': channels
+            'preprocessing_applied': True,
+            'preprocessing_params': {
+                'scale': scale,
+                'shift': shift
             },
             'key_metrics': {
                 'fid_score': metrics.get('fid_score'),
                 'ssim_mean': metrics.get('ssim_mean'),
                 'psnr_mean': metrics.get('psnr_mean'),
                 'diversity_score': metrics.get('diversity_score'),
-                'mae': metrics.get('mae')
+                'mae': metrics.get('mae'),
+                'mse': metrics.get('mse')
             },
             'calculation_time': metrics.get('calculation_time'),
-            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'model_info': {
+                'latent_dim': generator.latent_dim,
+                'image_size': dcgan_config.image_size,
+                'channels': dcgan_config.channels
+            }
         }
         
         with open(args.evaluation_summary, 'w') as f:
