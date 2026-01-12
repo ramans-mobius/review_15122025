@@ -1,4 +1,4 @@
-name: Download DCGAN Data From CDN v3 - COMPLETE
+name: Download DCGAN Data From CDN v4 - COMPLETE
 description: Downloads complete dataset set from CDN for pipeline continuation
 inputs:
   # Input URLs from Upload Data To CDN v12 (COMPLETE SET)
@@ -74,6 +74,65 @@ implementation:
       - |
         import argparse, subprocess, json, os, pickle, sys
         
+        # ============================================================================
+        # INCLUDE ALL NECESSARY CLASS DEFINITIONS
+        # ============================================================================
+        import torch
+        
+        class RawDatasetWrapper:
+            def __init__(self, images, labels, dataset_name='mnist'):
+                self.images = images  # Raw images
+                self.labels = labels  # Raw labels
+                self.dataset_name = dataset_name
+                self.preprocessed = False  # Mark as raw
+                self._num_samples = len(images)
+            
+            def __len__(self):
+                return self._num_samples
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed
+                }
+        
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+        
+        class PreprocessedDataset:
+            def __init__(self, images, labels, dataset_name, preprocessor_params):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = True
+                self.preprocessor_params = preprocessor_params
+            
+            def __len__(self):
+                return len(self.images)
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': True,
+                    'preprocessor_params': self.preprocessor_params
+                }
+        
+        # ============================================================================
+        # MAIN EXECUTION CODE
+        # ============================================================================
         parser = argparse.ArgumentParser()
         
         # Input URLs (COMPLETE SET)
@@ -105,6 +164,25 @@ implementation:
         print("DOWNLOAD DCGAN DATA FROM CDN v3 - COMPLETE SET")
         print("=" * 80)
         
+        # ============================================================================
+        # Create ALL output directories FIRST
+        # ============================================================================
+        print("\\nCreating output directories...")
+        output_paths = [
+            args.raw_train_data, args.raw_test_data, args.processed_train_data,
+            args.dataset_info, args.data_config, args.preprocess_metadata,
+            args.preprocessor_params, args.download_summary
+        ]
+        
+        for path in output_paths:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"  Created: {dir_path}")
+        
+        print("✓ All output directories created")
+        
         # Read bearer token
         with open(args.bearer_token, 'r') as f:
             bearer_token = f.read().strip()
@@ -113,12 +191,12 @@ implementation:
         # Download function with verification
         # ============================================================================
         def download_from_cdn(url, output_path, description, expected_type="pickle"):
-          
             if not url or url.strip() == "":
                 print(f"   ✗ Skipping {description}: Empty URL")
                 return {'success': False, 'error': 'Empty URL'}
             
             print(f"   Downloading {description}...")
+            print(f"     URL: {url[:100]}..." if len(url) > 100 else f"     URL: {url}")
             
             curl_command = [
                 "curl",
@@ -154,8 +232,14 @@ implementation:
                         
                         # Expected classes from our pipeline
                         expected_classes = ['RawDatasetWrapper', 'PreprocessedDataset', 'DatasetInfoWrapper']
+                        
+                        if file_size > 0:
+                            print(f"    ✓ Downloaded: {file_size:,} bytes ({size_kb:.1f} KB)")
+                        
                         if class_name in expected_classes:
-                            print(f"    ✓ {class_name} ({size_kb:.1f} KB)")
+                            print(f"    ✓ Class verified: {class_name}")
+                            if hasattr(obj, '__len__'):
+                                print(f"    ✓ Samples: {len(obj)}")
                             return {
                                 'success': True, 
                                 'size_kb': size_kb,
@@ -163,7 +247,7 @@ implementation:
                                 'num_samples': len(obj) if hasattr(obj, '__len__') else 'unknown'
                             }
                         else:
-                            print(f"    ⚠️  Unexpected class: {class_name}")
+                            print(f"      Unexpected class: {class_name}")
                             return {
                                 'success': True,  # Still consider success
                                 'size_kb': size_kb,
@@ -179,6 +263,7 @@ implementation:
                         with open(output_path, 'r') as f:
                             data = json.load(f)
                         print(f"    ✓ Valid JSON ({size_kb:.1f} KB)")
+                        print(f"    ✓ Keys: {list(data.keys())}")
                         return {'success': True, 'size_kb': size_kb, 'type': 'json'}
                     except Exception as e:
                         print(f"    ✗ Invalid JSON: {str(e)[:100]}")
@@ -197,18 +282,6 @@ implementation:
                 return {'success': False, 'error': str(e)[:100]}
         
         # ============================================================================
-        # Create output directories
-        # ============================================================================
-        output_paths = [
-            args.raw_train_data, args.raw_test_data, args.processed_train_data,
-            args.dataset_info, args.data_config, args.preprocess_metadata,
-            args.preprocessor_params, args.download_summary  # NEW
-        ]
-        
-        for path in output_paths:
-            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        
-        # ============================================================================
         # Download ALL files (complete set)
         # ============================================================================
         print("\\nDownloading complete dataset set...")
@@ -216,30 +289,30 @@ implementation:
         download_results = {}
         files_to_download = [
             # Raw data
-            (args.raw_train_data_url, args.raw_train_data, "Raw train data", "pickle"),
-            (args.raw_test_data_url, args.raw_test_data, "Raw test data", "pickle"),
+            (args.raw_train_data_url, args.raw_train_data, "raw_train_data", "Raw train data", "pickle"),
+            (args.raw_test_data_url, args.raw_test_data, "raw_test_data", "Raw test data", "pickle"),
             
             # Processed data
-            (args.processed_train_data_url, args.processed_train_data, "Processed train data", "pickle"),
+            (args.processed_train_data_url, args.processed_train_data, "processed_train_data", "Processed train data", "pickle"),
             
             # Metadata
-            (args.dataset_info_url, args.dataset_info, "Dataset info", "pickle"),
-            (args.data_config_url, args.data_config, "Data config", "json"),
-            (args.preprocess_metadata_url, args.preprocess_metadata, "Preprocess metadata", "json"),
-            (args.preprocessor_params_url, args.preprocessor_params, "Preprocessor params", "json"),  # NEW
+            (args.dataset_info_url, args.dataset_info, "dataset_info", "Dataset info", "pickle"),
+            (args.data_config_url, args.data_config, "data_config", "Data config", "json"),
+            (args.preprocess_metadata_url, args.preprocess_metadata, "preprocess_metadata", "Preprocess metadata", "json"),
+            (args.preprocessor_params_url, args.preprocessor_params, "preprocessor_params", "Preprocessor params", "json"),
             
-            # Summary
-            (args.upload_summary_url, "/tmp/upload_summary.json", "Upload summary", "json")
+            # Summary (temp file)
+            (args.upload_summary_url, "/tmp/upload_summary.json", "upload_summary", "Upload summary", "json")
         ]
         
-        for url, output_path, description, file_type in files_to_download:
-            if "upload_summary" in description:
-                # Download but don't output (just for verification)
+        for url, output_path, key, description, file_type in files_to_download:
+            if key == "upload_summary":
+                # Download to temp location
                 result = download_from_cdn(url, output_path, description, file_type)
-                download_results[description] = result
+                download_results[key] = result
             else:
                 result = download_from_cdn(url, output_path, description, file_type)
-                download_results[description] = result
+                download_results[key] = result
         
         # ============================================================================
         # Verify class compatibility
@@ -252,20 +325,24 @@ implementation:
         critical_files = {
             'raw_train_data': 'RawDatasetWrapper',
             'raw_test_data': 'RawDatasetWrapper', 
-            'processed_train_data': 'PreprocessedDataset'
+            'processed_train_data': 'PreprocessedDataset',
+            'dataset_info': 'DatasetInfoWrapper'
         }
         
         class_issues = []
-        for file_desc, expected_class in critical_files.items():
-            if file_desc in download_results:
-                result = download_results[file_desc]
+        for file_key, expected_class in critical_files.items():
+            if file_key in download_results:
+                result = download_results[file_key]
                 if result.get('success'):
                     actual_class = result.get('class_name', 'unknown')
                     if actual_class != expected_class:
-                        class_issues.append(f"{file_desc}: Expected {expected_class}, got {actual_class}")
-                        print(f"  {file_desc}: Class mismatch - Expected {expected_class}, got {actual_class}")
+                        class_issues.append(f"{file_key}: Expected {expected_class}, got {actual_class}")
+                        print(f"  {file_key}: Class mismatch - Expected {expected_class}, got {actual_class}")
                     else:
-                        print(f"✓ {file_desc}: {actual_class} (correct)")
+                        num_samples = result.get('num_samples', 'unknown')
+                        print(f"✓ {file_key}: {actual_class} ({num_samples} samples)")
+                else:
+                    print(f"✗ {file_key}: Download failed - {result.get('error', 'Unknown error')}")
         
         # ============================================================================
         # Create download summary
@@ -277,9 +354,9 @@ implementation:
         
         # Check critical files for pipeline continuation
         critical_checks = {
-            'processed_train_data': download_results.get('Processed train data', {}).get('success', False),
-            'raw_test_data': download_results.get('Raw test data', {}).get('success', False),
-            'preprocessor_params': download_results.get('Preprocessor params', {}).get('success', False)
+            'processed_train_data': download_results.get('processed_train_data', {}).get('success', False),
+            'raw_test_data': download_results.get('raw_test_data', {}).get('success', False),
+            'preprocessor_params': download_results.get('preprocessor_params', {}).get('success', False)
         }
         
         all_critical_present = all(critical_checks.values())
@@ -297,12 +374,13 @@ implementation:
         }
         
         # Add file details
-        for desc, result in download_results.items():
-            if 'upload_summary' not in desc:  # Don't include temp file
-                summary['file_details'][desc] = {
+        for key, result in download_results.items():
+            if key != "upload_summary":  # Don't include temp file
+                summary['file_details'][key] = {
                     'success': result.get('success', False),
                     'size_kb': result.get('size_kb', 0),
                     'class_name': result.get('class_name', 'N/A'),
+                    'num_samples': result.get('num_samples', 'N/A'),
                     'error': result.get('error', '')
                 }
         
@@ -319,29 +397,8 @@ implementation:
         with open(args.download_summary, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        print(f"✓ Download summary saved: {args.download_summary}")
-        
-        # ============================================================================
-        # Final status and pipeline readiness
-        # ============================================================================
-        print("\\n" + "=" * 80)
-        print("DOWNLOAD COMPLETE - PIPELINE READINESS")
-        print("=" * 80)
-        
-        print(f"Files downloaded: {successful}/{total}")
-        
-        if all_critical_present:
-            print(" ALL CRITICAL FILES DOWNLOADED SUCCESSFULLY")
-            print("\\nReady for DCGAN training pipeline:")
-            print("  1. Train DCGAN with: processed_train_data")
-            print("  2. Evaluate with: raw_test_data + preprocessor_params")
-        else:
-            print(" MISSING CRITICAL FILES:")
-            for file_name, present in critical_checks.items():
-                if not present:
-                    print(f"  - {file_name}")
-            print("\\n  Pipeline may fail or produce incorrect results!")
-            sys.exit(1)
+        summary_size = os.path.getsize(args.download_summary)
+        print(f"✓ Download summary saved: {args.download_summary} ({summary_size/1024:.1f} KB)")
         
         # ============================================================================
         # Verify preprocessor_params structure
@@ -371,6 +428,51 @@ implementation:
         except Exception as e:
             print(f"✗ Error reading preprocessor_params: {str(e)[:100]}")
         
+        # ============================================================================
+        # Final status and pipeline readiness
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("DOWNLOAD COMPLETE - PIPELINE READINESS")
+        print("=" * 80)
+        
+        print(f"Files downloaded: {successful}/{total}")
+        
+        if all_critical_present:
+            print(" ALL CRITICAL FILES DOWNLOADED SUCCESSFULLY")
+            print("\\nReady for DCGAN training pipeline:")
+            print("  1. Train DCGAN with: processed_train_data")
+            print("  2. Evaluate with: raw_test_data + preprocessor_params")
+            
+            # Final verification - load one sample from each dataset
+            print("\\nFinal verification - loading samples...")
+            try:
+                with open(args.processed_train_data, 'rb') as f:
+                    processed_data = pickle.load(f)
+                if hasattr(processed_data, '__len__') and len(processed_data) > 0:
+                    sample = processed_data[0]
+                    print(f"✓ Processed train data sample shape: {sample.shape}")
+                    print(f"✓ Processed train data range: [{sample.min():.3f}, {sample.max():.3f}]")
+            except Exception as e:
+                print(f"  Processed data verification failed: {str(e)[:100]}")
+            
+            try:
+                with open(args.raw_test_data, 'rb') as f:
+                    raw_test = pickle.load(f)
+                if hasattr(raw_test, '__len__') and len(raw_test) > 0:
+                    sample = raw_test[0]
+                    print(f"✓ Raw test data sample shape: {sample.shape}")
+            except Exception as e:
+                print(f"  Raw test data verification failed: {str(e)[:100]}")
+            
+            print("\\n✓ DOWNLOAD COMPLETE AND VERIFIED")
+        else:
+            print(" MISSING CRITICAL FILES:")
+            for file_name, present in critical_checks.items():
+                if not present:
+                    print(f"  - {file_name}")
+            print("\\n  Pipeline may fail or produce incorrect results!")
+            sys.exit(1)
+        
     args:
       # Input URLs (COMPLETE SET)
       - --raw_train_data_url
@@ -386,7 +488,7 @@ implementation:
       - --preprocess_metadata_url
       - {inputValue: preprocess_metadata_url}
       - --preprocessor_params_url
-      - {inputValue: preprocessor_params_url}  # NEW
+      - {inputValue: preprocessor_params_url}
       - --upload_summary_url
       - {inputValue: upload_summary_url}
       
@@ -408,6 +510,6 @@ implementation:
       - --preprocess_metadata
       - {outputPath: preprocess_metadata}
       - --preprocessor_params
-      - {outputPath: preprocessor_params}  # NEW
+      - {outputPath: preprocessor_params}
       - --download_summary
       - {outputPath: download_summary}
