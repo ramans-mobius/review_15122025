@@ -1,4 +1,4 @@
-name: Upload Data To CDN v10
+name: Upload Data To CDN v11
 description: Uploads actual dataset outputs (images, not metadata) to CDN
 inputs:
   # From Load Dataset v9 - ACTUAL DATA
@@ -17,9 +17,6 @@ inputs:
   - name: processed_train_data
     type: Dataset
     description: "Preprocessed train data (GAN-ready)"
-  - name: processed_test_data
-    type: Dataset
-    description: "Preprocessed test data (GAN-ready)"
   - name: preprocess_metadata
     type: String
   
@@ -44,8 +41,6 @@ outputs:
   
   # Processed data URLs
   - name: processed_train_data_url
-    type: String
-  - name: processed_test_data_url
     type: String
   - name: preprocess_metadata_url
     type: String
@@ -81,7 +76,6 @@ implementation:
         
         # Processed data from Preprocess
         parser.add_argument('--processed_train_data', type=str, required=True)
-        parser.add_argument('--processed_test_data', type=str, required=True)
         parser.add_argument('--preprocess_metadata', type=str, required=True)
         
         # CDN credentials
@@ -95,7 +89,6 @@ implementation:
         parser.add_argument('--dataset_info_url', type=str, required=True)
         parser.add_argument('--data_config_url', type=str, required=True)
         parser.add_argument('--processed_train_data_url', type=str, required=True)
-        parser.add_argument('--processed_test_data_url', type=str, required=True)
         parser.add_argument('--preprocess_metadata_url', type=str, required=True)
         parser.add_argument('--upload_summary', type=str, required=True)
         parser.add_argument('--upload_summary_url', type=str, required=True)
@@ -218,15 +211,8 @@ implementation:
         if result:
             upload_results['processed_train_data'] = result
         
-        # 6. Processed test data
-        result = upload_file_to_cdn(
-            args.processed_test_data, args.processed_test_data_url,
-            "Processed test data (GAN-ready)", "processed_test"
-        )
-        if result:
-            upload_results['processed_test_data'] = result
         
-        # 7. Preprocess metadata
+        # 6. Preprocess metadata
         result = upload_file_to_cdn(
             args.preprocess_metadata, args.preprocess_metadata_url,
             "Preprocess metadata", "preprocess_meta"
@@ -285,8 +271,6 @@ implementation:
       # Processed data inputs
       - --processed_train_data
       - {inputPath: processed_train_data}
-      - --processed_test_data
-      - {inputPath: processed_test_data}
       - --preprocess_metadata
       - {inputPath: preprocess_metadata}
       
@@ -308,10 +292,6 @@ implementation:
       - --data_config_url
       - {outputPath: data_config_url}
       - --processed_train_data_url
-      - {outputPath: processed_train_data_url}
-      - --processed_test_data_url
-      - {outputPath: processed_test_data_url}
-      - --preprocess_metadata_url
       - {outputPath: preprocess_metadata_url}
       - --upload_summary
       - {outputPath: upload_summary}
