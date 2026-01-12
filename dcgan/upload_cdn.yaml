@@ -292,6 +292,8 @@ implementation:
       - --data_config_url
       - {outputPath: data_config_url}
       - --processed_train_data_url
+      - {outputPath: preprocess_train_data_url}
+      - --processed_metadata_url
       - {outputPath: preprocess_metadata_url}
       - --upload_summary
       - {outputPath: upload_summary}
