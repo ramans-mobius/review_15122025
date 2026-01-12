@@ -1,8 +1,9 @@
-name: Preprocess v2
-description: Preprocesses train dataset with single master config
+name: Preprocess v4
+description: Simple preprocessing for already-loaded images
 inputs:
   - name: train_data
     type: Dataset
+    description: "Actual image tensors from Load Dataset"
   - name: dataset_info
     type: DatasetInfo
   - name: master_config
@@ -15,17 +16,11 @@ outputs:
 
 implementation:
   container:
-    image: deepak0147/nessy-facotry:0.0.8
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -c
       - |
-        echo "Checking for torchvision..."
-        python3 -c "import torchvision; print(f'torchvision version: {torchvision.__version__}')" 2>/dev/null || {
-          echo "torchvision not found, installing 0.17.0..."
-          pip install torchvision==0.17.0 pillow
-        }
-        echo "Starting preprocessing..."
         exec "$0" "$@"
       - python3
       - -u
@@ -35,13 +30,8 @@ implementation:
         import os
         import json
         import pickle
-        import base64
-        import io
         import torch
-        import torchvision.transforms as transforms
-        from PIL import Image
         import time
-        import sys
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--train_data', type=str, required=True)
@@ -52,131 +42,29 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("GAN PREPROCESSING STARTING")
+        print("PREPROCESS v4 - SIMPLE PREPROCESSING")
         print("=" * 80)
         
-        # ============================================================================
-        # Define DatasetInfoWrapper class (must match Load Dataset brick)
-        # ============================================================================
-        class DatasetInfoWrapper:
-            def __init__(self, info_dict):
-                self.__dict__.update(info_dict)
+        # Load inputs
+        print("\\nLoading inputs...")
         
-        # ============================================================================
-        # Parse master config with error handling
-        # ============================================================================
-        print("\\nParsing master config...")
-        try:
-            config = json.loads(args.master_config)
-            print("✓ Config parsed successfully")
-            print(f"Config keys: {list(config.keys())}")
-        except json.JSONDecodeError as e:
-            print(f"✗ JSON parsing error: {e}")
-            print("Using default config...")
-            config = {
-                'dataset': {
-                    'image_size': 64,
-                    'channels': 1
-                },
-                'gan': {
-                    'model_type': 'dcgan'
-                }
-            }
-        
-        # Get config parameters
-        dataset_cfg = config.get('dataset', {})
-        gan_cfg = config.get('gan', {})
-        
-        # ============================================================================
-        # Load input data
-        # ============================================================================
-        print("\\nLoading input data...")
-        
-        # Define a safe unpickler
-        class SafeUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                if name == 'DatasetInfoWrapper':
-                    return DatasetInfoWrapper
-                return super().find_class(module, name)
-        
-        # Load train data
         with open(args.train_data, 'rb') as f:
-            train_data = SafeUnpickler(f).load()
-        print(f"✓ Loaded train data: {len(train_data)} samples")
+            train_wrapper = pickle.load(f)
         
-        # Load dataset info
         with open(args.dataset_info, 'rb') as f:
-            dataset_info = SafeUnpickler(f).load()
-        print(f"✓ Loaded dataset info")
+            dataset_info = pickle.load(f)
         
-        # Check if dataset_info has the expected attributes
-        if hasattr(dataset_info, '__dict__'):
-            print(f"Dataset info attributes: {list(dataset_info.__dict__.keys())}")
-            if hasattr(dataset_info, 'image_size'):
-                print(f"  Image size from dataset info: {dataset_info.image_size}")
-            if hasattr(dataset_info, 'channels'):
-                print(f"  Channels from dataset info: {dataset_info.channels}")
+        print(f"✓ Loaded {len(train_wrapper)} training samples")
         
-        # ============================================================================
-        # Get parameters
-        # ============================================================================
-        # Try to get from dataset_info first, then config
-        if hasattr(dataset_info, 'image_size'):
-            image_size = dataset_info.image_size
-        else:
-            image_size = gan_cfg.get('image_size', dataset_cfg.get('image_size', 64))
+        # Verify data
+        sample = train_wrapper[0]
+        print(f"✓ Sample shape: {sample.shape}")
+        print(f"✓ Sample type: {type(sample)}")
         
-        if hasattr(dataset_info, 'channels'):
-            channels = dataset_info.channels
-        else:
-            channels = gan_cfg.get('channels', dataset_cfg.get('channels', 1))
-        
-        model_type = gan_cfg.get('model_type', 'dcgan')
-        
-        print(f"\\nProcessing parameters:")
-        print(f"  Model type: {model_type}")
-        print(f"  Image size: {image_size}")
-        print(f"  Channels: {channels}")
-        
-        # ============================================================================
-        # Define GAN-specific classes
-        # ============================================================================
-        class GANDataset:
-            def __init__(self, data_list, transform=None, image_size=64, channels=3):
-                self.data_list = data_list
-                self.transform = transform
-                self.image_size = image_size
-                self.channels = channels
-            
-            def __len__(self):
-                return len(self.data_list)
-            
-            def __getitem__(self, idx):
-                item = self.data_list[idx]
-                try:
-                    # Create a dummy image since we don't have real images
-                    if self.channels == 1:
-                        img = Image.new('L', (self.image_size, self.image_size), color=128)
-                    else:
-                        img = Image.new('RGB', (self.image_size, self.image_size), color=(128, 128, 128))
-                    
-                    if self.transform:
-                        img = self.transform(img)
-                    
-                    return img
-                except Exception as e:
-                    print(f"Error creating dummy image {idx}: {e}")
-                    return torch.zeros(self.channels, self.image_size, self.image_size)
-        
-        class GANDataWrapper:
-            def __init__(self, dataset, model_type='dcgan', image_size=64, channels=3, 
-                        transform_params=None):
+        # Create preprocessing wrapper
+        class PreprocessedDataset:
+            def __init__(self, dataset):
                 self.dataset = dataset
-                self.model_type = model_type
-                self.image_size = image_size
-                self.channels = channels
-                self.transform_params = transform_params or {}
-                self.num_samples = len(dataset)
             
             def __len__(self):
                 return len(self.dataset)
@@ -185,106 +73,27 @@ implementation:
                 return self.dataset[idx]
         
         class PreprocessMetadata:
-            def __init__(self, image_size=64, channels=3, model_type='dcgan',
-                        mean=(0.5,), std=(0.5,), transform_params=None):
-                self.image_size = image_size
-                self.channels = channels
-                self.model_type = model_type
-                self.mean = mean
-                self.std = std
-                self.transform_params = transform_params or {}
+            def __init__(self):
+                self.preprocessing_applied = 'none'  # Already preprocessed by Load Dataset
                 self.timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ')
+                self.num_samples = len(train_wrapper)
         
-        # ============================================================================
-        # Create transform
-        # ============================================================================
-        print("\\nCreating transforms...")
-        if channels == 1:
-            transform = transforms.Compose([
-                transforms.Resize(image_size),
-                transforms.CenterCrop(image_size),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,))
-            ])
-            mean = (0.5,)
-            std = (0.5,)
-        else:
-            transform = transforms.Compose([
-                transforms.Resize(image_size),
-                transforms.CenterCrop(image_size),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-            ])
-            mean = (0.5, 0.5, 0.5)
-            std = (0.5, 0.5, 0.5)
+        # Create outputs
+        processed_dataset = PreprocessedDataset(train_wrapper)
+        preprocess_meta = PreprocessMetadata()
         
-        # ============================================================================
-        # Create dataset and wrapper
-        # ============================================================================
-        print("Creating dataset...")
-        dataset = GANDataset(train_data, transform, image_size, channels)
-        
-        transform_params = {
-            'resize': image_size,
-            'center_crop': image_size,
-            'normalize_mean': mean,
-            'normalize_std': std
-        }
-        
-        data_wrapper = GANDataWrapper(
-            dataset=dataset,
-            model_type=model_type,
-            image_size=image_size,
-            channels=channels,
-            transform_params=transform_params
-        )
-        
-        # ============================================================================
-        # Create and save preprocessing metadata
-        # ============================================================================
-        print("Creating preprocessing metadata...")
-        preprocess_meta = PreprocessMetadata(
-            image_size=image_size,
-            channels=channels,
-            model_type=model_type,
-            mean=mean,
-            std=std,
-            transform_params=transform_params
-        )
-        
-        # ============================================================================
         # Save outputs
-        # ============================================================================
-        print("\\nSaving outputs...")
-        
-        # Create output directories
         os.makedirs(os.path.dirname(args.processed_data) or '.', exist_ok=True)
-        os.makedirs(os.path.dirname(args.preprocess_metadata) or '.', exist_ok=True)
         
-        # Save processed data
         with open(args.processed_data, 'wb') as f:
-            pickle.dump(data_wrapper, f)
-        print(f"✓ Processed data saved: {args.processed_data}")
+            pickle.dump(processed_dataset, f)
         
-        # Save preprocessing metadata
         with open(args.preprocess_metadata, 'wb') as f:
             pickle.dump(preprocess_meta, f)
-        print(f"✓ Preprocess metadata saved: {args.preprocess_metadata}")
         
-        # ============================================================================
-        # Final summary
-        # ============================================================================
-        print("\\n" + "=" * 80)
-        print("PREPROCESSING COMPLETE!")
-        print("=" * 80)
-        print(f"Summary:")
-        print(f"  - Processed samples: {len(dataset)}")
-        print(f"  - Image size: {image_size}x{image_size}")
-        print(f"  - Channels: {channels}")
-        print(f"  - Model type: {model_type}")
-        print(f"\\nOutput files:")
-        print(f"  1. Processed data: {args.processed_data}")
-        print(f"  2. Preprocess metadata: {args.preprocess_metadata}")
+        print(f"\\n✓ Preprocessing complete")
+        print(f"  Processed data saved: {args.processed_data}")
+        print(f"  Samples: {len(processed_dataset)}")
         
     args:
       - --train_data
