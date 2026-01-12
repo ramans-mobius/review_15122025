@@ -1,4 +1,4 @@
-name: Trigger Pipeline v15
+name: Trigger Pipeline v16
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -424,7 +424,7 @@ implementation:
       - {inputValue: dqn_pipeline_id}
       - --rlaf_schema
       - {inputValue: rlaf_schema}
-      - train_schema
+      - --train_schema
       - {inputValue: train_schema}
       - --model_id
       - {inputValue: model_id}
