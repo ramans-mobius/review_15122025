@@ -1,4 +1,4 @@
-name: Build or Load Model v13
+name: Build or Load Model v14
 description: Builds CNN model using nesyfactory with dropout fix and schema support
 inputs:
   - name: config_str
@@ -85,7 +85,6 @@ implementation:
                     self.criterion = torch.nn.CrossEntropyLoss()
         
         def build_model_from_config(config_dict):
-            """Build a model from configuration dictionary"""
             try:
                 print(f"Building model with config: {json.dumps(config_dict, indent=2)}")
                 
@@ -132,7 +131,7 @@ implementation:
                 return None, None
         
         def load_weights_and_build_model(weights_url, config, source_info):
-            """Download weights and load them into a model"""
+       
             try:
                 print(f"Loading model weights from: {weights_url}")
                 
