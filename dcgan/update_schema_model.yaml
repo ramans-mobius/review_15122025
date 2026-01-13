@@ -1,0 +1,800 @@
+name: Upload Model Schema v1
+description: Uploads trained DCGAN model to schema database with CDN storage
+inputs:
+  # Model inputs
+  - name: trained_model
+    type: Model
+    description: "Trained DCGAN model from training brick"
+  - name: master_config
+    type: String
+    description: "Master configuration JSON"
+  - name: model_info
+    type: String
+    description: "Model info from build/training brick"
+  
+  # Schema parameters
+  - name: load_from_schema
+    type: String
+    default: "false"
+    description: "Whether to load from schema (true/false)"
+  - name: schema_id
+    type: String
+    description: "Schema ID for model database"
+  - name: bearer_token
+    type: String
+    description: "Bearer token for authentication"
+  - name: model_id
+    type: String
+    description: "Model identifier"
+  - name: execution_id
+    type: String
+    description: "Execution ID (will be converted to integer)"
+  - name: tenant_id
+    type: String
+    description: "Tenant ID for schema"
+  - name: project_id
+    type: String
+    description: "Project ID for schema"
+  - name: model_name
+    type: String
+    description: "Model name for schema"
+  - name: architecture_type
+    type: String
+    default: "FFN"
+    description: "Architecture type (must be valid ENUM: CNN, GRM, transformer, clustering, FFN)"
+  
+  # CDN parameters
+  - name: domain
+    type: String
+    description: "CDN upload domain"
+  - name: get_cdn
+    type: String
+    description: "CDN URL prefix"
+  
+  # Optional: Training outputs for metadata
+  - name: training_history
+    type: String
+    default: ""
+    description: "Training history JSON (optional)"
+  - name: training_metrics
+    type: String
+    default: ""
+    description: "Training metrics JSON (optional)"
+
+outputs:
+  - name: upload_status
+    type: String
+    description: "Upload status and results"
+  - name: schema_response
+    type: String
+    description: "Response from schema API"
+  - name: updated_execution_id
+    type: String
+    description: "Updated execution ID (incremented if load_from_schema=true)"
+  - name: cdn_urls
+    type: String
+    description: "CDN URLs for weights and metadata"
+  - name: schema_entry
+    type: String
+    description: "Complete schema entry that was created/updated"
+
+implementation:
+  container:
+    image: deepak0147/nessy-facotry:0.0.9
+    command:
+      - sh
+      - -c
+      - |
+        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import torch
+        import argparse
+        import json
+        import os
+        import sys
+        import uuid
+        import subprocess
+        import tempfile
+        import time
+        from datetime import datetime
+        
+        parser = argparse.ArgumentParser()
+        
+        # Model inputs
+        parser.add_argument('--trained_model', type=str, required=True)
+        parser.add_argument('--master_config', type=str, required=True)
+        parser.add_argument('--model_info', type=str, required=True)
+        
+        # Schema parameters
+        parser.add_argument('--load_from_schema', type=str, default='false')
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--bearer_token', type=str, required=True)
+        parser.add_argument('--model_id', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)
+        parser.add_argument('--tenant_id', type=str, required=True)
+        parser.add_argument('--project_id', type=str, required=True)
+        parser.add_argument('--model_name', type=str, required=True)
+        parser.add_argument('--architecture_type', type=str, default='FFN')
+        
+        # CDN parameters
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--get_cdn', type=str, required=True)
+        
+        # Optional training outputs
+        parser.add_argument('--training_history', type=str, default='')
+        parser.add_argument('--training_metrics', type=str, default='')
+        
+        # Outputs
+        parser.add_argument('--upload_status', type=str, required=True)
+        parser.add_argument('--schema_response', type=str, required=True)
+        parser.add_argument('--updated_execution_id', type=str, required=True)
+        parser.add_argument('--cdn_urls', type=str, required=True)
+        parser.add_argument('--schema_entry', type=str, required=True)
+        
+        args = parser.parse_args()
+        
+        print("=" * 80)
+        print("UPLOAD TRAINED MODEL TO SCHEMA v1")
+        print("=" * 80)
+        
+        # ============================================================================
+        # Validate architecture_type
+        # ============================================================================
+        valid_architecture_types = ["CNN", "GRM", "transformer", "clustering", "FFN"]
+        
+        if args.architecture_type.upper() not in [atype.upper() for atype in valid_architecture_types]:
+            print(f"WARNING: architecture_type '{args.architecture_type}' is not in valid ENUM values")
+            print(f"Valid values: {valid_architecture_types}")
+            print(f"Using 'FFN' as default")
+            architecture_type = "FFN"
+        else:
+            # Map to correct case
+            for valid_type in valid_architecture_types:
+                if valid_type.upper() == args.architecture_type.upper():
+                    architecture_type = valid_type
+                    break
+        
+        # ============================================================================
+        # Create output directories
+        # ============================================================================
+        print("\\nCreating output directories...")
+        
+        output_paths = [
+            args.upload_status,
+            args.schema_response,
+            args.updated_execution_id,
+            args.cdn_urls,
+            args.schema_entry
+        ]
+        
+        for path in output_paths:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"  Created: {dir_path}")
+        
+        # ============================================================================
+        # Read bearer token
+        # ============================================================================
+        with open(args.bearer_token, 'r') as f:
+            bearer_token = f.read().strip()
+        
+        # ============================================================================
+        # Parse inputs
+        # ============================================================================
+        load_from_schema = args.load_from_schema.lower() == 'true'
+        
+        try:
+            execution_id = int(args.execution_id)
+        except ValueError:
+            print(f"ERROR: execution_id must be an integer. Got: {args.execution_id}")
+            sys.exit(1)
+        
+        print(f"\\nParameters:")
+        print(f"  Schema ID: {args.schema_id}")
+        print(f"  Model ID: {args.model_id}")
+        print(f"  Initial Execution ID: {execution_id}")
+        print(f"  Load from schema: {load_from_schema}")
+        print(f"  Tenant ID: {args.tenant_id}")
+        print(f"  Project ID: {args.project_id}")
+        print(f"  Model Name: {args.model_name}")
+        print(f"  Architecture Type: {architecture_type}")
+        
+        # ============================================================================
+        # Load model and config data
+        # ============================================================================
+        print(f"\\nLoading model and configuration...")
+        
+        try:
+            # Load trained model checkpoint
+            if not os.path.exists(args.trained_model):
+                print(f"ERROR: Model file not found: {args.trained_model}")
+                sys.exit(1)
+            
+            checkpoint = torch.load(args.trained_model, map_location='cpu')
+            print(f"✓ Loaded model checkpoint: {args.trained_model}")
+            print(f"  Checkpoint keys: {list(checkpoint.keys())}")
+            
+            # Load master config
+            with open(args.master_config, 'r') as f:
+                master_config = json.load(f)
+            
+            # Load model info
+            with open(args.model_info, 'r') as f:
+                model_info = json.load(f)
+            
+            # Load optional training data
+            training_data = {}
+            if args.training_history and os.path.exists(args.training_history):
+                with open(args.training_history, 'r') as f:
+                    training_data['history'] = json.load(f)
+            
+            if args.training_metrics and os.path.exists(args.training_metrics):
+                with open(args.training_metrics, 'r') as f:
+                    training_data['metrics'] = json.load(f)
+            
+        except Exception as e:
+            print(f"ERROR loading inputs: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        
+        # ============================================================================
+        # CDN Upload Functions
+        # ============================================================================
+        
+        def upload_to_cdn(file_path, description, file_type="model"):
+           
+            if not os.path.exists(file_path):
+                print(f"  ✗ File not found: {file_path}")
+                return None
+            
+            file_size = os.path.getsize(file_path)
+            size_mb = file_size / (1024 * 1024)
+            
+            print(f"  Uploading {description} ({size_mb:.2f} MB)...")
+            
+            # Generate unique filename
+            unique_id = str(uuid.uuid4())[:8]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Determine extension
+            if file_type == "model":
+                extension = ".pth"
+                file_tag = "weights"
+            elif file_type == "config":
+                extension = ".json"
+                file_tag = "config"
+            elif file_type == "metadata":
+                extension = ".json"
+                file_tag = "metadata"
+            else:
+                extension = ".bin"
+                file_tag = "file"
+            
+            cdn_filename = f"dcgan_{args.model_id}_{file_tag}_{timestamp}_{unique_id}{extension}"
+            
+            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
+            
+            curl_command = [
+                "curl",
+                "--location", upload_url,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--form", f"file=@{file_path}",
+                "--form", f"filename={cdn_filename}",
+                "--fail",
+                "--show-error",
+                "--connect-timeout", "30",
+                "--max-time", "120",
+                "--silent"
+            ]
+            
+            try:
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                response_json = json.loads(process.stdout)
+                relative_cdn_url = response_json.get("cdnUrl", "")
+                
+                if not relative_cdn_url:
+                    print(f"    ✗ Error: No cdnUrl in response")
+                    print(f"    Response: {process.stdout[:200]}")
+                    return None
+                
+                full_url = f"{args.get_cdn}{relative_cdn_url}"
+                print(f"    ✓ Uploaded: {cdn_filename}")
+                print(f"    URL: {full_url[:80]}...")
+                
+                return {
+                    'url': full_url,
+                    'filename': cdn_filename,
+                    'size_bytes': file_size,
+                    'description': description
+                }
+                
+            except subprocess.CalledProcessError as e:
+                print(f"    ✗ Upload failed: {e.stderr[:200]}")
+                return None
+            except json.JSONDecodeError:
+                print(f"    ✗ Invalid JSON response: {process.stdout[:200]}")
+                return None
+            except Exception as e:
+                print(f"    ✗ Error: {str(e)[:100]}")
+                return None
+        
+        # ============================================================================
+        # Check existing schema entries
+        # ============================================================================
+        def check_existing_schema():
+         
+            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list?size=1000"
+            
+            headers = {
+                'Authorization': f'Bearer {bearer_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            filter_data = {
+                "dbType": "TIDB",
+                "ownedOnly": True,
+                "filter": {
+                    "model_id": args.model_id,
+                    "execution_id": execution_id
+                }
+            }
+            
+            try:
+                print(f"Checking existing schema entries...")
+                
+                curl_command = [
+                    "curl",
+                    "--location", schema_url,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", "Content-Type: application/json",
+                    "--data", json.dumps(filter_data),
+                    "--fail",
+                    "--show-error",
+                    "--connect-timeout", "30",
+                    "--max-time", "60",
+                    "--silent"
+                ]
+                
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                response_json = json.loads(process.stdout)
+                
+                if 'content' in response_json and len(response_json['content']) > 0:
+                    print(f"  Found existing entry for model_id={args.model_id}, execution_id={execution_id}")
+                    return response_json['content'][0], True
+                else:
+                    print(f"  No existing entry found for model_id={args.model_id}, execution_id={execution_id}")
+                    return None, False
+                    
+            except subprocess.CalledProcessError as e:
+                print(f"  ✗ Failed to check schema: {e.stderr[:200]}")
+                return None, False
+            except Exception as e:
+                print(f"  ✗ Error checking schema: {str(e)[:100]}")
+                return None, False
+        
+        # ============================================================================
+        # Handle execution_id logic
+        # ============================================================================
+        print(f"\\nChecking schema entries...")
+        
+        original_execution_id = execution_id
+        
+        if load_from_schema:
+            # Check if entry exists, if so increment execution_id
+            existing_entry, exists = check_existing_schema()
+            if exists:
+                print(f"  Existing entry found. Incrementing execution_id...")
+                execution_id += 1
+                print(f"  New execution_id: {execution_id}")
+            else:
+                print(f"  No existing entry found. Keeping execution_id: {execution_id}")
+        else:
+            print(f"  load_from_schema=false, using provided execution_id: {execution_id}")
+        
+        # Save updated execution_id
+        with open(args.updated_execution_id, 'w') as f:
+            f.write(str(execution_id))
+        
+        # ============================================================================
+        # Prepare files for CDN upload
+        # ============================================================================
+        print(f"\\nPreparing files for CDN upload...")
+        
+        # 1. Upload model weights
+        print(f"1. Uploading model weights...")
+        model_weights_url = upload_to_cdn(args.trained_model, "Model weights", "model")
+        
+        if not model_weights_url:
+            print(f"✗ Failed to upload model weights!")
+            sys.exit(1)
+        
+        # 2. Create and upload model metadata
+        print(f"\\n2. Creating and uploading model metadata...")
+        
+        # Extract model information
+        gan_cfg = master_config.get('gan', {})
+        dataset_cfg = master_config.get('dataset', {})
+        
+        # Calculate parameter count
+        total_params = 0
+        if 'generator_params' in model_info and 'discriminator_params' in model_info:
+            total_params = model_info['generator_params'] + model_info['discriminator_params']
+        elif 'generator_state_dict' in checkpoint and 'discriminator_state_dict' in checkpoint:
+            # Calculate from state dicts
+            gen_params = sum(p.numel() for p in checkpoint['generator_state_dict'].values())
+            disc_params = sum(p.numel() for p in checkpoint['discriminator_state_dict'].values())
+            total_params = gen_params + disc_params
+        
+        # Create metadata JSON
+        metadata = {
+            'model_id': args.model_id,
+            'execution_id': execution_id,
+            'model_name': args.model_name,
+            'tenant_id': args.tenant_id,
+            'project_id': args.project_id,
+            'upload_timestamp': datetime.now().isoformat(),
+            'model_info': model_info,
+            'training_config': gan_cfg.get('training', {}),
+            'dataset_config': dataset_cfg,
+            'generator_config': gan_cfg.get('generator', {}),
+            'discriminator_config': gan_cfg.get('discriminator', {}),
+            'parameter_count': total_params,
+            'architecture_type': architecture_type,
+            'source': 'auto-generated',
+            'created_by': 'dcgan_pipeline'
+        }
+        
+        # Add training data if available
+        if training_data:
+            metadata['training_data'] = training_data
+        
+        # Save metadata to temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_file:
+            json.dump(metadata, tmp_file, indent=2)
+            metadata_path = tmp_file.name
+        
+        # Upload metadata
+        model_metadata_url = upload_to_cdn(metadata_path, "Model metadata", "metadata")
+        
+        if not model_metadata_url:
+            print(f"✗ Failed to upload model metadata!")
+            os.unlink(metadata_path)
+            sys.exit(1)
+        
+        # Clean up temp file
+        os.unlink(metadata_path)
+        
+        # Save CDN URLs
+        cdn_urls_data = {
+            'model_weights_cdn': model_weights_url['url'],
+            'model_metadata_cdn': model_metadata_url['url'],
+            'weights_filename': model_weights_url['filename'],
+            'metadata_filename': model_metadata_url['filename'],
+            'upload_timestamp': datetime.now().isoformat()
+        }
+        
+        with open(args.cdn_urls, 'w') as f:
+            json.dump(cdn_urls_data, f, indent=2)
+        
+        print(f"\\n✓ CDN uploads completed:")
+        print(f"  Weights: {model_weights_url['filename']}")
+        print(f"  Metadata: {model_metadata_url['filename']}")
+        
+        # ============================================================================
+        # Prepare schema entry with required fields validation
+        # ============================================================================
+        print(f"\\nPreparing schema entry...")
+        
+        # Extract shapes from model info
+        input_shape = str(model_info.get('latent_dim', 100))
+        
+        # Get output shape from model info or config
+        image_size = dataset_cfg.get('image_size', 32)
+        channels = dataset_cfg.get('channels', 1)
+        output_shape = f"[{channels}, {image_size}, {image_size}]"
+        
+        # Create model_specific_config JSON
+        model_specific_config = {
+            "training_algorithm": gan_cfg.get('training', {}).get('algorithm', 'backprop'),
+            "image_size": image_size,
+            "channels": channels,
+            "latent_dim": model_info.get('latent_dim', 100),
+            "batch_size": gan_cfg.get('training', {}).get('batch_size', 16),
+            "epochs": gan_cfg.get('training', {}).get('epochs', 2),
+            "use_cafo": model_info.get('use_cafo', False),
+            "use_forward_forward": model_info.get('use_forward_forward', False),
+            "block_training_enabled": model_info.get('block_training_enabled', False),
+            "architecture_type": architecture_type,
+            "generator_params": model_info.get('generator_params', 0),
+            "discriminator_params": model_info.get('discriminator_params', 0)
+        }
+        
+        # REQUIRED FIELDS according to schema
+        required_fields = {
+            "tenant_id": args.tenant_id,
+            "model_id": args.model_id,
+            "execution_id": execution_id,
+            "projectId": args.project_id,  # Note: capital 'I' as per schema
+            "name": args.model_name
+        }
+        
+        # OPTIONAL FIELDS
+        optional_fields = {
+            "output_shape": output_shape,
+            "input_shape": input_shape,
+            "parameter_count": str(total_params),
+            "model_weights_cdn": model_weights_url['url'],
+            "model_metadata_cdn": model_metadata_url['url'],
+            "architecture_type": architecture_type,
+            "source": "auto-generated",
+            "created_by": "dcgan_pipeline",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model_specific_config": json.dumps(model_specific_config)
+        }
+        
+        # Create schema entry with all fields
+        schema_entry = {**required_fields, **optional_fields}
+        
+        # Add optional fields if available
+        if 'experiment_id' in model_info:
+            schema_entry["experiment_id"] = model_info['experiment_id']
+        
+        # Save schema entry
+        with open(args.schema_entry, 'w') as f:
+            json.dump(schema_entry, f, indent=2)
+        
+        print(f"✓ Schema entry prepared:")
+        print(f"  Model: {args.model_name}")
+        print(f"  Execution ID: {execution_id}")
+        print(f"  Architecture: {architecture_type}")
+        print(f"  Parameters: {total_params:,}")
+        print(f"  Input shape: {input_shape}")
+        print(f"  Output shape: {output_shape}")
+        
+        # ============================================================================
+        # Upload to schema (with proper handling for update/create)
+        # ============================================================================
+        print(f"\\nUploading to schema...")
+        
+        schema_create_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create"
+        
+        # Check if we should update or create
+        if load_from_schema:
+            existing_entry, exists = check_existing_schema()
+            if exists:
+                # Update existing entry
+                print(f"  Updating existing schema entry...")
+                schema_update_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/update"
+                
+                # Merge existing data with new data (preserve existing IDs)
+                for key in ['id', 'createdTimeMs', 'versionedConstructId', 'parentConstructId']:
+                    if key in existing_entry:
+                        schema_entry[key] = existing_entry[key]
+                
+                # Ensure all required fields are present for update
+                for field in required_fields:
+                    if field not in schema_entry:
+                        schema_entry[field] = required_fields[field]
+                
+                curl_command = [
+                    "curl",
+                    "--location", schema_update_url,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", "Content-Type: application/json",
+                    "--data", json.dumps(schema_entry),
+                    "--fail",
+                    "--show-error",
+                    "--connect-timeout", "30",
+                    "--max-time", "60",
+                    "--silent"
+                ]
+            else:
+                # Create new entry
+                print(f"  Creating new schema entry...")
+                curl_command = [
+                    "curl",
+                    "--location", schema_create_url,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", "Content-Type: application/json",
+                    "--data", json.dumps(schema_entry),
+                    "--fail",
+                    "--show-error",
+                    "--connect-timeout", "30",
+                    "--max-time", "60",
+                    "--silent"
+                ]
+        else:
+            # Always create new entry
+            print(f"  Creating new schema entry...")
+            curl_command = [
+                "curl",
+                "--location", schema_create_url,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--header", "Content-Type: application/json",
+                "--data", json.dumps(schema_entry),
+                "--fail",
+                "--show-error",
+                "--connect-timeout", "30",
+                "--max-time", "60",
+                "--silent"
+            ]
+        
+        try:
+            process = subprocess.run(
+                curl_command,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            schema_response = json.loads(process.stdout)
+            
+            # Save schema response
+            with open(args.schema_response, 'w') as f:
+                json.dump(schema_response, f, indent=2)
+            
+            print(f"✓ Schema upload successful!")
+            print(f"  Response ID: {schema_response.get('id', 'N/A')}")
+            print(f"  Status: {schema_response.get('status', 'success')}")
+            print(f"  Operation: {'UPDATE' if (load_from_schema and exists) else 'CREATE'}")
+            
+            success = True
+            
+        except subprocess.CalledProcessError as e:
+            print(f"✗ Schema upload failed: {e.stderr[:200]}")
+            schema_response = {"error": e.stderr, "stdout": e.stdout}
+            success = False
+        except json.JSONDecodeError:
+            print(f"✗ Invalid JSON response from schema")
+            schema_response = {"error": "Invalid JSON response", "raw": process.stdout[:500]}
+            success = False
+        except Exception as e:
+            print(f"✗ Error uploading to schema: {str(e)[:100]}")
+            schema_response = {"error": str(e)}
+            success = False
+        
+        # ============================================================================
+        # Create upload status
+        # ============================================================================
+        print(f"\\nCreating upload status...")
+        
+        upload_status = {
+            'success': success,
+            'timestamp': datetime.now().isoformat(),
+            'model_id': args.model_id,
+            'model_name': args.model_name,
+            'execution_id': execution_id,
+            'original_execution_id': original_execution_id,
+            'execution_id_incremented': execution_id != original_execution_id,
+            'load_from_schema': load_from_schema,
+            'schema_operation': 'update' if (load_from_schema and exists) else 'create',
+            'architecture_type': architecture_type,
+            'cdn_uploads': {
+                'weights': {
+                    'success': model_weights_url is not None,
+                    'url': model_weights_url['url'] if model_weights_url else None,
+                    'filename': model_weights_url['filename'] if model_weights_url else None
+                },
+                'metadata': {
+                    'success': model_metadata_url is not None,
+                    'url': model_metadata_url['url'] if model_metadata_url else None,
+                    'filename': model_metadata_url['filename'] if model_metadata_url else None
+                }
+            },
+            'schema_response': schema_response if success else {"error": str(schema_response.get('error', 'Unknown error'))},
+            'model_info_summary': {
+                'architecture_type': architecture_type,
+                'parameter_count': total_params,
+                'input_shape': input_shape,
+                'output_shape': output_shape,
+                'training_algorithm': gan_cfg.get('training', {}).get('algorithm', 'backprop'),
+                'image_size': image_size,
+                'channels': channels
+            }
+        }
+        
+        with open(args.upload_status, 'w') as f:
+            json.dump(upload_status, f, indent=2)
+        
+        # ============================================================================
+        # Final summary
+        # ============================================================================
+        print(f"\\n" + "=" * 80)
+        if success:
+            print("✓ UPLOAD COMPLETED SUCCESSFULLY!")
+        else:
+            print("✗ UPLOAD COMPLETED WITH ERRORS")
+        print("=" * 80)
+        
+        print(f"\\nSummary:")
+        print(f"  Model: {args.model_name} ({args.model_id})")
+        print(f"  Execution ID: {execution_id} ({'incremented' if execution_id != original_execution_id else 'original'})")
+        print(f"  Architecture: {architecture_type}")
+        print(f"  Total Parameters: {total_params:,}")
+        print(f"  CDN Uploads: 2/2 {'✓' if model_weights_url and model_metadata_url else '✗'}")
+        print(f"  Schema Upload: {'✓' if success else '✗'}")
+        print(f"  Schema Operation: {'UPDATE' if (load_from_schema and exists) else 'CREATE'}")
+        print(f"  Load from Schema: {load_from_schema}")
+        
+        if model_weights_url:
+            print(f"\\nWeights URL: {model_weights_url['url'][:100]}...")
+        
+        if model_metadata_url:
+            print(f"Metadata URL: {model_metadata_url['url'][:100]}...")
+        
+        print("=" * 80)
+        
+        if not success:
+            sys.exit(1)
+
+    args:
+      # Model inputs
+      - --trained_model
+      - {inputPath: trained_model}
+      - --master_config
+      - {inputValue: master_config}
+      - --model_info
+      - {inputPath: model_info}
+      
+      # Schema parameters
+      - --load_from_schema
+      - {inputValue: load_from_schema}
+      - --schema_id
+      - {inputValue: schema_id}
+      - --bearer_token
+      - {inputValue: bearer_token}
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --tenant_id
+      - {inputValue: tenant_id}
+      - --project_id
+      - {inputValue: project_id}
+      - --model_name
+      - {inputValue: model_name}
+      - --architecture_type
+      - {inputValue: architecture_type}
+      
+      # CDN parameters
+      - --domain
+      - {inputValue: domain}
+      - --get_cdn
+      - {inputValue: get_cdn}
+      
+      # Optional training outputs
+      - --training_history
+      - {inputPath: training_history}
+      - --training_metrics
+      - {inputPath: training_metrics}
+      
+      # Outputs
+      - --upload_status
+      - {outputPath: upload_status}
+      - --schema_response
+      - {outputPath: schema_response}
+      - --updated_execution_id
+      - {outputPath: updated_execution_id}
+      - --cdn_urls
+      - {outputPath: cdn_urls}
+      - --schema_entry
+      - {outputPath: schema_entry}
