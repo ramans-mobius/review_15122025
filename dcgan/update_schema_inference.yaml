@@ -1,0 +1,255 @@
+name: Upload DCGAN Inference to Schema
+description: Uploads DCGAN inference results to inference schema using the Update Schema Row format
+inputs:
+  - name: schema_data_json
+    type: String
+    description: "Data from inference brick in JSON format"
+  - name: schema_id
+    type: String
+    description: "Schema ID (default: 692b0ce8fd9c66658f22d723)"
+    default: "692b0ce8fd9c66658f22d723"
+  - name: bearer_auth_token
+    type: String
+    description: "Bearer token for authentication"
+  - name: domain
+    type: String
+    description: "API domain"
+  - name: tenant_id
+    type: String
+    description: "Tenant ID file"
+    default: "-1"
+  - name: architecture_type
+    type: String
+    description: "Architecture type"
+    default: "DCGAN"
+outputs:
+  - name: upload_status
+    type: String
+    description: "Status of upload operation"
+  - name: upload_response
+    type: String
+    description: "Full response from API"
+
+implementation:
+  container:
+    image: python:3.9-slim
+    command:
+      - sh
+      - -c
+      - |
+        pip install requests > /dev/null 2>&1
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import json, argparse, requests, sys
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--schema_data_json', type=str, required=True)
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--bearer_auth_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--tenant_id', type=str, default='-1')
+        parser.add_argument('--architecture_type', type=str, default='DCGAN')
+        parser.add_argument('--upload_status', type=str, required=True)
+        parser.add_argument('--upload_response', type=str, required=True)
+        args = parser.parse_args()
+        
+        print('=' * 80)
+        print('UPLOAD TO INFERENCE SCHEMA')
+        print('=' * 80)
+        
+        # Load data from inference brick
+        with open(args.schema_data_json, 'r') as f:
+            inference_data = json.load(f)
+        
+        # Read bearer token
+        with open(args.bearer_auth_token, 'r') as f:
+            bearer_token = f.read().strip()
+        
+        # ============================================================================
+        # PREPARE DATA FOR UPDATE SCHEMA ROW BRICK
+        # ============================================================================
+        
+        # Extract execution_id and model_id from inference data
+        execution_id = inference_data.get('execution_id', 'unknown')
+        model_id = inference_data.get('model_id', 'unknown')
+        project_id = inference_data.get('projectId', 'unknown')
+        
+        print(f"\\nProcessing inference data:")
+        print(f"  Execution ID: {execution_id}")
+        print(f"  Model ID: {model_id}")
+        print(f"  Project ID: {project_id}")
+        
+        # Create mapping based on your schema attributes
+        mapping = {
+            # Required fields
+            "model_id": "model_id",
+            "execution_id": "execution_id",
+            "projectId": "projectId",
+            
+            # Metrics (matching your schema)
+            "fid": "fid",
+            "ssim": "ssim", 
+            "psnr": "psnr",
+            
+            # Other fields
+            "tenant_id": "tenant_id",
+            "ModelName": "ModelName",
+            "architecture_type": "architecture_type",
+            "predicted_class": "predicted_class",
+            "infernce_input": "infernce_input",
+            "infernce_output": "infernce_output",
+            "infernce_score_blue": "infernce_score_blue",
+            "inference_confidence": "inference_confidence",
+            "inference_score_rouge": "inference_score_rouge",
+            "total_samples": "total_samples"
+        }
+        
+        # Create multiple rows JSON format for Update Schema Row brick
+        multiple_rows = [inference_data]
+        
+        # Define which keys should be converted to float
+        float_keys = ["fid", "ssim", "psnr", "infernce_score_blue", "inference_confidence", 
+                     "inference_score_rouge", "total_samples"]
+        
+        # ============================================================================
+        # CALL UPDATE SCHEMA ROW API
+        # ============================================================================
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_token}'
+        }
+        
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[408, 500, 502, 503, 504],
+            allowed_methods=["POST", "PATCH"],
+            backoff_factor=1
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        http = requests.Session()
+        http.mount("https://", adapter)
+        http.mount("http://", adapter)
+        
+        # Prepare create request (since we have execution_id, we'll create new row)
+        create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+        
+        # Prepare data for creation
+        creation_data = []
+        for row in multiple_rows:
+            data_row = {}
+            for schema_field, data_field in mapping.items():
+                if data_field in row and row[data_field] is not None:
+                    # Convert to float if needed
+                    if data_field in float_keys and row[data_field] is not None:
+                        try:
+                            data_row[schema_field] = float(row[data_field])
+                        except (ValueError, TypeError):
+                            data_row[schema_field] = str(row[data_field])
+                    else:
+                        data_row[schema_field] = str(row[data_field]) if row[data_field] is not None else None
+            
+            # Ensure required fields are present
+            if 'execution_id' not in data_row and execution_id != 'unknown':
+                data_row['execution_id'] = execution_id
+            if 'model_id' not in data_row and model_id != 'unknown':
+                data_row['model_id'] = model_id
+            if 'projectId' not in data_row and project_id != 'unknown':
+                data_row['projectId'] = project_id
+            if 'architecture_type' not in data_row:
+                data_row['architecture_type'] = args.architecture_type
+            
+            creation_data.append(data_row)
+        
+        create_payload = {"data": creation_data}
+        
+        print(f"\\nUploading to schema...")
+        print(f"URL: POST {create_url}")
+        print(f"Records: {len(creation_data)}")
+        
+        try:
+            response = http.post(create_url, headers=headers, 
+                               data=json.dumps(create_payload), timeout=60)
+            response.raise_for_status()
+            
+            response_data = response.json()
+            print(f"✓ Successfully uploaded {len(creation_data)} record(s)")
+            
+            # Save response
+            with open(args.upload_response, 'w') as f:
+                json.dump(response_data, f, indent=2)
+            
+            # Create upload status
+            upload_status = {
+                'success': True,
+                'timestamp': inference_data.get('evaluation_timestamp'),
+                'execution_id': execution_id,
+                'model_id': model_id,
+                'project_id': project_id,
+                'records_uploaded': len(creation_data),
+                'schema_id': args.schema_id,
+                'response_status': response.status_code
+            }
+            
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Upload failed: {e}")
+            if e.response:
+                print(f"Response: {e.response.status_code} - {e.response.text}")
+            
+            # Save error response
+            error_data = {
+                'error': str(e),
+                'status_code': e.response.status_code if e.response else None,
+                'response_text': e.response.text if e.response else None
+            }
+            with open(args.upload_response, 'w') as f:
+                json.dump(error_data, f, indent=2)
+            
+            upload_status = {
+                'success': False,
+                'error': str(e),
+                'execution_id': execution_id,
+                'timestamp': inference_data.get('evaluation_timestamp', ''),
+                'schema_id': args.schema_id
+            }
+        
+        # Save upload status
+        with open(args.upload_status, 'w') as f:
+            json.dump(upload_status, f, indent=2)
+        
+        # Final output
+        print('\\n' + '=' * 80)
+        print('UPLOAD STATUS')
+        print('=' * 80)
+        print(f"Success: {upload_status.get('success', False)}")
+        print(f"Execution ID: {execution_id}")
+        print(f"Model ID: {model_id}")
+        print(f"Schema ID: {args.schema_id}")
+        print(f"Records: {len(creation_data)}")
+        
+        if not upload_status.get('success', False):
+            sys.exit(1)
+        
+    args:
+      - --schema_data_json
+      - {inputPath: schema_data_json}
+      - --schema_id
+      - {inputValue: schema_id}
+      - --bearer_auth_token
+      - {inputValue: bearer_auth_token}
+      - --domain
+      - {inputValue: domain}
+      - --tenant_id
+      - {inputValue: tenant_id}
+      - --architecture_type
+      - {inputValue: architecture_type}
+      - --upload_status
+      - {outputPath: upload_status}
+      - --upload_response
+      - {outputPath: upload_response}
