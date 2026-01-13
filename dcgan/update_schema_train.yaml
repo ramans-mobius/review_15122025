@@ -222,7 +222,7 @@ implementation:
         # Schema upload function with data type conversion
         # ============================================================================
         def upload_to_schema(schema_entry):
-            """Upload a single entry to schema"""
+           
             schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create"
             
             try:
@@ -258,7 +258,7 @@ implementation:
                 return False, {"error": str(e)}
         
         def convert_to_schema_types(data_dict):
-            """Convert data to match schema field types"""
+         
             converted = {}
             
             # Map of field names to their expected types from schema
@@ -306,7 +306,7 @@ implementation:
                         else:
                             converted[field] = value
                     except (ValueError, TypeError) as e:
-                        print(f"    ⚠️ Could not convert {field}={value} to {expected_type}: {e}")
+                        print(f"     Could not convert {field}={value} to {expected_type}: {e}")
                         # Use default value based on type
                         if expected_type in ['number', 'Integer', 'long']:
                             converted[field] = 0
@@ -424,10 +424,10 @@ implementation:
             success, response = upload_to_schema(schema_entry_converted)
             
             if success:
-                print(f"    ✅ Upload successful")
+                print(f"     Upload successful")
                 successful_uploads += 1
             else:
-                print(f"    ❌ Upload failed")
+                print(f"     Upload failed")
                 failed_uploads += 1
             
             all_responses.append({
@@ -520,11 +520,11 @@ implementation:
         # ============================================================================
         print(f"\\n" + "=" * 80)
         if failed_uploads == 0 and successful_uploads > 0:
-            print("✅ TRAINING METRICS UPLOAD COMPLETED SUCCESSFULLY!")
+            print(" TRAINING METRICS UPLOAD COMPLETED SUCCESSFULLY!")
         elif successful_uploads > 0:
-            print("⚠️ TRAINING METRICS UPLOAD PARTIALLY SUCCESSFUL")
+            print(" TRAINING METRICS UPLOAD PARTIALLY SUCCESSFUL")
         else:
-            print("❌ TRAINING METRICS UPLOAD FAILED")
+            print(" TRAINING METRICS UPLOAD FAILED")
         print("=" * 80)
         
         print(f"\\nSummary:")
@@ -553,7 +553,7 @@ implementation:
         
         # Exit with error if all uploads failed
         if successful_uploads == 0 and epochs_completed > 0:
-            print("❌ No metrics were uploaded successfully")
+            print(" No metrics were uploaded successfully")
             sys.exit(1)
 
     args:
