@@ -1,0 +1,223 @@
+name: Download DCGAN Assets from CDN
+description: Downloads model, dataset, and preprocessor params from encoded CDN URLs
+inputs:
+  - name: model_cdn_url
+    type: String
+    description: "Encoded URL for model download (%28→(, %29→), %24→$)"
+  - name: dataset_cdn_url
+    type: String
+    description: "Encoded URL for raw dataset download"
+  - name: preprocessor_cdn_url
+    type: String
+    description: "Encoded URL for preprocessor params JSON"
+  - name: bearer_token
+    type: String
+    description: "Bearer token for CDN authentication"
+outputs:
+  - name: downloaded_model
+    type: Model
+    description: "Downloaded DCGAN model file"
+  - name: raw_dataset
+    type: Dataset
+    description: "Raw dataset in RawDatasetWrapper format"
+  - name: preprocessor_params
+    type: String
+    description: "Preprocessor parameters JSON"
+  - name: download_summary
+    type: String
+    description: "Download status summary"
+
+implementation:
+  container:
+    image: deepak0147/nessy-facotry:0.0.9
+    command:
+      - sh
+      - -c
+      - |
+        echo "Installing required packages..."
+        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, json, os, urllib.parse, urllib.request, hashlib, pickle, torch, sys, time
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--model_cdn_url', type=str, required=True)
+        parser.add_argument('--dataset_cdn_url', type=str, required=True)
+        parser.add_argument('--preprocessor_cdn_url', type=str, required=True)
+        parser.add_argument('--bearer_token', type=str, required=True)
+        parser.add_argument('--downloaded_model', type=str, required=True)
+        parser.add_argument('--raw_dataset', type=str, required=True)
+        parser.add_argument('--preprocessor_params', type=str, required=True)
+        parser.add_argument('--download_summary', type=str, required=True)
+        args = parser.parse_args()
+        
+        print('=' * 80)
+        print('CDN DOWNLOAD WITH PREPROCESSOR PARAMS')
+        print('=' * 80)
+        
+        # Read bearer token
+        with open(args.bearer_token, 'r') as f:
+            bearer_token = f.read().strip()
+        
+        def decode_url(encoded_url):
+           
+            return urllib.parse.unquote(encoded_url)
+        
+        def download_file(url, output_path, description):
+           
+            print(f"\\nDownloading {description}...")
+            print(f"  URL: {url}...")
+            
+            req = urllib.request.Request(url)
+            req.add_header('Authorization', f'Bearer {bearer_token}')
+            
+            try:
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    data = response.read()
+                
+                with open(output_path, 'wb') as f:
+                    f.write(data)
+                
+                file_size = len(data)
+                file_hash = hashlib.md5(data).hexdigest()[:8]
+                
+                print(f"  ✓ Size: {file_size:,} bytes")
+                print(f"  ✓ Hash: {file_hash}")
+                
+                return {
+                    'success': True,
+                    'path': output_path,
+                    'size': file_size,
+                    'hash': file_hash
+                }
+            except Exception as e:
+                print(f"  ✗ Failed: {e}")
+                return {'success': False, 'error': str(e)}
+        
+        # Decode URLs
+        print("\\nDecoding CDN URLs...")
+        model_url = decode_url(args.model_cdn_url)
+        dataset_url = decode_url(args.dataset_cdn_url)
+        preprocessor_url = decode_url(args.preprocessor_cdn_url)
+        
+        # Create temp directory
+        os.makedirs('/tmp/downloads', exist_ok=True)
+        
+        # Download files
+        model_result = download_file(model_url, args.downloaded_model, "DCGAN Model")
+        dataset_result = download_file(dataset_url, '/tmp/dataset_raw.pkl', "Raw Dataset")
+        preprocessor_result = download_file(preprocessor_url, args.preprocessor_params, "Preprocessor Params")
+        
+        # Load and convert dataset to RawDatasetWrapper format
+        print("\\nConverting dataset to proper format...")
+        
+        class RawDatasetWrapper:
+            def __init__(self, images, labels, dataset_name='downloaded'):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = False
+                self._num_samples = len(images)
+            
+            def __len__(self):
+                return self._num_samples
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed
+                }
+        
+        try:
+            with open('/tmp/dataset_raw.pkl', 'rb') as f:
+                downloaded_data = pickle.load(f)
+            
+            if hasattr(downloaded_data, 'images'):
+                # Already in wrapper format
+                dataset_wrapper = downloaded_data
+            elif isinstance(downloaded_data, (list, tuple)):
+                images = torch.stack([torch.tensor(img) for img in downloaded_data])
+                labels = torch.zeros(len(images))
+                dataset_wrapper = RawDatasetWrapper(images, labels)
+            elif hasattr(downloaded_data, '__len__'):
+                images = torch.stack([downloaded_data[i] for i in range(min(100, len(downloaded_data)))])
+                labels = torch.zeros(len(images))
+                dataset_wrapper = RawDatasetWrapper(images, labels)
+            else:
+                raise ValueError("Unknown dataset format")
+            
+            # Save wrapped dataset
+            with open(args.raw_dataset, 'wb') as f:
+                pickle.dump(dataset_wrapper, f)
+            
+            print(f"✓ Dataset converted: {len(dataset_wrapper)} samples")
+            
+        except Exception as e:
+            print(f"✗ Dataset conversion failed: {e}")
+            # Create empty dataset wrapper as fallback
+            dataset_wrapper = RawDatasetWrapper(torch.Tensor(), torch.Tensor())
+            with open(args.raw_dataset, 'wb') as f:
+                pickle.dump(dataset_wrapper, f)
+        
+        # Create download summary
+        summary = {
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'downloads': {
+                'model': model_result,
+                'dataset': dataset_result,
+                'preprocessor': preprocessor_result
+            },
+            'dataset_info': {
+                'samples': len(dataset_wrapper) if 'dataset_wrapper' in locals() else 0,
+                'format': 'RawDatasetWrapper',
+                'preprocessed': False
+            },
+            'urls': {
+                'model': model_url + '...',
+                'dataset': dataset_url + '...',
+                'preprocessor': preprocessor_url + '...'
+            }
+        }
+        
+        with open(args.download_summary, 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        # Final output
+        print('\\n' + '=' * 80)
+        print('DOWNLOAD SUMMARY')
+        print('=' * 80)
+        print(f"Model: {'✓' if model_result['success'] else '✗'}")
+        print(f"Dataset: {'✓' if dataset_result['success'] else '✗'}")
+        print(f"Preprocessor: {'✓' if preprocessor_result['success'] else '✗'}")
+        print(f"Dataset samples: {len(dataset_wrapper) if 'dataset_wrapper' in locals() else 0}")
+        
+        # Exit if any critical download failed
+        if not (model_result['success'] and dataset_result['success']):
+            sys.exit(1)
+        
+    args:
+      - --model_cdn_url
+      - {inputValue: model_cdn_url}
+      - --dataset_cdn_url
+      - {inputValue: dataset_cdn_url}
+      - --preprocessor_cdn_url
+      - {inputValue: preprocessor_cdn_url}
+      - --bearer_token
+      - {inputValue: bearer_token}
+      - --downloaded_model
+      - {outputPath: downloaded_model}
+      - --raw_dataset
+      - {outputPath: raw_dataset}
+      - --preprocessor_params
+      - {outputPath: preprocessor_params}
+      - --download_summary
+      - {outputPath: download_summary}
