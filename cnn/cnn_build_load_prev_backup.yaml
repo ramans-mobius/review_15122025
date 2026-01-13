@@ -1,0 +1,391 @@
+name: Build or Load Model v13
+description: Builds CNN model using nesyfactory with dropout fix and schema support
+inputs:
+  - name: config_str
+    type: String
+  - name: model_name
+    type: String
+  - name: load_from_cdn
+    type: String
+    default: "false"
+  - name: cdn_url
+    type: String
+  - name: load_from_schema
+    type: String
+    default: "false"
+  - name: schema_id
+    type: String
+  - name: bearer_token
+    type: String
+  - name: model_id
+    type: String
+  - name: execution_id
+    type: String
+outputs:
+  - name: model_out
+    type: Model
+  - name: config_updated
+    type: String
+  - name: model_info_out
+    type: String
+
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v23
+    command:
+      - sh
+      - -c
+      - |
+        python3 -m pip install --quiet --upgrade pip setuptools wheel
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import torch, argparse, json, os, sys, tempfile
+        import urllib.request
+        import requests
+        from nesy_factory.CNNs.factory import CNNFactory
+        from nesy_factory.CNNs.ffresnet import ResNet
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--config_str', type=str, default='')
+        parser.add_argument('--model_name', type=str, default='')
+        parser.add_argument('--load_from_cdn', type=str, default='false')
+        parser.add_argument('--cdn_url', type=str, default='')
+        parser.add_argument('--load_from_schema', type=str, default='false')
+        parser.add_argument('--schema_id', type=str, default='')
+        parser.add_argument('--bearer_token', type=str, default='')
+        parser.add_argument('--model_id', type=str, default='')
+        parser.add_argument('--execution_id', type=str, default='')
+        parser.add_argument('--model_out', type=str, required=True)
+        parser.add_argument('--config_updated', type=str, required=True)
+        parser.add_argument('--model_info_out', type=str, required=True)
+        args = parser.parse_args()
+        
+        load_from_cdn = args.load_from_cdn.lower() == 'true'
+        load_from_schema = args.load_from_schema.lower() == 'true'
+        
+        # Create output directories
+        os.makedirs(os.path.dirname(args.model_out), exist_ok=True)
+        os.makedirs(os.path.dirname(args.config_updated), exist_ok=True)
+        os.makedirs(os.path.dirname(args.model_info_out), exist_ok=True)
+        
+        if load_from_schema:
+            # MODE 3: Load model from schema
+            if not all([args.schema_id, args.bearer_token, args.model_id, args.execution_id]):
+                print("ERROR: schema_id, bearer_token, model_id, and execution_id are required when load_from_schema=true")
+                sys.exit(1)
+            
+            try:
+                execution_id_int = int(args.execution_id)
+            except ValueError:
+                print(f"ERROR: execution_id must be an integer. Got: {args.execution_id}")
+                sys.exit(1)
+                
+            print(f"Loading model from schema...")
+            print(f"Schema ID: {args.schema_id}")
+            print(f"Model ID: {args.model_id}")
+            print(f"Execution ID: {execution_id_int}")
+            
+            # API endpoint for schema
+            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list?size=1000"
+            
+            headers = {
+                'Authorization': f'Bearer {args.bearer_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            # Filter for model_id and execution_id
+            filter_data = {
+                "dbType": "TIDB",
+                "ownedOnly": True,
+                "filter": {
+                    "model_id": args.model_id,
+                    "execution_id": execution_id_int
+                }
+            }
+            
+            try:
+                print(f"Fetching schema data from: {schema_url}")
+                response = requests.post(schema_url, headers=headers, json=filter_data)
+                response.raise_for_status()
+                
+                schema_data = response.json()
+                print(f"Schema response status: {response.status_code}")
+                
+                # Extract model_weights_cdn from schema response
+                if 'content' in schema_data and len(schema_data['content']) > 0:
+                    instance = schema_data['content'][0]
+                    model_weights_cdn = instance.get('model_weights_cdn')
+                    
+                    if not model_weights_cdn:
+                        print("ERROR: model_weights_cdn not found in schema response")
+                        print(f"Available fields: {list(instance.keys())}")
+                        sys.exit(1)
+                    
+                    print(f"Found model_weights_cdn: {model_weights_cdn}")
+                    
+                    # Now use the CDN URL to download the model
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
+                        tmp_path = tmp_file.name
+                    
+                    print(f"Downloading model from CDN: {model_weights_cdn}")
+                    urllib.request.urlretrieve(model_weights_cdn, tmp_path)
+                    print("Download completed")
+                    
+                    checkpoint = torch.load(tmp_path, map_location='cpu')
+                    torch.save(checkpoint, args.model_out)
+                    print(f"Model loaded from schema CDN and saved to: {args.model_out}")
+                    
+                    # Update config with schema info
+                    if args.config_str:
+                        config = json.loads(args.config_str)
+                    else:
+                        config = {}
+                    
+                    config['model_source'] = 'schema'
+                    config['schema_id'] = args.schema_id
+                    config['model_id'] = args.model_id
+                    config['execution_id'] = execution_id_int
+                    config['cdn_url'] = model_weights_cdn
+                    
+                    # Save schema instance data in config
+                    config['schema_instance'] = instance
+                    
+                    with open(args.config_updated, 'w') as f:
+                        json.dump(config, f, indent=2)
+                    
+                    model_info = {
+                        'model_source': 'schema',
+                        'schema_id': args.schema_id,
+                        'model_id': args.model_id,
+                        'execution_id': execution_id_int,
+                        'cdn_url': model_weights_cdn,
+                        'checkpoint_type': 'full_model' if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint else 'state_dict',
+                        'schema_instance': instance
+                    }
+                    with open(args.model_info_out, 'w') as f:
+                        json.dump(model_info, f, indent=2)
+                    
+                    os.unlink(tmp_path)
+                    print("✓ Successfully loaded model from schema")
+                    
+                else:
+                    print("ERROR: No instances found in schema response")
+                    print(f"Response: {json.dumps(schema_data, indent=2)}")
+                    sys.exit(1)
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"ERROR: Failed to fetch schema data: {e}")
+                if hasattr(e, 'response'):
+                    print(f"Response content: {e.response.text}")
+                sys.exit(1)
+            except Exception as e:
+                print(f"ERROR: Failed to load model from schema: {e}")
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+                
+        elif load_from_cdn:
+            # MODE 1: Download model from CDN directly
+            if not args.cdn_url:
+                print("ERROR: cdn_url is required when load_from_cdn=true")
+                sys.exit(1)
+                
+            print(f"Loading model from CDN: {args.cdn_url}")
+            
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
+                    tmp_path = tmp_file.name
+                
+                print(f"Downloading from {args.cdn_url}...")
+                urllib.request.urlretrieve(args.cdn_url, tmp_path)
+                print("Download completed")
+                
+                checkpoint = torch.load(tmp_path, map_location='cpu')
+                torch.save(checkpoint, args.model_out)
+                print(f"Model loaded from CDN and saved to: {args.model_out}")
+                
+                if args.config_str:
+                    config = json.loads(args.config_str)
+                else:
+                    config = {}
+                
+                config['model_source'] = 'cdn'
+                config['cdn_url'] = args.cdn_url
+                
+                with open(args.config_updated, 'w') as f:
+                    json.dump(config, f, indent=2)
+                
+                model_info = {
+                    'model_source': 'cdn',
+                    'cdn_url': args.cdn_url,
+                    'checkpoint_type': 'full_model' if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint else 'state_dict'
+                }
+                with open(args.model_info_out, 'w') as f:
+                    json.dump(model_info, f, indent=2)
+                    
+                os.unlink(tmp_path)
+                
+            except Exception as e:
+                print(f"Failed to load model from CDN: {e}")
+                sys.exit(1)
+                
+        else:
+            # MODE 2: Build new model from configuration
+            if not args.config_str or not args.model_name:
+                print("ERROR: config_str and model_name are required when load_from_cdn=false and load_from_schema=false")
+                sys.exit(1)
+                
+            config = json.loads(args.config_str)
+            model_config = config.get('model', {})
+            model_config['architecture'] = args.model_name
+            
+            # Set default values
+            defaults = {
+                'output_dim': 10,
+                'input_channels': 3,
+                'input_size': [224, 224],
+                'pretrained': True,
+                'use_cafo': False,
+                'use_forward_forward': False,
+                'variant': 'resnet50',
+                'dropout': 0.0
+            }
+            
+            for param, default_value in defaults.items():
+                if param not in model_config:
+                    model_config[param] = default_value
+
+            # Determine training mode
+            use_cafo = model_config.get('use_cafo', False)
+            use_forward_forward = model_config.get('use_forward_forward', False)
+            
+            print(f"\\n=== Model Configuration ===")
+            print(f"Architecture: {model_config['architecture']}")
+            print(f"Training Mode: {'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard Backprop'}")
+            print(f"Variant: {model_config.get('variant', 'resnet50')}")
+            print(f"Output dim: {model_config['output_dim']}")
+            print(f"Dropout: {model_config.get('dropout', 0.0)}")
+            
+            try:
+                # ===========================================
+                # FIXED RESNET CLASS WITH CRITERION FIX
+                # ===========================================
+                class FixedResNet(ResNet):
+                    def __init__(self, config):
+                        # CRITICAL: Set dropout attribute BEFORE calling parent init
+                        self.dropout = config.get('dropout', 0.0)
+                        # Now call parent init
+                        super().__init__(config)
+                        # Ensure criterion exists (for consistency across bricks)
+                        if not hasattr(self, 'criterion') or self.criterion is None:
+                            self.criterion = torch.nn.CrossEntropyLoss()
+                
+                # Create model config for nesyfactory
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                
+                # Base config for ResNet - MUST match nesyfactory ResNet parameters
+                base_config = {
+                    'variant': model_config.get('variant', 'resnet50'),
+                    'output_dim': model_config['output_dim'],
+                    'input_channels': model_config.get('input_channels', 3),
+                    'pretrained': model_config.get('pretrained', True),
+                    'device': str(device),
+                    'dropout': model_config.get('dropout', 0.0),  # MUST be in config
+                    'use_cafo': use_cafo,
+                    'use_forward_forward': use_forward_forward
+                }
+                
+                # Add CAFO-specific params
+                if use_cafo:
+                    base_config['cafo_blocks'] = model_config.get('cafo_blocks', 4)
+                    base_config['epochs_per_block'] = model_config.get('epochs_per_block', 50)
+                    base_config['block_lr'] = model_config.get('block_lr', 0.001)
+                    print(f"CAFO parameters: {base_config['cafo_blocks']} blocks")
+                
+                # Add Forward-Forward params
+                elif use_forward_forward:
+                    ff_config = model_config.get("forward_forward", {})
+                    base_config['ff_blocks'] = ff_config.get('ff_blocks', 4)
+                    base_config['ff_epochs_per_block'] = ff_config.get('ff_epochs_per_block', 50)
+                    base_config['ff_lr'] = ff_config.get('ff_lr', 0.01)
+                    base_config['ff_threshold'] = ff_config.get('threshold', 2.0)
+                    base_config['ff_goodness_dim'] = ff_config.get('ff_goodness_dim', 128)
+                    print(f"FF parameters: {base_config['ff_blocks']} blocks")
+                
+                # Create the model using FixedResNet
+                print(f"\\nCreating model using FixedResNet...")
+                model = FixedResNet(base_config)
+                
+                print(f"✓ Model created successfully")
+                print(f"✓ Parameters: {sum(p.numel() for p in model.parameters()):,}")
+                
+                # Get model info
+                model_info = {
+                    'model_name': args.model_name,
+                    'model_source': 'fresh_build',
+                    'training_mode': 'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard',
+                    'variant': model_config.get('variant', 'resnet50'),
+                    'input_channels': model_config.get('input_channels', 3),
+                    'output_dim': model_config['output_dim'],
+                    'num_parameters': sum(p.numel() for p in model.parameters()),
+                    'use_cafo': use_cafo,
+                    'use_forward_forward': use_forward_forward,
+                    'model_class': model.__class__.__name__
+                }
+                
+            except Exception as e:
+                print(f"\\n ERROR: Failed to create model: {e}")
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+
+            # Save model with checkpoint format
+            checkpoint = {
+                'config': base_config,  # Save the actual config used
+                'model_state_dict': model.state_dict(),
+                'model_info': model_info,
+                'training_mode': 'CAFO' if use_cafo else 'Forward-Forward' if use_forward_forward else 'Standard'
+            }
+            
+            torch.save(checkpoint, args.model_out)
+
+            # Save updated config
+            config['model'] = model_config
+            with open(args.config_updated, 'w') as f:
+                json.dump(config, f, indent=2)
+                
+            # Save model info
+            with open(args.model_info_out, 'w') as f:
+                json.dump(model_info, f, indent=2)
+
+            print(f"\\n✓ Model built and saved to: {args.model_out}")
+            print(f"✓ Model info saved to: {args.model_info_out}")
+        
+    args:
+      - --model_name
+      - {inputValue: model_name}
+      - --config_str
+      - {inputValue: config_str}
+      - --load_from_cdn
+      - {inputValue: load_from_cdn}
+      - --cdn_url
+      - {inputValue: cdn_url}
+      - --load_from_schema
+      - {inputValue: load_from_schema}
+      - --schema_id
+      - {inputValue: schema_id}
+      - --bearer_token
+      - {inputValue: bearer_token}
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --model_out
+      - {outputPath: model_out}
+      - --config_updated
+      - {outputPath: config_updated}
+      - --model_info_out
+      - {outputPath: model_info_out}
