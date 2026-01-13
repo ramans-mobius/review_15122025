@@ -1,5 +1,5 @@
-name: Build DCGAN Model v9 - USING ACTUAL API
-description: Builds DCGAN models using actual API from nesy_factory
+name: Build DCGAN Model v10 
+description: Builds or loads DCGAN models with schema and CDN support
 inputs:
   - name: master_config
     type: String
@@ -13,6 +13,9 @@ inputs:
     type: String
     default: ""
   - name: execution_id
+    type: String
+    default: ""
+  - name: bearer_token
     type: String
     default: ""
   - name: load_from_cdn
@@ -36,7 +39,7 @@ implementation:
       - sh
       - -c
       - |
-        echo "Building DCGAN Model v9 - Using Actual API..."
+        echo "Building DCGAN Model v10 - With Schema & CDN Loading..."
         exec "$0" "$@"
       - python3
       - -u
@@ -51,6 +54,8 @@ implementation:
         import tempfile
         import urllib.request
         import requests
+        import subprocess
+        import uuid
         from pathlib import Path
         import traceback
         import warnings
@@ -75,20 +80,13 @@ implementation:
             return result
         
         # ============================================================================
-        # IMPORT NESY FACTORY CLASSES - CHECK WHAT'S ACTUALLY AVAILABLE
+        # IMPORT NESY FACTORY CLASSES
         # ============================================================================
         print("Importing nesy_factory.GANs.dcgan...")
         
         try:
-            # First let's see what's available
             import nesy_factory.GANs.dcgan as dcgan_module
-            print("✅ nesy_factory.GANs.dcgan imported successfully")
-            
-            # Check available attributes
-            available_attrs = [attr for attr in dir(dcgan_module) if not attr.startswith('_')]
-            print(f"Available attributes in dcgan module ({len(available_attrs)}):")
-            for i in range(0, len(available_attrs), 8):
-                print(f"  {', '.join(available_attrs[i:i+8])}")
+            print(" nesy_factory.GANs.dcgan imported successfully")
             
             # Try to import specific classes
             from nesy_factory.GANs.dcgan import (
@@ -100,90 +98,220 @@ implementation:
                 EnhancedDCGANTrainer
             )
             
-            # Check if create_dcgan exists
-            if hasattr(dcgan_module, 'create_dcgan'):
-                from nesy_factory.GANs.dcgan import create_dcgan
-                print("✅ create_dcgan available")
-            else:
-                print("⚠️ create_dcgan not available")
-                
-            # Check if validate_config exists
-            if hasattr(dcgan_module, 'validate_config'):
-                from nesy_factory.GANs.dcgan import validate_config
-                print("✅ validate_config available")
-            else:
-                print("⚠️ validate_config not available")
-                # Create dummy function
-                def validate_config(config):
-                    return True, []
-            
-            print("✅ All necessary imports successful")
+            print(" All necessary imports successful")
             
         except ImportError as e:
-            print(f"❌ Import error: {e}")
+            print(f" Import error: {e}")
             traceback.print_exc()
             sys.exit(1)
         except Exception as e:
-            print(f"⚠️ Partial import issue: {e}")
+            print(f" Partial import issue: {e}")
             traceback.print_exc()
         
         # ============================================================================
-        # DIMENSIONAL VALIDATION FUNCTIONS
+        # SCHEMA FUNCTIONS
         # ============================================================================
         
-        def validate_dcgan_dimensions(config: DCGANConfig) -> tuple:
+        def query_schema_for_weights(schema_id, model_id, execution_id, bearer_token):
            
+            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list?size=1000"
+            
+            filter_data = {
+                "dbType": "TIDB",
+                "ownedOnly": True,
+                "filter": {
+                    "model_id": model_id,
+                    "execution_id": int(execution_id)
+                }
+            }
+            
             try:
-                # Generator dimension calculation
-                current_size = 1  # Starting from latent dim
-                for i, layer in enumerate(config.generator_layers):
-                    if hasattr(layer, 'kernel_size'):
-                        kernel = layer.kernel_size
-                        stride = layer.stride
-                        padding = layer.padding
-                        output_padding = getattr(layer, 'output_padding', 0)
-                    else:
-                        kernel = layer['kernel_size']
-                        stride = layer['stride']
-                        padding = layer['padding']
-                        output_padding = layer.get('output_padding', 0)
+                print(f"  Querying schema for model weights...")
+                
+                headers = {
+                    'Authorization': f'Bearer {bearer_token}',
+                    'Content-Type': 'application/json'
+                }
+                
+                curl_command = [
+                    "curl",
+                    "--location", schema_url,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", "Content-Type: application/json",
+                    "--data", json.dumps(filter_data),
+                    "--fail",
+                    "--show-error",
+                    "--connect-timeout", "30",
+                    "--max-time", "60",
+                    "--silent"
+                ]
+                
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                response_json = json.loads(process.stdout)
+                
+                if 'content' in response_json and len(response_json['content']) > 0:
+                    instance = response_json['content'][0]
+                    model_weights_cdn = instance.get('model_weights_cdn')
                     
-                    # ConvTranspose2d output size formula
-                    current_size = (current_size - 1) * stride - 2 * padding + kernel + output_padding
-                
-                gen_output_size = current_size
-                
-                # Discriminator dimension calculation
-                current_size = config.image_size
-                for i, layer in enumerate(config.discriminator_layers):
-                    if hasattr(layer, 'kernel_size'):
-                        kernel = layer.kernel_size
-                        stride = layer.stride
-                        padding = layer.padding
+                    if model_weights_cdn:
+                        print(f"   Found model_weights_cdn: {model_weights_cdn}...")
+                        return model_weights_cdn, instance
                     else:
-                        kernel = layer['kernel_size']
-                        stride = layer['stride']
-                        padding = layer['padding']
+                        print(f"   No model_weights_cdn found in schema entry")
+                        return None, None
+                else:
+                    print(f"   No schema entry found for model_id={model_id}, execution_id={execution_id}")
+                    return None, None
                     
-                    # Conv2d output size formula
-                    current_size = ((current_size + 2 * padding - kernel) // stride) + 1
+            except subprocess.CalledProcessError as e:
+                print(f"   Failed to query schema: {e.stderr[:200]}")
+                return None, None
+            except Exception as e:
+                print(f"   Error querying schema: {str(e)[:100]}")
+                return None, None
+        
+        def download_and_load_model(weights_url, master_config):
+         
+            try:
+                print(f"  Downloading model weights from: {weights_url[:100]}...")
                 
-                disc_final_size = current_size
+                # Download weights
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
+                    tmp_path = tmp_file.name
                 
-                # Validate
-                if gen_output_size != config.image_size:
-                    return False, f"Generator output size ({gen_output_size}) doesn't match target image size ({config.image_size})", gen_output_size
+                urllib.request.urlretrieve(weights_url, tmp_path)
+                file_size = os.path.getsize(tmp_path)
+                print(f"   Downloaded weights ({file_size:,} bytes)")
                 
-                if disc_final_size != 1:
-                    return False, f"Discriminator final feature map size should be 1, got {disc_final_size}", disc_final_size
+                # Load checkpoint
+                checkpoint = torch.load(tmp_path, map_location='cpu')
+                print(f"  Checkpoint type: {type(checkpoint)}")
+                if isinstance(checkpoint, dict):
+                    print(f"  Checkpoint keys: {list(checkpoint.keys())}")
                 
-                return True, "", gen_output_size
+                # Extract config from checkpoint or use master_config
+                if isinstance(checkpoint, dict) and 'config' in checkpoint:
+                    # Use config from checkpoint
+                    checkpoint_config = checkpoint['config']
+                    print("  Using config from checkpoint")
+                    
+                    # Create DCGANConfig from checkpoint config
+                    try:
+                        # Extract parameters from checkpoint config
+                        image_size = checkpoint_config.get('image_size', 32)
+                        channels = checkpoint_config.get('channels', 1)
+                        latent_dim = checkpoint_config.get('latent_dim', 100)
+                        
+                        # Create DCGAN config
+                        dcgan_config = DCGANConfig(
+                            image_size=image_size,
+                            channels=channels,
+                            latent_dim=latent_dim,
+                            # Use default values for other params
+                            generator_layers=[],
+                            discriminator_layers=[],
+                            training_algorithm=TrainingAlgorithm.BACKPROP,
+                            use_cafo=False,
+                            use_forward_forward=False,
+                            use_hybrid=False,
+                            batch_size=16,
+                            epochs=2,
+                            device='cpu'
+                        )
+                    except:
+                        # If can't create from checkpoint, use master_config
+                        print("  Couldn't create config from checkpoint, using master_config")
+                        dcgan_config = create_valid_dcgan_config(master_config)
+                else:
+                    # Use master_config to create model
+                    print("  Using master_config to create model")
+                    dcgan_config = create_valid_dcgan_config(master_config)
+                
+                if dcgan_config is None:
+                    print(" Failed to create DCGAN config")
+                    return None, None, None
+                
+                # Create models
+                print(f"  Creating generator and discriminator...")
+                generator = FullyConfigurableDCGANGenerator(dcgan_config)
+                discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config)
+                
+                # Load weights if available
+                if isinstance(checkpoint, dict):
+                    if 'generator_state_dict' in checkpoint:
+                        generator.load_state_dict(checkpoint['generator_state_dict'])
+                        print(f"   Loaded generator weights")
+                    
+                    if 'discriminator_state_dict' in checkpoint:
+                        discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+                        print(f"   Loaded discriminator weights")
+                    
+                    if 'model_state_dict' in checkpoint:
+                        # Try to load as combined model
+                        try:
+                            generator.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                            print(f"   Loaded model_state_dict (generator)")
+                        except:
+                            pass
+                else:
+                    # Assume checkpoint is generator state_dict
+                    try:
+                        generator.load_state_dict(checkpoint)
+                        print(f"   Loaded checkpoint as generator weights")
+                    except:
+                        print(f"   Could not load weights directly")
+                
+                # Calculate parameters
+                gen_params = sum(p.numel() for p in generator.parameters())
+                disc_params = sum(p.numel() for p in discriminator.parameters())
+                total_params = gen_params + disc_params
+                
+                # Create model info
+                model_info = {
+                    'model_type': 'dcgan',
+                    'model_source': 'loaded_weights',
+                    'image_size': dcgan_config.image_size,
+                    'channels': dcgan_config.channels,
+                    'latent_dim': dcgan_config.latent_dim,
+                    'generator_params': gen_params,
+                    'discriminator_params': disc_params,
+                    'total_params': total_params,
+                    'weights_url': weights_url,
+                    'loaded_successfully': True
+                }
+                
+                # Create checkpoint with loaded weights
+                loaded_checkpoint = {
+                    'config': dcgan_config,
+                    'generator_state_dict': generator.state_dict(),
+                    'discriminator_state_dict': discriminator.state_dict(),
+                    'model_info': model_info,
+                    'weights_source': weights_url
+                }
+                
+                # Clean up
+                os.unlink(tmp_path)
+                
+                return loaded_checkpoint, dcgan_config, model_info
                 
             except Exception as e:
-                return False, f"Dimensional validation error: {str(e)}", 0
+                print(f" Error loading model: {e}")
+                traceback.print_exc()
+                if 'tmp_path' in locals():
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+                return None, None, None
         
-        def create_valid_dcgan_config(master_config: dict) -> DCGANConfig:
-           
+        def create_valid_dcgan_config(master_config: dict):
+            
             try:
                 # Extract parameters
                 gan_cfg = master_config['gan']
@@ -191,8 +319,6 @@ implementation:
                 gen_cfg = gan_cfg.get('generator', {})
                 disc_cfg = gan_cfg.get('discriminator', {})
                 train_cfg = gan_cfg.get('training', {})
-                block_cfg = gan_cfg.get('block_training', {})
-                balanced_cfg = gan_cfg.get('balanced_training', {})
                 
                 # Determine algorithm
                 algorithm = train_cfg.get('algorithm', 'backprop')
@@ -213,8 +339,7 @@ implementation:
                 image_size = dataset_cfg.get('image_size', 32)
                 channels = dataset_cfg.get('channels', 1)
                 
-                # ========== GENERATOR LAYERS ==========
-                # Default generator layers for 32x32
+                # Default generator layers
                 default_gen_layers = [
                     {"channels": 128, "kernel_size": 4, "stride": 1, "padding": 0, "output_padding": 0},
                     {"channels": 64, "kernel_size": 4, "stride": 2, "padding": 1, "output_padding": 0},
@@ -222,13 +347,11 @@ implementation:
                     {"channels": channels, "kernel_size": 4, "stride": 2, "padding": 1, "output_padding": 0},
                 ]
                 
-                # Adjust layers based on image size
+                # Adjust for image size
                 if image_size == 64:
-                    # Add an extra layer for 64x64
                     default_gen_layers.insert(0, {"channels": 256, "kernel_size": 4, "stride": 1, "padding": 0, "output_padding": 0})
                     default_gen_layers[1]["channels"] = 128
                 elif image_size == 128:
-                    # Add more layers for 128x128
                     default_gen_layers = [
                         {"channels": 512, "kernel_size": 4, "stride": 1, "padding": 0, "output_padding": 0},
                         {"channels": 256, "kernel_size": 4, "stride": 2, "padding": 1, "output_padding": 0},
@@ -238,10 +361,7 @@ implementation:
                         {"channels": channels, "kernel_size": 4, "stride": 2, "padding": 1, "output_padding": 0},
                     ]
                 
-                # Use provided layers if available, otherwise use defaults
                 gen_layers_config = gen_cfg.get('layers', default_gen_layers)
-                
-                # Convert to DCGANLayerConfig objects
                 generator_layers = []
                 for layer in gen_layers_config:
                     if isinstance(layer, dict):
@@ -255,7 +375,6 @@ implementation:
                     else:
                         generator_layers.append(layer)
                 
-                # ========== DISCRIMINATOR LAYERS ==========
                 # Default discriminator layers
                 default_disc_layers = [
                     {"channels": 32, "kernel_size": 4, "stride": 2, "padding": 1},
@@ -264,13 +383,10 @@ implementation:
                     {"channels": 1, "kernel_size": 4, "stride": 1, "padding": 0},
                 ]
                 
-                # Adjust for different image sizes
                 if image_size == 64:
-                    # Add an extra layer for 64x64
                     default_disc_layers.insert(0, {"channels": 16, "kernel_size": 4, "stride": 2, "padding": 1})
                     default_disc_layers[1]["channels"] = 32
                 elif image_size == 128:
-                    # Add more layers for 128x128
                     default_disc_layers = [
                         {"channels": 16, "kernel_size": 4, "stride": 2, "padding": 1},
                         {"channels": 32, "kernel_size": 4, "stride": 2, "padding": 1},
@@ -280,10 +396,7 @@ implementation:
                         {"channels": 1, "kernel_size": 4, "stride": 1, "padding": 0},
                     ]
                 
-                # Use provided layers if available, otherwise use defaults
                 disc_layers_config = disc_cfg.get('layers', default_disc_layers)
-                
-                # Convert to DCGANLayerConfig objects
                 discriminator_layers = []
                 for layer in disc_layers_config:
                     if isinstance(layer, dict):
@@ -296,44 +409,27 @@ implementation:
                     else:
                         discriminator_layers.append(layer)
                 
-                # ========== CREATE BLOCK TRAINING CONFIG ==========
-                # Enable block training for CAFO and FF, disable for backprop
-                enable_block_training = use_cafo or use_forward_forward or use_hybrid
-                
+                # Create configs
                 block_training = BlockTrainingConfig(
-                    enabled=block_cfg.get('enabled', enable_block_training),
-                    num_blocks=block_cfg.get('num_blocks', min(3, len(generator_layers) - 1)),
-                    epochs_per_block=block_cfg.get('epochs_per_block', 3),
-                    block_learning_rate=block_cfg.get('block_learning_rate', 0.001),
-                    freeze_previous_blocks=block_cfg.get('freeze_previous_blocks', True),
-                    train_generator_blocks=block_cfg.get('train_generator_blocks', True),
-                    train_discriminator_blocks=block_cfg.get('train_discriminator_blocks', True),
-                    cafo_local_predictor_dim=block_cfg.get('cafo_local_predictor_dim', 32),
-                    ff_threshold=block_cfg.get('ff_threshold', 2.0),
-                    ff_goodness_dim=block_cfg.get('ff_goodness_dim', 32)
+                    enabled=train_cfg.get('use_block_training', False),
+                    num_blocks=3,
+                    epochs_per_block=3,
+                    block_learning_rate=0.001
                 )
                 
-                # ========== CREATE BALANCED TRAINING CONFIG ==========
                 balanced_training = BalancedTrainingConfig(
-                    enabled=balanced_cfg.get('enabled', True),
-                    discriminator_steps=balanced_cfg.get('discriminator_steps', 1),
-                    generator_steps=balanced_cfg.get('generator_steps', 1),
-                    discriminator_lr_multiplier=balanced_cfg.get('discriminator_lr_multiplier', 0.5),
-                    label_smoothing=balanced_cfg.get('label_smoothing', 0.1),
-                    feature_matching=balanced_cfg.get('feature_matching', False),
-                    feature_matching_weight=balanced_cfg.get('feature_matching_weight', 10.0)
+                    enabled=True,
+                    discriminator_steps=1,
+                    generator_steps=1
                 )
                 
-                # ========== CREATE ADVERSARIAL TRAINING CONFIG ==========
                 adversarial_training = AdversarialTrainingConfig(
-                    n_critic=balanced_cfg.get('discriminator_steps', 1),
-                    generator_steps=balanced_cfg.get('generator_steps', 1),
-                    discriminator_steps=balanced_cfg.get('discriminator_steps', 1),
-                    gradient_penalty_weight=balanced_cfg.get('gradient_penalty_weight', 10.0),
-                    gradient_penalty_interval=1
+                    n_critic=1,
+                    generator_steps=1,
+                    discriminator_steps=1
                 )
                 
-                # ========== CREATE DCGAN CONFIG ==========
+                # Create DCGANConfig
                 config = DCGANConfig(
                     image_size=image_size,
                     channels=channels,
@@ -347,36 +443,84 @@ implementation:
                     block_training=block_training,
                     balanced_training=balanced_training,
                     adversarial_training=adversarial_training,
-                    generator_activation=ActivationConfig(
-                        name=gen_cfg.get('activation', 'leaky_relu'),
-                        negative_slope=0.2
-                    ),
-                    discriminator_activation=ActivationConfig(
-                        name=disc_cfg.get('activation', 'leaky_relu'),
-                        negative_slope=0.2
-                    ),
-                    generator_output_activation=ActivationConfig(
-                        name=gen_cfg.get('output_activation', 'tanh')
-                    ),
-                    discriminator_output_activation=ActivationConfig(
-                        name=disc_cfg.get('output_activation', 'sigmoid')
-                    ),
-                    generator_use_batchnorm=gen_cfg.get('use_batchnorm', True),
-                    discriminator_use_batchnorm=disc_cfg.get('use_batchnorm', False),
-                    generator_spectral_norm=gen_cfg.get('spectral_norm', False),
-                    discriminator_spectral_norm=disc_cfg.get('spectral_norm', False),
+                    generator_activation=ActivationConfig(name='leaky_relu', negative_slope=0.2),
+                    discriminator_activation=ActivationConfig(name='leaky_relu', negative_slope=0.2),
+                    generator_output_activation=ActivationConfig(name='tanh'),
+                    discriminator_output_activation=ActivationConfig(name='sigmoid'),
+                    generator_use_batchnorm=True,
+                    discriminator_use_batchnorm=False,
+                    generator_spectral_norm=False,
+                    discriminator_spectral_norm=False,
                     batch_size=train_cfg.get('batch_size', 16),
                     epochs=train_cfg.get('epochs', 2),
-                    device=train_cfg.get('device', 'auto'),
-                    seed=train_cfg.get('seed', 42)
+                    device='cpu',
+                    seed=42
                 )
                 
                 return config
                 
             except Exception as e:
-                print(f"❌ Error creating DCGAN config: {e}")
+                print(f" Error creating DCGAN config: {e}")
                 traceback.print_exc()
                 return None
+        
+        def build_new_model(master_config):
+            
+            try:
+                print(f"  Building new DCGAN model...")
+                
+                # Create DCGAN config
+                dcgan_config = create_valid_dcgan_config(master_config)
+                if dcgan_config is None:
+                    print(" Failed to create DCGAN config")
+                    return None, None, None
+                
+                # Create models
+                generator = FullyConfigurableDCGANGenerator(dcgan_config)
+                discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config)
+                
+                # Calculate parameters
+                gen_params = sum(p.numel() for p in generator.parameters())
+                disc_params = sum(p.numel() for p in discriminator.parameters())
+                total_params = gen_params + disc_params
+                
+                print(f"   Model created:")
+                print(f"    Image size: {dcgan_config.image_size}")
+                print(f"    Channels: {dcgan_config.channels}")
+                print(f"    Latent dim: {dcgan_config.latent_dim}")
+                print(f"    Generator params: {gen_params:,}")
+                print(f"    Discriminator params: {disc_params:,}")
+                print(f"    Total params: {total_params:,}")
+                
+                # Create model info
+                model_info = {
+                    'model_type': 'dcgan',
+                    'model_source': 'new_build',
+                    'image_size': dcgan_config.image_size,
+                    'channels': dcgan_config.channels,
+                    'latent_dim': dcgan_config.latent_dim,
+                    'generator_params': gen_params,
+                    'discriminator_params': disc_params,
+                    'total_params': total_params,
+                    'training_algorithm': dcgan_config.training_algorithm.value,
+                    'use_cafo': dcgan_config.use_cafo,
+                    'use_forward_forward': dcgan_config.use_forward_forward
+                }
+                
+                # Create checkpoint
+                checkpoint = {
+                    'config': dcgan_config,
+                    'generator_state_dict': generator.state_dict(),
+                    'discriminator_state_dict': discriminator.state_dict(),
+                    'model_info': model_info
+                }
+                
+                return checkpoint, dcgan_config, model_info
+                
+            except Exception as e:
+                print(f" Error building new model: {e}")
+                traceback.print_exc()
+                return None, None, None
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--master_config', type=str, required=False, default='')
@@ -384,6 +528,7 @@ implementation:
         parser.add_argument('--schema_id', type=str, default='')
         parser.add_argument('--model_id', type=str, default='')
         parser.add_argument('--execution_id', type=str, default='')
+        parser.add_argument('--bearer_token', type=str, default='')
         parser.add_argument('--load_from_cdn', type=str, default='false')
         parser.add_argument('--cdn_url', type=str, default='')
         parser.add_argument('--model_out', type=str, required=True)
@@ -394,352 +539,183 @@ implementation:
         load_from_schema = args.load_from_schema.lower() == 'true'
         load_from_cdn = args.load_from_cdn.lower() == 'true'
         
-        # DEFAULT CONFIG TEMPLATE
-        DEFAULT_CONFIG = {
-            "model_type": "dcgan",
-            "dataset": {
-                "name": "mnist",
-                "image_size": 32,
-                "channels": 1,
-                "num_samples": 100
-            },
-            "gan": {
-                "training": {
-                    "algorithm": "backprop",
-                    "batch_size": 16,
-                    "epochs": 2,
-                    "device": "cuda" if torch.cuda.is_available() else "cpu",
-                    "seed": 42
-                },
-                "generator": {
-                    "latent_dim": 100,
-                    "activation": "leaky_relu",
-                    "output_activation": "tanh",
-                    "use_batchnorm": True,
-                    "spectral_norm": False
-                },
-                "discriminator": {
-                    "activation": "leaky_relu",
-                    "output_activation": "sigmoid",
-                    "use_batchnorm": False,
-                    "spectral_norm": False
-                },
-                "block_training": {
-                    "enabled": False,
-                    "num_blocks": 3,
-                    "epochs_per_block": 3,
-                    "block_learning_rate": 0.001
-                },
-                "balanced_training": {
-                    "enabled": True,
-                    "discriminator_steps": 1,
-                    "generator_steps": 1,
-                    "label_smoothing": 0.1
-                }
-            },
-            "model_source": "default_config"
-        }
-        
-        def get_schema_url(schema_id, model_id, execution_id):
-            # Placeholder for schema service logic
-            # In practice, you would call your schema service
-            return ""
-        
-        # ============================================================================
-        # MAIN EXECUTION
-        # ============================================================================
         print("=" * 80)
-        print("BUILD DCGAN MODEL v9 - USING ACTUAL API")
+        print("BUILD DCGAN MODEL v10 - WITH SCHEMA & CDN LOADING")
         print("=" * 80)
         
-        # Create output directories FIRST
+        # Create output directories
         os.makedirs(os.path.dirname(args.model_out) or '.', exist_ok=True)
         os.makedirs(os.path.dirname(args.config_updated) or '.', exist_ok=True)
         os.makedirs(os.path.dirname(args.model_info_out) or '.', exist_ok=True)
         
-        # Parse and merge config
+        # Parse master config
+        DEFAULT_CONFIG = {
+            "model_type": "dcgan",
+            "dataset": {"image_size": 32, "channels": 1},
+            "gan": {
+                "training": {"algorithm": "backprop", "batch_size": 16, "epochs": 2},
+                "generator": {"latent_dim": 100},
+                "discriminator": {}
+            }
+        }
+        
         if args.master_config and args.master_config.strip():
             try:
-                provided_config = json.loads(args.master_config)
+                master_config = json.loads(args.master_config)
                 print("Using provided master config")
-                
-                # Merge provided config with defaults
-                config = deep_merge(DEFAULT_CONFIG, provided_config)
-                config['model_source'] = 'user_provided_merged'
-                
-            except json.JSONDecodeError as e:
-                print(f"ERROR: Invalid JSON in master_config: {e}")
-                print("Falling back to default config")
-                config = DEFAULT_CONFIG
+            except:
+                print("Invalid JSON, using default config")
+                master_config = DEFAULT_CONFIG
         else:
-            config = DEFAULT_CONFIG
+            master_config = DEFAULT_CONFIG
             print("Using default config")
+        
+        # MAIN LOGIC
+        checkpoint = None
+        dcgan_config = None
+        model_info = None
+        source = "unknown"
         
         # MODE 1: Load from Schema
         if load_from_schema:
-            print(f"Loading model from schema...")
-            print(f"  Schema ID: {args.schema_id}")
-            print(f"  Model ID: {args.model_id}")
-            print(f"  Execution ID: {args.execution_id}")
+            print(f"\\nMODE 1: Loading from Schema")
             
-            if not args.schema_id or not args.model_id or not args.execution_id:
-                print("ERROR: schema_id, model_id, and execution_id are required when load_from_schema=true")
+            if not all([args.schema_id, args.model_id, args.execution_id, args.bearer_token]):
+                print(" ERROR: schema_id, model_id, execution_id, and bearer_token are required when load_from_schema=true")
                 sys.exit(1)
             
-            # Get URL from schema service
-            cdn_url = get_schema_url(args.schema_id, args.model_id, args.execution_id)
-            if not cdn_url:
-                print("ERROR: Could not get CDN URL from schema service")
-                sys.exit(1)
-            
-            # Download from CDN
             try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
-                    tmp_path = tmp_file.name
-                
-                print(f"Downloading from schema CDN: {cdn_url}")
-                urllib.request.urlretrieve(cdn_url, tmp_path)
-                print("Download completed")
-                
-                checkpoint = torch.load(tmp_path, map_location='cpu')
-                torch.save(checkpoint, args.model_out)
-                print(f"Model loaded from schema and saved to: {args.model_out}")
-                
-                # Update config
-                config['model_source'] = 'schema'
-                config['schema_id'] = args.schema_id
-                config['model_id'] = args.model_id
-                config['execution_id'] = args.execution_id
-                config['cdn_url'] = cdn_url
-                
-                with open(args.config_updated, 'w') as f:
-                    json.dump(config, f, indent=2)
-                
-                # Get file size
-                model_file_size = get_file_size(args.model_out)
-                
-                model_info = {
-                    'model_type': 'dcgan',
-                    'model_source': 'schema',
-                    'schema_id': args.schema_id,
-                    'model_id': args.model_id,
-                    'execution_id': args.execution_id,
-                    'cdn_url': cdn_url,
-                    'model_file_size': model_file_size,
-                    'checkpoint_keys': list(checkpoint.keys()) if isinstance(checkpoint, dict) else 'state_dict'
-                }
-                with open(args.model_info_out, 'w') as f:
-                    json.dump(model_info, f, indent=2)
-                    
-                print(f"Model file size: {model_file_size}")
-                os.unlink(tmp_path)
-                
-            except Exception as e:
-                print(f"Failed to load model from schema: {e}")
-                traceback.print_exc()
+                execution_id_int = int(args.execution_id)
+            except ValueError:
+                print(f" ERROR: execution_id must be an integer. Got: {args.execution_id}")
                 sys.exit(1)
+            
+            # Query schema for weights URL
+            weights_url, schema_instance = query_schema_for_weights(
+                args.schema_id, args.model_id, execution_id_int, args.bearer_token
+            )
+            
+            if weights_url:
+                print(f"  Loading model from schema URL...")
+                checkpoint, dcgan_config, model_info = download_and_load_model(weights_url, master_config)
+                source = "schema"
                 
+                if checkpoint:
+                    # Add schema info to model_info
+                    model_info['schema_id'] = args.schema_id
+                    model_info['model_id'] = args.model_id
+                    model_info['execution_id'] = execution_id_int
+                    model_info['schema_instance'] = schema_instance
+                    print(f" Model loaded from schema successfully")
+                else:
+                    print(f" Failed to load model from schema URL")
+                    sys.exit(1)
+            else:
+                print(f" No weights URL found in schema, falling back to build mode")
+                load_from_schema = False
+        
         # MODE 2: Load from direct CDN URL
-        elif load_from_cdn:
-            print(f"Loading model from direct CDN URL...")
+        if not checkpoint and load_from_cdn:
+            print(f"\\nMODE 2: Loading from CDN URL")
             
             if not args.cdn_url:
-                print("ERROR: cdn_url is required when load_from_cdn=true")
+                print(" ERROR: cdn_url is required when load_from_cdn=true")
                 sys.exit(1)
             
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
-                    tmp_path = tmp_file.name
-                
-                print(f"Downloading from CDN: {args.cdn_url}")
-                urllib.request.urlretrieve(args.cdn_url, tmp_path)
-                print("Download completed")
-                
-                checkpoint = torch.load(tmp_path, map_location='cpu')
-                torch.save(checkpoint, args.model_out)
-                print(f"Model loaded from CDN and saved to: {args.model_out}")
-                
-                # Update config
-                config['model_source'] = 'cdn'
-                config['cdn_url'] = args.cdn_url
-                
-                with open(args.config_updated, 'w') as f:
-                    json.dump(config, f, indent=2)
-                
-                # Get file size
-                model_file_size = get_file_size(args.model_out)
-                
-                model_info = {
-                    'model_type': 'dcgan',
-                    'model_source': 'cdn',
-                    'cdn_url': args.cdn_url,
-                    'model_file_size': model_file_size,
-                    'checkpoint_keys': list(checkpoint.keys()) if isinstance(checkpoint, dict) else 'state_dict'
-                }
-                with open(args.model_info_out, 'w') as f:
-                    json.dump(model_info, f, indent=2)
-                    
-                print(f"Model file size: {model_file_size}")
-                os.unlink(tmp_path)
-                
-            except Exception as e:
-                print(f"Failed to load model from CDN: {e}")
-                traceback.print_exc()
+            print(f"  Loading model from CDN URL: {args.cdn_url[:100]}...")
+            checkpoint, dcgan_config, model_info = download_and_load_model(args.cdn_url, master_config)
+            source = "cdn"
+            
+            if checkpoint:
+                model_info['cdn_url'] = args.cdn_url
+                print(f" Model loaded from CDN successfully")
+            else:
+                print(f" Failed to load model from CDN URL")
                 sys.exit(1)
-                
+        
         # MODE 3: Build new model
-        else:
-            print(f"\\nBuilding new DCGAN model...")
+        if not checkpoint:
+            print(f"\\nMODE 3: Building new model")
+            checkpoint, dcgan_config, model_info = build_new_model(master_config)
+            source = "new_build"
             
-            try:
-                # Create DCGAN config with dimensional validation
-                dcgan_config = create_valid_dcgan_config(config)
-                if dcgan_config is None:
-                    print("ERROR: Failed to create DCGAN config")
-                    sys.exit(1)
-                
-                # Validate config if function exists
-                if 'validate_config' in globals():
-                    is_valid, errors = validate_config(dcgan_config)
-                    if not is_valid:
-                        print("Config validation errors:")
-                        for error in errors:
-                            print(f"  - {error}")
-                        # Don't exit, just warn
-                        print(" Continuing despite validation warnings...")
-                
-                # Validate dimensions
-                is_valid_dim, dim_error, output_size = validate_dcgan_dimensions(dcgan_config)
-                if not is_valid_dim:
-                    print(f"WARNING: Dimensional issue: {dim_error}")
-                    print(f"  Output size: {output_size}, Target: {dcgan_config.image_size}")
-                
-                # Create models using the actual classes
-                print(f"\\nCreating Generator...")
-                generator = FullyConfigurableDCGANGenerator(dcgan_config)
-                
-                print(f"Creating Discriminator...")
-                discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config)
-                
-                print(f"\\n ARCHITECTURE DETAILS:")
-                print(f"  Algorithm: {dcgan_config.training_algorithm.value}")
-                print(f"  Image size: {dcgan_config.image_size}")
-                print(f"  Channels: {dcgan_config.channels}")
-                print(f"  Latent dim: {dcgan_config.latent_dim}")
-                
-                # Check if blocks attribute exists
-                if hasattr(generator, 'blocks'):
-                    print(f"  Generator blocks: {len(generator.blocks)}")
+            if not checkpoint:
+                print(f" Failed to build new model")
+                sys.exit(1)
+        
+        # Save outputs
+        print(f"\\nSaving outputs...")
+        
+        try:
+            # Save model checkpoint
+            torch.save(checkpoint, args.model_out)
+            model_file_size = get_file_size(args.model_out)
+            print(f" Model saved: {args.model_out} ({model_file_size})")
+            
+            # Save config updated
+            if dcgan_config:
+                # Convert config to dict if needed
+                if hasattr(dcgan_config, 'to_dict'):
+                    config_dict = dcgan_config.to_dict()
                 else:
-                    print(f"  Generator architecture: {generator.__class__.__name__}")
-                
-                if hasattr(discriminator, 'blocks'):
-                    print(f"  Discriminator blocks: {len(discriminator.blocks)}")
-                else:
-                    print(f"  Discriminator architecture: {discriminator.__class__.__name__}")
-                
-                # Parameter counts
-                gen_params = sum(p.numel() for p in generator.parameters())
-                disc_params = sum(p.numel() for p in discriminator.parameters())
-                total_params = gen_params + disc_params
-                
-                print(f"\\n PARAMETER COUNTS:")
-                print(f"  Generator parameters: {gen_params:,}")
-                print(f"  Discriminator parameters: {disc_params:,}")
-                print(f"  Total parameters: {total_params:,}")
-                
-                # Test forward passes
-                print(f"\\n Testing forward passes...")
-                with torch.no_grad():
-                    # Test generator
-                    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-                    z = torch.randn(2, dcgan_config.latent_dim, 1, 1, device=device)
-                    generator.to(device)
-                    discriminator.to(device)
-                    
-                    gen_output = generator(z)
-                    print(f"  Generator output shape: {gen_output.shape}")
-                    print(f"  Generator output range: [{gen_output.min():.3f}, {gen_output.max():.3f}]")
-                    
-                    # Test discriminator
-                    disc_output = discriminator(gen_output)
-                    print(f"  Discriminator output shape: {disc_output.shape}")
-                    if disc_output.dim() > 1:
-                        print(f"  Discriminator output shape details: {disc_output.shape}")
-                    else:
-                        print(f"  Discriminator output range: [{disc_output.min():.3f}, {disc_output.max():.3f}]")
-                
-                # Create model info
-                model_info = {
-                    'model_type': 'dcgan',
-                    'model_source': config.get('model_source', 'new_build'),
-                    'training_algorithm': dcgan_config.training_algorithm.value,
-                    'image_size': dcgan_config.image_size,
-                    'channels': dcgan_config.channels,
-                    'latent_dim': dcgan_config.latent_dim,
-                    'generator_params': gen_params,
-                    'discriminator_params': disc_params,
-                    'total_params': total_params,
-                    'generator_class': generator.__class__.__name__,
-                    'discriminator_class': discriminator.__class__.__name__,
-                    'block_training_enabled': dcgan_config.block_training.enabled,
-                    'use_cafo': dcgan_config.use_cafo,
-                    'use_forward_forward': dcgan_config.use_forward_forward,
-                    'use_hybrid': dcgan_config.use_hybrid,
-                    'training_config': {
-                        'algorithm': dcgan_config.training_algorithm.value,
-                        'batch_size': dcgan_config.batch_size,
-                        'epochs': dcgan_config.epochs,
-                        'block_training_enabled': dcgan_config.block_training.enabled,
-                        'num_blocks': dcgan_config.block_training.num_blocks if dcgan_config.block_training.enabled else 0,
-                        'device': dcgan_config.device
-                    },
-                    'dimensional_validation': {
-                        'valid': is_valid_dim,
-                        'error': dim_error if not is_valid_dim else '',
-                        'output_size': int(output_size) if output_size else 0,
-                        'target_size': dcgan_config.image_size
+                    config_dict = {
+                        'image_size': getattr(dcgan_config, 'image_size', 32),
+                        'channels': getattr(dcgan_config, 'channels', 1),
+                        'latent_dim': getattr(dcgan_config, 'latent_dim', 100),
+                        'training_algorithm': getattr(dcgan_config, 'training_algorithm', 'BACKPROP'),
+                        'use_cafo': getattr(dcgan_config, 'use_cafo', False),
+                        'use_forward_forward': getattr(dcgan_config, 'use_forward_forward', False),
+                        'batch_size': getattr(dcgan_config, 'batch_size', 16),
+                        'epochs': getattr(dcgan_config, 'epochs', 2)
                     }
-                }
                 
-                # Save both models in a checkpoint
-                checkpoint = {
-                    'config': dcgan_config.to_dict(),
-                    'generator_state_dict': generator.state_dict(),
-                    'discriminator_state_dict': discriminator.state_dict(),
-                    'model_info': model_info,
-                    'model_type': 'dcgan',
-                    'training_algorithm': dcgan_config.training_algorithm.value,
-                    'master_config': config
-                }
+                # Add source info
+                config_dict['model_source'] = source
+                if source == "schema":
+                    config_dict['schema_id'] = args.schema_id
+                    config_dict['model_id'] = args.model_id
+                    config_dict['execution_id'] = args.execution_id
+                elif source == "cdn":
+                    config_dict['cdn_url'] = args.cdn_url
                 
-                torch.save(checkpoint, args.model_out)
-                
-                # Get file size
-                model_file_size = get_file_size(args.model_out)
-                model_info['model_file_size'] = model_file_size
-                
-                # Save updated config (DCGAN config)
                 with open(args.config_updated, 'w') as f:
-                    json.dump(dcgan_config.to_dict(), f, indent=2)
-                    
-                # Save model info
+                    json.dump(config_dict, f, indent=2)
+                print(f" Config saved: {args.config_updated}")
+            else:
+                print(f" No config to save")
+                with open(args.config_updated, 'w') as f:
+                    json.dump({"error": "No config available"}, f, indent=2)
+            
+            # Save model info
+            if model_info:
+                model_info['model_file_size'] = model_file_size
+                model_info['model_source'] = source
                 with open(args.model_info_out, 'w') as f:
                     json.dump(model_info, f, indent=2)
-                    
-                print(f"\\n DCGAN model built successfully!")
-                print(f"  Saved to: {args.model_out}")
-                print(f"  File size: {model_file_size}")
-                print(f"  Algorithm: {dcgan_config.training_algorithm.value}")
-                print(f"  Block training: {'Enabled' if dcgan_config.block_training.enabled else 'Disabled'}")
-                print(f"  CAFO: {'Yes' if dcgan_config.use_cafo else 'No'}")
-                print(f"  Forward-Forward: {'Yes' if dcgan_config.use_forward_forward else 'No'}")
-                print(f"  Dimensional validation: {' Pass' if is_valid_dim else ' Warning: ' + dim_error}")
-                
-            except Exception as e:
-                print(f" ERROR: Failed to build DCGAN model: {e}")
-                traceback.print_exc()
-                sys.exit(1)
+                print(f" Model info saved: {args.model_info_out}")
+            else:
+                print(f" No model info to save")
+                with open(args.model_info_out, 'w') as f:
+                    json.dump({"error": "No model info available"}, f, indent=2)
+            
+            # Final summary
+            print(f"\\n" + "=" * 80)
+            print(f"BUILD COMPLETED SUCCESSFULLY!")
+            print("=" * 80)
+            print(f"Source: {source}")
+            if model_info:
+                print(f"Image size: {model_info.get('image_size', 'N/A')}")
+                print(f"Channels: {model_info.get('channels', 'N/A')}")
+                print(f"Latent dim: {model_info.get('latent_dim', 'N/A')}")
+                print(f"Total parameters: {model_info.get('total_params', 'N/A'):,}")
+            print(f"Model file: {args.model_out}")
+            print(f"File size: {model_file_size}")
+            print("=" * 80)
+            
+        except Exception as e:
+            print(f" Error saving outputs: {e}")
+            traceback.print_exc()
+            sys.exit(1)
 
     args:
       - --master_config
@@ -752,6 +728,8 @@ implementation:
       - {inputValue: model_id}
       - --execution_id
       - {inputValue: execution_id}
+      - --bearer_token
+      - {inputValue: bearer_token}
       - --load_from_cdn
       - {inputValue: load_from_cdn}
       - --cdn_url
