@@ -582,7 +582,7 @@ implementation:
                 print(f"✓ Generator loaded via nesy_factory")
                 
             except ImportError:
-                print("⚠️ nesy_factory not available, using fallback generator loading")
+                print(" nesy_factory not available, using fallback generator loading")
                 # Create simple generator from state dict
                 generator = torch.nn.Sequential(
                     torch.nn.Linear(100, 128 * 8 * 8),
@@ -899,8 +899,8 @@ implementation:
         print(f"  Image Fidelity: {rlaf_metrics['composite_scores']['image_fidelity']:.3f}")
         print(f"  Diversity Quality: {rlaf_metrics['composite_scores']['diversity_quality']:.3f}")
         print("\\n CDN UPLOADS:")
-        print(f"  Visualization: {'✅ Uploaded' if viz_url else '❌ Failed'}")
-        print(f"  Results Package: {'✅ Uploaded' if results_package_url else '❌ Failed'}")
+        print(f"  Visualization: {' Uploaded' if viz_url else ' Failed'}")
+        print(f"  Results Package: {' Uploaded' if results_package_url else ' Failed'}")
         print("=" * 80)
         
     args:
