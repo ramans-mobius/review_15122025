@@ -1,4 +1,4 @@
-name: Trigger Pipeline v17
+name: Trigger Pipeline v18
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -238,7 +238,7 @@ implementation:
             fixed_urls[key] = fixed_url
             if fixed_url:
                 print(f"    Fixed URL length: {len(fixed_url)} chars")
-                print(f"    URL preview: {fixed_url[:80]}...")
+                print(f"    URL preview: {fixed_url}...")
             else:
                 print(f"    WARNING: Empty URL for {key}")
         
