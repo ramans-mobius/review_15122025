@@ -1,4 +1,4 @@
-name: Upload Data To CDN v12 - FULL SET
+name: Upload Data To CDN v13 - FULL SET
 description: Uploads complete dataset set for next pipeline continuation
 inputs:
   # From Load Raw Dataset v1 - RAW DATA
@@ -323,7 +323,7 @@ implementation:
                     return None
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"    ✓ Uploaded: {full_url[:80]}...")
+                print(f"    ✓ Uploaded: {full_url}...")
                 
                 # Save URL locally
                 with open(output_url_path, "w") as f:
