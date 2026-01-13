@@ -1,1 +1,600 @@
 
+name: Upload Training Metrics to Schema v1
+description: Uploads DCGAN training metrics to training schema database
+inputs:
+  # Training outputs from Train DCGAN brick
+  - name: training_history
+    type: String
+    description: "Training history JSON from training brick"
+  - name: training_metrics
+    type: String
+    description: "Training metrics JSON from training brick"
+  - name: trained_model
+    type: Model
+    description: "Trained model checkpoint"
+  - name: master_config
+    type: String
+    description: "Master configuration JSON"
+  
+  # Schema parameters
+  - name: schema_id
+    type: String
+    description: "Training schema ID"
+  - name: bearer_token
+    type: String
+    description: "Bearer token for authentication"
+  - name: model_id
+    type: String
+    description: "Model identifier"
+  - name: execution_id
+    type: String
+    description: "Execution ID (will be converted to integer)"
+  - name: tenant_id
+    type: String
+    description: "Tenant ID for schema"
+  - name: project_id
+    type: String
+    description: "Project ID for schema"
+  - name: architecture_type
+    type: String
+    default: "GAN"
+    description: "Architecture type"
+  
+  # Training mode parameters
+  - name: training_mode
+    type: String
+    default: "standard"
+    description: "Training mode (standard, cafo, forward_forward)"
+  - name: block_number
+    type: String
+    default: "0"
+    description: "Block number for block training"
+  - name: block_type
+    type: String
+    default: ""
+    description: "Block type (generator, discriminator)"
+
+outputs:
+  - name: upload_status
+    type: String
+    description: "Upload status and results"
+  - name: schema_response
+    type: String
+    description: "Response from schema API for all epochs"
+  - name: metrics_summary
+    type: String
+    description: "Summary of uploaded metrics"
+
+implementation:
+  container:
+    image: deepak0147/nessy-facotry:0.0.9
+    command:
+      - sh
+      - -c
+      - |
+        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import torch
+        import argparse
+        import json
+        import os
+        import sys
+        import subprocess
+        import time
+        from datetime import datetime
+        import traceback
+        
+        parser = argparse.ArgumentParser()
+        
+        # Training outputs
+        parser.add_argument('--training_history', type=str, required=True)
+        parser.add_argument('--training_metrics', type=str, required=True)
+        parser.add_argument('--trained_model', type=str, required=True)
+        parser.add_argument('--master_config', type=str, required=True)
+        
+        # Schema parameters
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--bearer_token', type=str, required=True)
+        parser.add_argument('--model_id', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)
+        parser.add_argument('--tenant_id', type=str, required=True)
+        parser.add_argument('--project_id', type=str, required=True)
+        parser.add_argument('--architecture_type', type=str, default='GAN')
+        
+        # Training mode parameters
+        parser.add_argument('--training_mode', type=str, default='standard')
+        parser.add_argument('--block_number', type=str, default='0')
+        parser.add_argument('--block_type', type=str, default='')
+        
+        # Outputs
+        parser.add_argument('--upload_status', type=str, required=True)
+        parser.add_argument('--schema_response', type=str, required=True)
+        parser.add_argument('--metrics_summary', type=str, required=True)
+        
+        args = parser.parse_args()
+        
+        print("=" * 80)
+        print("UPLOAD TRAINING METRICS TO SCHEMA v1")
+        print("=" * 80)
+        
+        # ============================================================================
+        # Create output directories
+        # ============================================================================
+        print("\\nCreating output directories...")
+        
+        output_paths = [
+            args.upload_status,
+            args.schema_response,
+            args.metrics_summary
+        ]
+        
+        for path in output_paths:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"  Created: {dir_path}")
+        
+        # ============================================================================
+        # Parse inputs with data type validation
+        # ============================================================================
+        try:
+            execution_id = int(args.execution_id)
+            print(f"✓ Execution ID: {execution_id} (type: number)")
+        except ValueError:
+            print(f"ERROR: execution_id must be an integer. Got: {args.execution_id}")
+            sys.exit(1)
+        
+        try:
+            block_number = int(args.block_number) if args.block_number.strip() else 0
+            print(f"✓ Block Number: {block_number} (type: number)")
+        except ValueError:
+            print(f"ERROR: block_number must be an integer. Got: {args.block_number}")
+            sys.exit(1)
+        
+        # Get current timestamp (long type)
+        current_timestamp = int(time.time() * 1000)  # milliseconds
+        
+        print(f"\\nParameters:")
+        print(f"  Schema ID: {args.schema_id}")
+        print(f"  Model ID: {args.model_id}")
+        print(f"  Execution ID: {execution_id}")
+        print(f"  Training Mode: {args.training_mode}")
+        print(f"  Block Number: {block_number}")
+        print(f"  Block Type: {args.block_type}")
+        print(f"  Architecture Type: {args.architecture_type}")
+        print(f"  Tenant ID: {args.tenant_id}")
+        print(f"  Project ID: {args.project_id}")
+        print(f"  Timestamp: {current_timestamp}")
+        
+        # ============================================================================
+        # Load training data
+        # ============================================================================
+        print(f"\\nLoading training data...")
+        
+        try:
+            # Load training history
+            with open(args.training_history, 'r') as f:
+                training_history = json.load(f)
+            print(f"✓ Loaded training history")
+            
+            # Load training metrics
+            with open(args.training_metrics, 'r') as f:
+                training_metrics = json.load(f)
+            print(f"✓ Loaded training metrics")
+            
+            # Load master config
+            with open(args.master_config, 'r') as f:
+                master_config = json.load(f)
+            print(f"✓ Loaded master config")
+            
+            # Extract training info
+            algorithm = training_history.get('algorithm', 'backprop')
+            epochs_completed = training_history.get('epochs_completed', 0)
+            total_training_time = training_history.get('total_training_time', 0)
+            training_success = training_history.get('training_success', False)
+            
+            # Get epoch losses - ensure we have proper data
+            epoch_losses = training_history.get('epoch_losses', [])
+            generator_losses = training_history.get('generator_losses', [])
+            discriminator_losses = training_history.get('discriminator_losses', [])
+            
+            # For DCGAN, we need to calculate accuracy-like metrics
+            # Since GANs don't have accuracy, we can use discriminator accuracy or FID score
+            
+            print(f"\\nTraining Summary:")
+            print(f"  Algorithm: {algorithm}")
+            print(f"  Epochs Completed: {epochs_completed}")
+            print(f"  Training Time: {total_training_time:.2f}s")
+            print(f"  Success: {training_success}")
+            print(f"  Epoch Losses Available: {len(epoch_losses)}")
+            
+        except Exception as e:
+            print(f"ERROR loading training data: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        # ============================================================================
+        # Schema upload function with data type conversion
+        # ============================================================================
+        def upload_to_schema(schema_entry):
+            """Upload a single entry to schema"""
+            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create"
+            
+            try:
+                curl_command = [
+                    "curl",
+                    "--location", schema_url,
+                    "--header", f"Authorization: Bearer {args.bearer_token}",
+                    "--header", "Content-Type: application/json",
+                    "--data", json.dumps(schema_entry),
+                    "--fail",
+                    "--show-error",
+                    "--connect-timeout", "30",
+                    "--max-time", "60",
+                    "--silent"
+                ]
+                
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                response = json.loads(process.stdout)
+                return True, response
+                
+            except subprocess.CalledProcessError as e:
+                error_msg = e.stderr[:200] if e.stderr else "Unknown error"
+                print(f"    ✗ Upload failed: {error_msg}")
+                return False, {"error": error_msg, "stdout": e.stdout}
+            except Exception as e:
+                print(f"    ✗ Error: {str(e)[:100]}")
+                return False, {"error": str(e)}
+        
+        def convert_to_schema_types(data_dict):
+            """Convert data to match schema field types"""
+            converted = {}
+            
+            # Map of field names to their expected types from schema
+            field_types = {
+                'tenant_id': 'string',
+                'execution_id': 'number',
+                'loss': 'float',
+                'validation_loss': 'float',
+                'accuracy': 'float',
+                'validation_accuracy': 'float',
+                'epoch': 'Integer',
+                'model_id': 'string',
+                'custom_metrics': 'json',
+                'projectId': 'string',
+                'timestamp': 'long',
+                'kl_loss': 'float',
+                'recon_loss': 'float',
+                'training_mode': 'string',
+                'block': 'number',
+                'block_type': 'string'
+            }
+            
+            for field, value in data_dict.items():
+                if field in field_types:
+                    expected_type = field_types[field]
+                    
+                    try:
+                        if expected_type == 'string':
+                            converted[field] = str(value) if value is not None else ""
+                        elif expected_type == 'number' or expected_type == 'Integer':
+                            # Convert to int
+                            converted[field] = int(float(value)) if value is not None else 0
+                        elif expected_type == 'float':
+                            # Convert to float
+                            converted[field] = float(value) if value is not None else 0.0
+                        elif expected_type == 'long':
+                            # Convert to int (long in JSON is just a number)
+                            converted[field] = int(value) if value is not None else 0
+                        elif expected_type == 'json':
+                            # Ensure it's valid JSON string
+                            if isinstance(value, (dict, list)):
+                                converted[field] = json.dumps(value)
+                            else:
+                                converted[field] = str(value)
+                        else:
+                            converted[field] = value
+                    except (ValueError, TypeError) as e:
+                        print(f"    ⚠️ Could not convert {field}={value} to {expected_type}: {e}")
+                        # Use default value based on type
+                        if expected_type in ['number', 'Integer', 'long']:
+                            converted[field] = 0
+                        elif expected_type == 'float':
+                            converted[field] = 0.0
+                        elif expected_type == 'string':
+                            converted[field] = ""
+                        elif expected_type == 'json':
+                            converted[field] = "{}"
+                else:
+                    converted[field] = value
+            
+            return converted
+        
+        # ============================================================================
+        # Prepare and upload metrics for each epoch
+        # ============================================================================
+        print(f"\\nPreparing metrics for upload...")
+        
+        all_responses = []
+        successful_uploads = 0
+        failed_uploads = 0
+        
+        # REQUIRED FIELDS for schema (from schema definition)
+        required_fields = {
+            'tenant_id': args.tenant_id,
+            'execution_id': execution_id,
+            'epoch': 0,  # Will be set per epoch
+            'projectId': args.project_id
+        }
+        
+        # OPTIONAL FIELDS (will be populated per epoch)
+        optional_fields_base = {
+            'model_id': args.model_id,
+            'training_mode': args.training_mode,
+            'timestamp': current_timestamp,
+            'block': block_number,
+            'block_type': args.block_type if args.block_type else None
+        }
+        
+        # Upload each epoch separately
+        for epoch in range(1, epochs_completed + 1):
+            print(f"\\nProcessing Epoch {epoch}/{epochs_completed}...")
+            
+            # Get losses for this epoch
+            gen_loss = 0.0
+            disc_loss = 0.0
+            
+            # Try to get from epoch_losses array
+            if epoch_losses and len(epoch_losses) >= epoch:
+                epoch_data = epoch_losses[epoch - 1]
+                gen_loss = epoch_data.get('generator_loss', 0.0)
+                disc_loss = epoch_data.get('discriminator_loss', 0.0)
+            elif generator_losses and len(generator_losses) >= epoch:
+                gen_loss = generator_losses[epoch - 1]
+                if discriminator_losses and len(discriminator_losses) >= epoch:
+                    disc_loss = discriminator_losses[epoch - 1]
+            
+            # For DCGAN, we don't have accuracy in traditional sense
+            # We can calculate discriminator accuracy as a proxy
+            # Real discriminator should output ~0.5 for both real and fake
+            discriminator_accuracy = 0.5  # Default to 0.5 (random guessing)
+            if gen_loss > 0 and disc_loss > 0:
+                # Calculate a proxy accuracy based on losses
+                # Lower generator loss + higher discriminator loss = better generator
+                # We'll use a simple heuristic
+                total_loss = gen_loss + disc_loss
+                if total_loss > 0:
+                    discriminator_accuracy = max(0.0, min(1.0, 0.5 + (disc_loss - gen_loss) / (2 * total_loss)))
+            
+            # Create custom metrics JSON
+            custom_metrics = {
+                'epoch': epoch,
+                'generator_loss': float(gen_loss),
+                'discriminator_loss': float(disc_loss),
+                'total_loss': float(gen_loss + disc_loss),
+                'algorithm': algorithm,
+                'architecture_type': args.architecture_type,
+                'training_time_per_epoch': float(total_training_time / epochs_completed) if epochs_completed > 0 else 0.0,
+                'training_success': training_success,
+                'image_size': training_metrics.get('image_size', 0),
+                'channels': training_metrics.get('channels', 0),
+                'latent_dim': training_metrics.get('latent_dim', 0),
+                'batch_size': training_metrics.get('batch_size', 0)
+            }
+            
+            # Create schema entry for this epoch
+            schema_entry = {
+                **required_fields,
+                **optional_fields_base,
+                'epoch': epoch,
+                'loss': float(gen_loss),  # Using generator loss as main loss
+                'accuracy': float(discriminator_accuracy),
+                'custom_metrics': custom_metrics
+            }
+            
+            # Add discriminator loss as validation_loss
+            schema_entry['validation_loss'] = float(disc_loss)
+            schema_entry['validation_accuracy'] = float(1.0 - discriminator_accuracy)  # Complementary
+            
+            # For GAN-specific losses
+            schema_entry['kl_loss'] = 0.0  # Not applicable for standard GAN
+            schema_entry['recon_loss'] = 0.0  # Not applicable for standard GAN
+            
+            # Convert data types to match schema
+            schema_entry_converted = convert_to_schema_types(schema_entry)
+            
+            print(f"  Epoch {epoch} metrics:")
+            print(f"    Generator Loss: {gen_loss:.4f}")
+            print(f"    Discriminator Loss: {disc_loss:.4f}")
+            print(f"    Discriminator Accuracy: {discriminator_accuracy:.4f}")
+            
+            # Upload to schema
+            print(f"  Uploading to schema...")
+            success, response = upload_to_schema(schema_entry_converted)
+            
+            if success:
+                print(f"    ✅ Upload successful")
+                successful_uploads += 1
+            else:
+                print(f"    ❌ Upload failed")
+                failed_uploads += 1
+            
+            all_responses.append({
+                'epoch': epoch,
+                'success': success,
+                'response': response,
+                'metrics': {
+                    'generator_loss': gen_loss,
+                    'discriminator_loss': disc_loss,
+                    'discriminator_accuracy': discriminator_accuracy
+                }
+            })
+            
+            # Small delay between uploads to avoid rate limiting
+            if epoch < epochs_completed:
+                time.sleep(0.5)
+        
+        # ============================================================================
+        # Create summary
+        # ============================================================================
+        print(f"\\nCreating upload summary...")
+        
+        metrics_summary_data = {
+            'total_epochs': epochs_completed,
+            'epochs_uploaded': successful_uploads,
+            'failed_uploads': failed_uploads,
+            'success_rate': (successful_uploads / epochs_completed * 100) if epochs_completed > 0 else 0,
+            'model_id': args.model_id,
+            'execution_id': execution_id,
+            'training_mode': args.training_mode,
+            'algorithm': algorithm,
+            'architecture_type': args.architecture_type,
+            'total_training_time': total_training_time,
+            'training_success': training_success,
+            'final_metrics': {
+                'final_generator_loss': generator_losses[-1] if generator_losses else 0.0,
+                'final_discriminator_loss': discriminator_losses[-1] if discriminator_losses else 0.0
+            },
+            'timestamp': current_timestamp,
+            'upload_timestamp': int(time.time() * 1000)
+        }
+        
+        # Add per-epoch summary
+        if epoch_losses:
+            metrics_summary_data['epoch_summary'] = []
+            for i, epoch_data in enumerate(epoch_losses[:10]):  # First 10 epochs
+                metrics_summary_data['epoch_summary'].append({
+                    'epoch': i + 1,
+                    'generator_loss': epoch_data.get('generator_loss', 0.0),
+                    'discriminator_loss': epoch_data.get('discriminator_loss', 0.0)
+                })
+        
+        # ============================================================================
+        # Save outputs
+        # ============================================================================
+        try:
+            # Save upload status
+            upload_status_data = {
+                'overall_success': failed_uploads == 0,
+                'total_attempted': epochs_completed,
+                'successful': successful_uploads,
+                'failed': failed_uploads,
+                'model_id': args.model_id,
+                'execution_id': execution_id,
+                'schema_id': args.schema_id,
+                'upload_timestamp': int(time.time() * 1000),
+                'detailed_responses': all_responses
+            }
+            
+            with open(args.upload_status, 'w') as f:
+                json.dump(upload_status_data, f, indent=2)
+            print(f"✓ Upload status saved: {args.upload_status}")
+            
+            # Save schema responses
+            with open(args.schema_response, 'w') as f:
+                json.dump(all_responses, f, indent=2)
+            print(f"✓ Schema responses saved: {args.schema_response}")
+            
+            # Save metrics summary
+            with open(args.metrics_summary, 'w') as f:
+                json.dump(metrics_summary_data, f, indent=2)
+            print(f"✓ Metrics summary saved: {args.metrics_summary}")
+            
+        except Exception as e:
+            print(f"ERROR saving outputs: {e}")
+            traceback.print_exc()
+        
+        # ============================================================================
+        # Final summary
+        # ============================================================================
+        print(f"\\n" + "=" * 80)
+        if failed_uploads == 0 and successful_uploads > 0:
+            print("✅ TRAINING METRICS UPLOAD COMPLETED SUCCESSFULLY!")
+        elif successful_uploads > 0:
+            print("⚠️ TRAINING METRICS UPLOAD PARTIALLY SUCCESSFUL")
+        else:
+            print("❌ TRAINING METRICS UPLOAD FAILED")
+        print("=" * 80)
+        
+        print(f"\\nSummary:")
+        print(f"  Model: {args.model_id}")
+        print(f"  Execution ID: {execution_id}")
+        print(f"  Architecture: {args.architecture_type}")
+        print(f"  Training Mode: {args.training_mode}")
+        print(f"  Algorithm: {algorithm}")
+        print(f"  Total Epochs: {epochs_completed}")
+        print(f"  Uploaded: {successful_uploads}/{epochs_completed}")
+        print(f"  Success Rate: {(successful_uploads/epochs_completed*100):.1f}%" if epochs_completed > 0 else "N/A")
+        print(f"  Block Training: {'Yes' if block_number > 0 else 'No'}")
+        if block_number > 0:
+            print(f"  Block Number: {block_number}")
+            print(f"  Block Type: {args.block_type}")
+        
+        print(f"\\nFinal Training Metrics:")
+        if generator_losses:
+            print(f"  Final Generator Loss: {generator_losses[-1]:.4f}")
+        if discriminator_losses:
+            print(f"  Final Discriminator Loss: {discriminator_losses[-1]:.4f}")
+        print(f"  Total Training Time: {total_training_time:.2f}s")
+        print(f"  Training Success: {training_success}")
+        
+        print("=" * 80)
+        
+        # Exit with error if all uploads failed
+        if successful_uploads == 0 and epochs_completed > 0:
+            print("❌ No metrics were uploaded successfully")
+            sys.exit(1)
+
+    args:
+      # Training outputs
+      - --training_history
+      - {inputPath: training_history}
+      - --training_metrics
+      - {inputPath: training_metrics}
+      - --trained_model
+      - {inputPath: trained_model}
+      - --master_config
+      - {inputValue: master_config}
+      
+      # Schema parameters
+      - --schema_id
+      - {inputValue: schema_id}
+      - --bearer_token
+      - {inputValue: bearer_token}
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --tenant_id
+      - {inputValue: tenant_id}
+      - --project_id
+      - {inputValue: project_id}
+      - --architecture_type
+      - {inputValue: architecture_type}
+      
+      # Training mode parameters
+      - --training_mode
+      - {inputValue: training_mode}
+      - --block_number
+      - {inputValue: block_number}
+      - --block_type
+      - {inputValue: block_type}
+      
+      # Outputs
+      - --upload_status
+      - {outputPath: upload_status}
+      - --schema_response
+      - {outputPath: schema_response}
+      - --metrics_summary
+      - {outputPath: metrics_summary}
