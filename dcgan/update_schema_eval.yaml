@@ -185,7 +185,7 @@ implementation:
         
         # Check if we found the metrics
         if fid_value == 0.0 and ssim_value == 0.0 and psnr_value == 0.0:
-            print(f"⚠️ Warning: Could not find FID, SSIM, or PSNR in evaluation metrics")
+            print(f" Warning: Could not find FID, SSIM, or PSNR in evaluation metrics")
             print(f"  Available keys: {list(eval_metrics.keys())}")
         
         print(f"\\nExtracted values:")
@@ -252,7 +252,7 @@ implementation:
         # Schema upload function
         # ============================================================================
         def upload_to_schema(schema_data):
-            """Upload a single entry to schema"""
+          
             schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create"
             
             try:
@@ -295,11 +295,11 @@ implementation:
         success, response = upload_to_schema(schema_entry)
         
         if success:
-            print(f"✅ Upload successful!")
+            print(f" Upload successful!")
             print(f"  Response ID: {response.get('id', 'N/A')}")
             print(f"  Status: {response.get('status', 'success')}")
         else:
-            print(f"❌ Upload failed")
+            print(f" Upload failed")
         
         # ============================================================================
         # Save outputs
@@ -347,9 +347,9 @@ implementation:
         # ============================================================================
         print(f"\\n" + "=" * 80)
         if success:
-            print("✅ EVALUATION METRICS UPLOADED SUCCESSFULLY!")
+            print(" EVALUATION METRICS UPLOADED SUCCESSFULLY!")
         else:
-            print("❌ EVALUATION METRICS UPLOAD FAILED")
+            print(" EVALUATION METRICS UPLOAD FAILED")
         print("=" * 80)
         
         print(f"\\nUPLOADED METRICS:")
