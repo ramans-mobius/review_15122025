@@ -302,7 +302,7 @@ implementation:
         print(f"Master config length: {len(args.master_config)} chars")
         print(f"train_schema: {args.train_schema[:50]}..." if len(args.train_schema) > 50 else f"train_schema: {args.train_schema}")
         print(f"execution_id: {args.execution_id}")
-        
+        print(f"payload: {payload}")
         # Trigger pipeline
         print(f"\\nTriggering pipeline...")
         
