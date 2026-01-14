@@ -1,4 +1,4 @@
-name: Train DCGAN v29 - FIXED
+name: Train DCGAN v30 - FIXED
 description: Trains DCGAN with Backprop, CAFO, or Forward-Forward using EnhancedDCGANTrainer
 inputs:
   - name: data_path
@@ -69,11 +69,74 @@ implementation:
         import matplotlib
         matplotlib.use('Agg')
         
+        print("=" * 80)
+        print("TRAIN DCGAN v29 - COMPLETE FIX")
+        print("=" * 80)
+        print(f"Python version: {sys.version}")
+        print(f"Torch version: {torch.__version__}")
+        
         # ============================================================================
-        # CREATE NECESSARY CLASSES IF THEY DON'T EXIST
+        # CREATE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
         # ============================================================================
         
-        # Create wrapper classes for data compatibility
+        print("\n" + "-" * 40)
+        print("DEFINING COMPATIBILITY CLASSES")
+        print("-" * 40)
+        
+        # From Preprocess v1 brick - CRITICAL FOR LOADING DATA
+        class PreprocessedDataset:
+            def __init__(self, images, labels, dataset_name, preprocessor_params):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = True
+                self.preprocessor_params = preprocessor_params
+            
+            def __len__(self):
+                return len(self.images)
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': True,
+                    'preprocessor_params': self.preprocessor_params
+                }
+        
+        # From Load Raw Dataset v1 brick
+        class RawDatasetWrapper:
+            def __init__(self, images, labels, dataset_name='mnist'):
+                self.images = images  # Raw images
+                self.labels = labels  # Raw labels
+                self.dataset_name = dataset_name
+                self.preprocessed = False  # Mark as raw
+                self._num_samples = len(images)
+            
+            def __len__(self):
+                return self._num_samples
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed
+                }
+        
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+        
+        # Local wrapper classes for data compatibility
         class ProcessedDatasetWrapper:
             def __init__(self, images, labels=None):
                 self.images = images
@@ -95,7 +158,6 @@ implementation:
                 }
         
         class SimpleDCGANDataset(Dataset):
-          
             def __init__(self, images, normalize=False):
                 self.images = images
                 self.normalize = normalize
@@ -110,61 +172,65 @@ implementation:
                     return img
                 return img
         
+        print("COMPATIBILITY: Compatibility classes defined")
+        
         # ============================================================================
         # IMPORT DCGAN WITH FALLBACKS
         # ============================================================================
         
-        print("Importing DCGAN modules...")
+        print("\n" + "-" * 40)
+        print("IMPORTING DCGAN MODULES")
+        print("-" * 40)
         
         # First, let's see what's available
         try:
             import nesy_factory.GANs.dcgan as dcgan_module
-            print(" Successfully imported nesy_factory.GANs.dcgan")
+            print("SUCCESS: Successfully imported nesy_factory.GANs.dcgan")
             
             # Check what's available
             available_attrs = [attr for attr in dir(dcgan_module) if not attr.startswith('_')]
-            print(f" Available attributes ({len(available_attrs)}):")
+            print(f"INFO: Available attributes ({len(available_attrs)}):")
             for i in range(0, len(available_attrs), 10):
                 print(f"   {', '.join(available_attrs[i:i+10])}")
             
             # Try to import specific classes with fallbacks
             try:
                 from nesy_factory.GANs.dcgan import DCGANConfig
-                print("  ✓ DCGANConfig imported")
+                print("  IMPORT: DCGANConfig imported")
             except ImportError:
-                print("   DCGANConfig not found, will create config manually")
+                print("   WARNING: DCGANConfig not found, will create config manually")
                 DCGANConfig = None
             
             try:
                 from nesy_factory.GANs.dcgan import TrainingAlgorithm
-                print("  ✓ TrainingAlgorithm imported")
+                print("  IMPORT: TrainingAlgorithm imported")
             except ImportError:
-                print("   TrainingAlgorithm not found")
+                print("   WARNING: TrainingAlgorithm not found")
                 TrainingAlgorithm = None
             
             try:
                 from nesy_factory.GANs.dcgan import EnhancedDCGANTrainer
-                print("  ✓ EnhancedDCGANTrainer imported")
+                print("  IMPORT: EnhancedDCGANTrainer imported")
             except ImportError:
-                print("   EnhancedDCGANTrainer not found - this is critical!")
+                print("   ERROR: EnhancedDCGANTrainer not found - this is critical!")
                 EnhancedDCGANTrainer = None
             
             try:
                 from nesy_factory.GANs.dcgan import validate_config
-                print("  ✓ validate_config imported")
+                print("  IMPORT: validate_config imported")
             except ImportError:
-                print("   validate_config not found")
+                print("   WARNING: validate_config not found")
                 validate_config = None
             
             try:
                 from nesy_factory.GANs.dcgan import DCGANDataset
-                print("  ✓ DCGANDataset imported")
+                print("  IMPORT: DCGANDataset imported")
             except ImportError:
-                print("   DCGANDataset not found, using SimpleDCGANDataset")
+                print("   WARNING: DCGANDataset not found, using SimpleDCGANDataset")
                 DCGANDataset = SimpleDCGANDataset
             
         except ImportError as e:
-            print(f" ERROR importing nesy_factory: {e}")
+            print(f"ERROR: importing nesy_factory: {e}")
             traceback.print_exc()
             sys.exit(1)
         
@@ -187,14 +253,17 @@ implementation:
         parser.add_argument("--get_cdn", required=True)
         args = parser.parse_args()
         
-        print("\\n" + "="*80)
+        print("\n" + "="*80)
         print("DCGAN TRAINING v29 - FIXED")
         print("="*80)
         
         # ============================================================================
         # CREATE ALL OUTPUT DIRECTORIES FIRST
         # ============================================================================
-        print("\\nCreating output directories...")
+        print("\n" + "-" * 40)
+        print("CREATING OUTPUT DIRECTORIES")
+        print("-" * 40)
+        
         output_paths = [
             args.trained_model,
             args.training_history,
@@ -209,11 +278,15 @@ implementation:
                 dir_path = os.path.dirname(path)
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
-                    print(f"  Created: {dir_path}")
+                    print(f"  DIRECTORY: Created: {dir_path}")
         
         # ============================================================================
         # PARSE CONFIG AND SETUP
         # ============================================================================
+        
+        print("\n" + "-" * 40)
+        print("PARSING MASTER CONFIG")
+        print("-" * 40)
         
         try:
             config = json.loads(args.master_config)
@@ -225,12 +298,12 @@ implementation:
             epochs = gan_cfg['training'].get('epochs', 2)
             batch_size = gan_cfg['training'].get('batch_size', 16)
             
-            print(f"Training Algorithm: {algorithm.upper()}")
-            print(f"Epochs: {epochs}")
-            print(f"Batch size: {batch_size}")
+            print(f"CONFIG: Training Algorithm: {algorithm.upper()}")
+            print(f"CONFIG: Epochs: {epochs}")
+            print(f"CONFIG: Batch size: {batch_size}")
             
         except Exception as e:
-            print(f"ERROR parsing master_config: {e}")
+            print(f"ERROR: parsing master_config: {e}")
             traceback.print_exc()
             sys.exit(1)
         
@@ -238,96 +311,121 @@ implementation:
         # LOAD DATASET - COMPATIBLE WITH PREPROCESS v1 OUTPUT
         # ============================================================================
         
+        print("\n" + "-" * 40)
+        print("LOADING DATASET")
+        print("-" * 40)
+        
         try:
-            print(f"\\nLoading dataset from: {args.data_path}")
+            print(f"LOADING: Loading dataset from: {args.data_path}")
             
             # Check if file exists
             if not os.path.exists(args.data_path):
                 print(f"ERROR: Data file does not exist: {args.data_path}")
                 sys.exit(1)
             
+            # List all pickle files in directory if it's a directory
+            if os.path.isdir(args.data_path):
+                print(f"LOADING: {args.data_path} is a directory, looking for pickle files...")
+                pickle_files = [f for f in os.listdir(args.data_path) if f.endswith('.pkl') or f.endswith('.pickle')]
+                if pickle_files:
+                    data_file = os.path.join(args.data_path, pickle_files[0])
+                    print(f"LOADING: Found pickle file: {data_file}")
+                else:
+                    print(f"ERROR: No pickle files found in directory")
+                    sys.exit(1)
+            else:
+                data_file = args.data_path
+            
+            file_size = os.path.getsize(data_file)
+            print(f"LOADING: File size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
+            
             # Load processed data from Preprocess v1
-            with open(args.data_path, 'rb') as f:
-                data_wrapper = pickle.load(f)
+            print("LOADING: Loading pickle file...")
+            with open(data_file, 'rb') as f:
+                try:
+                    data_wrapper = pickle.load(f)
+                    print(f"SUCCESS: Pickle loaded successfully")
+                except Exception as e:
+                    print(f"ERROR: Failed to load pickle: {e}")
+                    traceback.print_exc()
+                    sys.exit(1)
+            
+            print(f"INFO: Data wrapper type: {type(data_wrapper)}")
+            print(f"INFO: Available attributes: {[a for a in dir(data_wrapper) if not a.startswith('_')]}")
             
             # Handle different data wrapper types from preprocess brick
-            if hasattr(data_wrapper, 'images'):
-                # This is a PreprocessedDataset from Preprocess v1
+            if isinstance(data_wrapper, PreprocessedDataset):
+                print("DETECTED: PreprocessedDataset type")
                 images = data_wrapper.images
+                labels = data_wrapper.labels if hasattr(data_wrapper, 'labels') else None
                 
-                # Check tensor shape and convert to proper format
-                if isinstance(images, torch.Tensor):
-                    if images.dim() == 4:
-                        # Shape: (N, C, H, W)
-                        images_list = [images[i] for i in range(len(images))]
-                        channels = images.shape[1]
-                        image_size = images.shape[2]
-                    elif images.dim() == 3:
-                        # Shape: (N, H, W) - add channel dimension
-                        images_list = [images[i].unsqueeze(0) for i in range(len(images))]
-                        channels = 1
-                        image_size = images.shape[1]
+            elif hasattr(data_wrapper, 'images'):
+                print("DETECTED: wrapper with 'images' attribute")
+                images = data_wrapper.images
+                labels = data_wrapper.labels if hasattr(data_wrapper, 'labels') else None
+            else:
+                print("WARNING: Unknown data format, trying to extract images...")
+                # Try to extract images directly
+                if hasattr(data_wrapper, '__len__'):
+                    images_list = []
+                    for i in range(min(10, len(data_wrapper))):  # Sample first 10
+                        try:
+                            img = data_wrapper[i]
+                            if isinstance(img, torch.Tensor):
+                                images_list.append(img)
+                            elif isinstance(img, (list, tuple, np.ndarray)):
+                                images_list.append(torch.tensor(img))
+                        except:
+                            pass
+                    
+                    if images_list:
+                        images = torch.stack(images_list) if len(images_list) > 1 else images_list[0].unsqueeze(0)
+                        labels = None
                     else:
-                        print(f"ERROR: Unexpected tensor shape: {images.shape}")
+                        print(f"ERROR: Could not extract images from dataset")
                         sys.exit(1)
                 else:
-                    print(f"ERROR: images attribute is not a tensor")
+                    print(f"ERROR: Unsupported data format")
                     sys.exit(1)
-                
-                print(f"✓ Loaded PreprocessedDataset:")
-                print(f"  Samples: {len(images_list)}")
-                print(f"  Image shape: {images_list[0].shape}")
-                print(f"  Channels: {channels}")
-                print(f"  Image size: {image_size}")
-                
-            elif hasattr(data_wrapper, '__len__'):
-                # Direct dataset object
-                images_list = []
-                for i in range(min(100, len(data_wrapper))):  # Sample first 100
-                    img = data_wrapper[i]
-                    if isinstance(img, torch.Tensor):
-                        if img.dim() == 3:
-                            # Already has channels
-                            images_list.append(img)
-                        elif img.dim() == 2:
-                            # Add channel dimension
-                            images_list.append(img.unsqueeze(0))
-                    else:
-                        # Convert to tensor
-                        images_list.append(torch.tensor(img).unsqueeze(0))
-                
-                if images_list:
-                    sample_shape = images_list[0].shape
-                    if len(sample_shape) == 3:
-                        channels = sample_shape[0]
-                        image_size = sample_shape[1]
-                    else:
-                        channels = 1
-                        image_size = sample_shape[0] if len(sample_shape) > 1 else 64
-                    
-                    print(f"✓ Loaded dataset with {len(data_wrapper)} samples")
-                    print(f"  Sample shape: {sample_shape}")
-                    print(f"  Channels: {channels}")
-                    print(f"  Image size: {image_size}")
+            
+            # Check tensor shape and convert to proper format
+            if isinstance(images, torch.Tensor):
+                if images.dim() == 4:
+                    # Shape: (N, C, H, W)
+                    images_list = [images[i] for i in range(len(images))]
+                    channels = images.shape[1]
+                    image_size = images.shape[2]
+                elif images.dim() == 3:
+                    # Shape: (N, H, W) - add channel dimension
+                    images_list = [images[i].unsqueeze(0) for i in range(len(images))]
+                    channels = 1
+                    image_size = images.shape[1]
                 else:
-                    print(f"ERROR: Could not extract images from dataset")
+                    print(f"ERROR: Unexpected tensor shape: {images.shape}")
                     sys.exit(1)
             else:
-                print(f"ERROR: Unsupported data format")
-                print(f"Data wrapper type: {type(data_wrapper)}")
-                print(f"Available attributes: {[a for a in dir(data_wrapper) if not a.startswith('_')]}")
+                print(f"ERROR: images is not a tensor, type: {type(images)}")
                 sys.exit(1)
             
-            # Create dataset for training
-            if DCGANDataset is not None:
-                train_dataset = DCGANDataset(images_list, normalize=False)
-            else:
-                train_dataset = SimpleDCGANDataset(images_list, normalize=False)
+            print(f"SUCCESS: Dataset loaded successfully:")
+            print(f"   SAMPLES: Samples: {len(images_list)}")
+            print(f"   SHAPE: Image shape: {images_list[0].shape}")
+            print(f"   CHANNELS: Channels: {channels}")
+            print(f"   SIZE: Image size: {image_size}")
+            print(f"   RANGE: Value range: [{images_list[0].min():.3f}, {images_list[0].max():.3f}]")
             
         except Exception as e:
-            print(f"ERROR loading dataset: {e}")
+            print(f"ERROR: loading dataset: {e}")
             traceback.print_exc()
             sys.exit(1)
+        
+        # Create dataset for training
+        if DCGANDataset is not None:
+            print("DATASET: Using DCGANDataset for training")
+            train_dataset = DCGANDataset(images_list, normalize=False)
+        else:
+            print("DATASET: Using SimpleDCGANDataset for training")
+            train_dataset = SimpleDCGANDataset(images_list, normalize=False)
         
         # Create dataloader
         actual_batch_size = min(batch_size, max(1, len(train_dataset)))
@@ -339,17 +437,23 @@ implementation:
             num_workers=0
         )
         
-        print(f"\\nData loader created:")
-        print(f"  Dataset size: {len(train_dataset)}")
-        print(f"  Batch size: {actual_batch_size}")
-        print(f"  Batches per epoch: {len(dataloader)}")
+        print(f"\nDATALOADER: Data loader created:")
+        print(f"   SIZE: Dataset size: {len(train_dataset)}")
+        print(f"   BATCH: Batch size: {actual_batch_size}")
+        print(f"   BATCHES: Batches per epoch: {len(dataloader)}")
         
         # ============================================================================
         # LOAD MODEL AND SETUP TRAINER
         # ============================================================================
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"\\nDevice: {device}")
+        print(f"\n" + "-" * 40)
+        print(f"DEVICE SETUP")
+        print("-" * 40)
+        print(f"DEVICE: Device: {device}")
+        if torch.cuda.is_available():
+            print(f"CUDA: CUDA Device: {torch.cuda.get_device_name(0)}")
+            print(f"CUDA: CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
         
         try:
             # Check if model file exists
@@ -357,14 +461,18 @@ implementation:
                 print(f"ERROR: Model file does not exist: {args.model_input}")
                 sys.exit(1)
             
+            model_file_size = os.path.getsize(args.model_input)
+            print(f"MODEL: Model file size: {model_file_size:,} bytes ({model_file_size/1024**2:.2f} MB)")
+            
             # Load checkpoint
-            print(f"Loading model from: {args.model_input}")
+            print(f"LOADING: Loading model from: {args.model_input}")
             checkpoint = torch.load(args.model_input, map_location='cpu')
             
             # Extract model info
             if 'model_info' in checkpoint:
                 model_info = checkpoint['model_info']
-                print(f"Model info: {model_info.get('model_source', 'unknown')}")
+                print(f"MODEL INFO: Model source: {model_info.get('model_source', 'unknown')}")
+                print(f"MODEL INFO: Model type: {model_info.get('model_type', 'unknown')}")
             
             # Check if we need to create config from scratch
             if EnhancedDCGANTrainer is None:
@@ -374,7 +482,7 @@ implementation:
             # Create config for trainer
             if 'config' in checkpoint and checkpoint['config'] is not None:
                 config_dict = checkpoint['config']
-                print(f"Creating config from checkpoint...")
+                print(f"CONFIG: Creating config from checkpoint...")
                 
                 # Update config with training parameters
                 config_dict['epochs'] = epochs
@@ -395,10 +503,22 @@ implementation:
                 if DCGANConfig is not None:
                     try:
                         # Try to create DCGANConfig from dict
-                        dcgan_config = DCGANConfig.from_dict(config_dict)
-                    except:
-                        # If from_dict doesn't exist, create config manually
-                        print("⚠️ Using fallback config creation")
+                        if hasattr(DCGANConfig, 'from_dict'):
+                            dcgan_config = DCGANConfig.from_dict(config_dict)
+                            print("CONFIG: DCGANConfig created using from_dict()")
+                        else:
+                            # Try to create directly
+                            print("WARNING: Using direct DCGANConfig creation")
+                            dcgan_config = DCGANConfig(
+                                image_size=image_size,
+                                channels=channels,
+                                latent_dim=config_dict.get('latent_dim', 100),
+                                batch_size=actual_batch_size,
+                                epochs=epochs,
+                                device=device
+                            )
+                    except Exception as e:
+                        print(f"WARNING: Fallback config creation due to: {e}")
                         dcgan_config = DCGANConfig(
                             image_size=image_size,
                             channels=channels,
@@ -408,31 +528,47 @@ implementation:
                             device=device
                         )
                 else:
-                    print(" DCGANConfig not available, creating trainer with minimal config")
+                    print("WARNING: DCGANConfig not available, creating trainer with minimal config")
                     dcgan_config = None
                 
-                # Create trainer
+                # Validate config if available
                 if dcgan_config is not None and validate_config is not None:
                     is_valid, errors = validate_config(dcgan_config)
                     if not is_valid:
-                        print("Config validation warnings:")
+                        print("WARNING: Config validation warnings:")
                         for error in errors:
-                            print(f"  - {error}")
+                            print(f"  WARNING: {error}")
                 
-                trainer = EnhancedDCGANTrainer(dcgan_config) if dcgan_config else EnhancedDCGANTrainer()
+                # Create trainer
+                try:
+                    if dcgan_config is not None:
+                        trainer = EnhancedDCGANTrainer(dcgan_config)
+                        print("TRAINER: Trainer created with config")
+                    else:
+                        trainer = EnhancedDCGANTrainer()
+                        print("TRAINER: Trainer created with default config")
+                except Exception as e:
+                    print(f"WARNING: Could not create trainer with config: {e}")
+                    print("WARNING: Creating trainer without config")
+                    trainer = EnhancedDCGANTrainer()
                 
             else:
                 # Create minimal trainer
-                print("Creating trainer with minimal configuration...")
+                print("WARNING: Creating trainer with minimal configuration...")
                 trainer = EnhancedDCGANTrainer()
             
             # Load weights if available
             if 'generator_state_dict' in checkpoint:
                 trainer.generator.load_state_dict(checkpoint['generator_state_dict'])
-                print("✓ Generator weights loaded")
+                print("WEIGHTS: Generator weights loaded")
+            else:
+                print("WARNING: No generator_state_dict in checkpoint")
+            
             if 'discriminator_state_dict' in checkpoint:
                 trainer.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
-                print("✓ Discriminator weights loaded")
+                print("WEIGHTS: Discriminator weights loaded")
+            else:
+                print("WARNING: No discriminator_state_dict in checkpoint")
             
             # Set latent dim for sampling
             if hasattr(trainer.generator, 'latent_dim'):
@@ -440,12 +576,18 @@ implementation:
             else:
                 latent_dim = 100
             
-            print(f"✓ Trainer setup complete")
-            print(f"  Algorithm: {algorithm.upper()}")
-            print(f"  Latent dim: {latent_dim}")
+            # Move models to device
+            trainer.generator = trainer.generator.to(device)
+            trainer.discriminator = trainer.discriminator.to(device)
+            
+            print(f"SUCCESS: Trainer setup complete")
+            print(f"  ALGORITHM: Algorithm: {algorithm.upper()}")
+            print(f"  LATENT DIM: Latent dim: {latent_dim}")
+            print(f"  GENERATOR PARAMS: Generator parameters: {sum(p.numel() for p in trainer.generator.parameters()):,}")
+            print(f"  DISCRIMINATOR PARAMS: Discriminator parameters: {sum(p.numel() for p in trainer.discriminator.parameters()):,}")
             
         except Exception as e:
-            print(f"ERROR setting up trainer: {e}")
+            print(f"ERROR: setting up trainer: {e}")
             traceback.print_exc()
             sys.exit(1)
         
@@ -453,7 +595,7 @@ implementation:
         # TRAINING
         # ============================================================================
         
-        print(f"\\n" + "="*60)
+        print(f"\n" + "="*60)
         print(f"STARTING TRAINING")
         print("="*60)
         
@@ -462,7 +604,7 @@ implementation:
         
         try:
             # Simple training loop
-            print(f"\\nTraining for {epochs} epochs...")
+            print(f"\nTRAINING: Training for {epochs} epochs...")
             
             trainer.generator.train()
             trainer.discriminator.train()
@@ -475,13 +617,14 @@ implementation:
             }
             
             for epoch in range(epochs):
-                print(f"\\nEpoch {epoch+1}/{epochs}:")
+                print(f"\nEPOCH {epoch+1}/{epochs}:")
                 
                 epoch_g_loss = []
                 epoch_d_loss = []
                 
                 for batch_idx, batch_data in enumerate(dataloader):
                     if batch_idx > 10:  # Limit batches for testing
+                        print(f"  BATCH: Limiting to 10 batches for testing, stopping at batch {batch_idx}")
                         break
                     
                     # Get real data
@@ -536,7 +679,7 @@ implementation:
                     epoch_d_loss.append(d_loss.item())
                     
                     if batch_idx % 2 == 0:
-                        print(f"  Batch {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
+                        print(f"  BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
                 
                 avg_g_loss = np.mean(epoch_g_loss) if epoch_g_loss else 0
                 avg_d_loss = np.mean(epoch_d_loss) if epoch_d_loss else 0
@@ -549,14 +692,14 @@ implementation:
                     'discriminator_loss': avg_d_loss
                 })
                 
-                print(f"  Epoch summary: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}")
+                print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}")
             
             training_time = time.time() - start_time
-            print(f"\\nTraining completed in {training_time:.2f}s")
+            print(f"\nTRAINING COMPLETE: Training completed in {training_time:.2f}s")
             training_success = True
             
         except Exception as e:
-            print(f"ERROR during training: {e}")
+            print(f"ERROR: during training: {e}")
             traceback.print_exc()
             training_success = False
         
@@ -564,7 +707,7 @@ implementation:
         # GENERATE SAMPLES
         # ============================================================================
         
-        print(f"\\nGenerating samples...")
+        print(f"\nGENERATING SAMPLES...")
         
         try:
             trainer.generator.eval()
@@ -578,12 +721,12 @@ implementation:
                 samples = (samples + 1) / 2
                 samples = torch.clamp(samples, 0, 1)
                 
-                print(f"✓ Generated {len(samples)} samples")
-                print(f"  Sample shape: {samples[0].shape}")
-                print(f"  Sample range: [{samples.min():.3f}, {samples.max():.3f}]")
+                print(f"SUCCESS: Generated {len(samples)} samples")
+                print(f"  SHAPE: Sample shape: {samples[0].shape}")
+                print(f"  RANGE: Sample range: [{samples.min():.3f}, {samples.max():.3f}]")
                 
         except Exception as e:
-            print(f"ERROR generating samples: {e}")
+            print(f"ERROR: generating samples: {e}")
             traceback.print_exc()
             samples = torch.randn(16, channels, image_size, image_size) * 0.5 + 0.5
         
@@ -593,10 +736,11 @@ implementation:
         
         def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix):
             if not os.path.exists(file_path):
+                print(f"  UPLOAD ERROR: File does not exist: {file_path}")
                 return None
             
             file_size = os.path.getsize(file_path)
-            print(f"  Uploading {description} ({file_size:,} bytes)...")
+            print(f"  UPLOAD: Uploading {description} ({file_size:,} bytes)...")
             
             # Generate unique filename
             unique_id = str(uuid.uuid4())[:8]
@@ -628,17 +772,18 @@ implementation:
                 relative_cdn_url = response_json.get("cdnUrl", "")
                 
                 if not relative_cdn_url:
-                    print(f"    Error: No cdnUrl in response")
+                    print(f"    UPLOAD ERROR: No cdnUrl in response")
                     return None
                 
                 full_url = f"{get_cdn_prefix}{relative_cdn_url}"
-                print(f"    Uploaded: {full_url[:80]}...")
+                print(f"    UPLOAD SUCCESS: Uploaded: {full_url[:80]}...")
                 return full_url
                 
             except subprocess.CalledProcessError as e:
-                print(f"    Upload error: {e.stderr[:200]}")
+                print(f"    UPLOAD ERROR: {e.stderr[:200]}")
                 return None
             except json.JSONDecodeError:
+                print(f"    UPLOAD ERROR: Invalid JSON response")
                 return None
         
         # Create sample grid
@@ -670,7 +815,7 @@ implementation:
             plt.tight_layout()
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             plt.close()
-            print(f"  Saved grid to: {save_path}")
+            print(f"  SAVED: Saved grid to: {save_path}")
         
         # Read bearer token
         with open(args.bearer_token, 'r') as f:
@@ -689,7 +834,7 @@ implementation:
         # CREATE OUTPUTS
         # ============================================================================
         
-        print(f"\\nCreating outputs...")
+        print(f"\nCREATING OUTPUTS...")
         
         # Create training history
         training_history_data = {
@@ -771,35 +916,35 @@ implementation:
             # Save trained model
             torch.save(trained_checkpoint, args.trained_model)
             model_size = os.path.getsize(args.trained_model)
-            print(f"✓ Trained model saved: {args.trained_model} ({model_size:,} bytes)")
+            print(f"SAVED: Trained model saved: {args.trained_model} ({model_size:,} bytes)")
             
             # Save training history
             with open(args.training_history, 'w') as f:
                 json.dump(training_history_data, f, indent=2)
-            print(f"✓ Training history saved: {args.training_history}")
+            print(f"SAVED: Training history saved: {args.training_history}")
             
             # Save training metrics
             with open(args.training_metrics, 'w') as f:
                 json.dump(training_metrics_data, f, indent=2)
-            print(f"✓ Training metrics saved: {args.training_metrics}")
+            print(f"SAVED: Training metrics saved: {args.training_metrics}")
             
             # Save generated samples
             with open(args.generated_samples, 'wb') as f:
                 pickle.dump(generated_samples_data, f)
-            print(f"✓ Generated samples saved: {args.generated_samples}")
+            print(f"SAVED: Generated samples saved: {args.generated_samples}")
             
             # Save generated images URLs
             with open(args.generated_images_urls, 'w') as f:
                 json.dump(generated_images_urls_data, f, indent=2)
-            print(f"✓ Generated images URLs saved: {args.generated_images_urls}")
+            print(f"SAVED: Generated images URLs saved: {args.generated_images_urls}")
             
             # Save training images summary
             with open(args.training_images_summary, 'w') as f:
                 json.dump(training_images_summary_data, f, indent=2)
-            print(f"✓ Training images summary saved: {args.training_images_summary}")
+            print(f"SAVED: Training images summary saved: {args.training_images_summary}")
             
         except Exception as e:
-            print(f"ERROR saving outputs: {e}")
+            print(f"ERROR: saving outputs: {e}")
             traceback.print_exc()
             sys.exit(1)
         
@@ -807,7 +952,7 @@ implementation:
         # FINAL SUMMARY
         # ============================================================================
         
-        print(f"\\n" + "="*80)
+        print(f"\n" + "="*80)
         if training_success:
             print(f" TRAINING COMPLETED SUCCESSFULLY!")
         else:
