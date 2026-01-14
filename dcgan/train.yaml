@@ -79,7 +79,7 @@ implementation:
         # CREATE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
         # ============================================================================
         
-        print("\\n" + "-" * 40)
+        print("\n" + "-" * 40)
         print("DEFINING COMPATIBILITY CLASSES")
         print("-" * 40)
         
@@ -178,7 +178,7 @@ implementation:
         # IMPORT DCGAN WITH FALLBACKS
         # ============================================================================
         
-        print("\\n" + "-" * 40)
+        print("\n" + "-" * 40)
         print("IMPORTING DCGAN MODULES")
         print("-" * 40)
         
@@ -253,14 +253,14 @@ implementation:
         parser.add_argument("--get_cdn", required=True)
         args = parser.parse_args()
         
-        print("\\n" + "="*80)
+        print("\n" + "="*80)
         print("DCGAN TRAINING v29 - FIXED")
         print("="*80)
         
         # ============================================================================
         # CREATE ALL OUTPUT DIRECTORIES FIRST
         # ============================================================================
-        print("\\n" + "-" * 40)
+        print("\n" + "-" * 40)
         print("CREATING OUTPUT DIRECTORIES")
         print("-" * 40)
         
@@ -284,7 +284,7 @@ implementation:
         # PARSE CONFIG AND SETUP
         # ============================================================================
         
-        print("\\n" + "-" * 40)
+        print("\n" + "-" * 40)
         print("PARSING MASTER CONFIG")
         print("-" * 40)
         
@@ -311,7 +311,7 @@ implementation:
         # LOAD DATASET - COMPATIBLE WITH PREPROCESS v1 OUTPUT
         # ============================================================================
         
-        print("\\n" + "-" * 40)
+        print("\n" + "-" * 40)
         print("LOADING DATASET")
         print("-" * 40)
         
@@ -437,7 +437,7 @@ implementation:
             num_workers=0
         )
         
-        print(f"\\nDATALOADER: Data loader created:")
+        print(f"\nDATALOADER: Data loader created:")
         print(f"   SIZE: Dataset size: {len(train_dataset)}")
         print(f"   BATCH: Batch size: {actual_batch_size}")
         print(f"   BATCHES: Batches per epoch: {len(dataloader)}")
@@ -447,7 +447,7 @@ implementation:
         # ============================================================================
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"\\n" + "-" * 40)
+        print(f"\n" + "-" * 40)
         print(f"DEVICE SETUP")
         print("-" * 40)
         print(f"DEVICE: Device: {device}")
@@ -479,82 +479,106 @@ implementation:
                 print("ERROR: EnhancedDCGANTrainer is not available")
                 sys.exit(1)
             
-            # Create config for trainer
+            # Create config for trainer - FIXED: Handle DCGANConfig dataclass properly
+            trainer = None
+            
             if 'config' in checkpoint and checkpoint['config'] is not None:
-                config_dict = checkpoint['config']
-                print(f"CONFIG: Creating config from checkpoint...")
+                dcgan_config = checkpoint['config']
+                print(f"CONFIG: Using config from checkpoint (type: {type(dcgan_config)})")
                 
-                # Update config with training parameters
-                config_dict['epochs'] = epochs
-                config_dict['batch_size'] = actual_batch_size
-                config_dict['device'] = str(device)
-                
-                # Set algorithm
-                if algorithm == 'cafo':
-                    config_dict['use_cafo'] = True
-                    config_dict['block_training']['enabled'] = True
-                elif algorithm == 'forward_forward':
-                    config_dict['use_forward_forward'] = True
-                    config_dict['block_training']['enabled'] = True
-                else:
-                    config_dict['block_training']['enabled'] = False
-                
-                # Create trainer with config
-                if DCGANConfig is not None:
-                    try:
-                        # Try to create DCGANConfig from dict
-                        if hasattr(DCGANConfig, 'from_dict'):
-                            dcgan_config = DCGANConfig.from_dict(config_dict)
-                            print("CONFIG: DCGANConfig created using from_dict()")
-                        else:
-                            # Try to create directly
-                            print("WARNING: Using direct DCGANConfig creation")
-                            dcgan_config = DCGANConfig(
-                                image_size=image_size,
-                                channels=channels,
-                                latent_dim=config_dict.get('latent_dim', 100),
-                                batch_size=actual_batch_size,
-                                epochs=epochs,
-                                device=device
-                            )
-                    except Exception as e:
-                        print(f"WARNING: Fallback config creation due to: {e}")
-                        dcgan_config = DCGANConfig(
-                            image_size=image_size,
-                            channels=channels,
-                            latent_dim=config_dict.get('latent_dim', 100),
-                            batch_size=actual_batch_size,
-                            epochs=epochs,
-                            device=device
-                        )
-                else:
-                    print("WARNING: DCGANConfig not available, creating trainer with minimal config")
-                    dcgan_config = None
-                
-                # Validate config if available
-                if dcgan_config is not None and validate_config is not None:
-                    is_valid, errors = validate_config(dcgan_config)
-                    if not is_valid:
-                        print("WARNING: Config validation warnings:")
-                        for error in errors:
-                            print(f"  WARNING: {error}")
-                
-                # Create trainer
-                try:
-                    if dcgan_config is not None:
-                        trainer = EnhancedDCGANTrainer(dcgan_config)
-                        print("TRAINER: Trainer created with config")
+                # Check if config is a DCGANConfig dataclass (not a dict)
+                if hasattr(dcgan_config, '__dataclass_fields__'):
+                    # It's a dataclass - update attributes directly
+                    print("CONFIG: Config is a dataclass, updating attributes...")
+                    
+                    # Update training parameters - use attribute access for dataclass
+                    if hasattr(dcgan_config, 'epochs'):
+                        dcgan_config.epochs = epochs
+                    if hasattr(dcgan_config, 'batch_size'):
+                        dcgan_config.batch_size = actual_batch_size
+                    if hasattr(dcgan_config, 'device'):
+                        dcgan_config.device = str(device)
+                    
+                    # Set algorithm flags
+                    if algorithm == 'cafo':
+                        if hasattr(dcgan_config, 'use_cafo'):
+                            dcgan_config.use_cafo = True
+                        if hasattr(dcgan_config, 'block_training') and dcgan_config.block_training is not None:
+                            dcgan_config.block_training.enabled = True
+                    elif algorithm == 'forward_forward':
+                        if hasattr(dcgan_config, 'use_forward_forward'):
+                            dcgan_config.use_forward_forward = True
+                        if hasattr(dcgan_config, 'block_training') and dcgan_config.block_training is not None:
+                            dcgan_config.block_training.enabled = True
                     else:
+                        if hasattr(dcgan_config, 'block_training') and dcgan_config.block_training is not None:
+                            dcgan_config.block_training.enabled = False
+                    
+                    # Validate config if available
+                    if validate_config is not None:
+                        is_valid, errors = validate_config(dcgan_config)
+                        if not is_valid:
+                            print("WARNING: Config validation warnings:")
+                            for error in errors:
+                                print(f"  WARNING: {error}")
+                    
+                    # Create trainer with config
+                    try:
+                        trainer = EnhancedDCGANTrainer(dcgan_config)
+                        print("TRAINER: Trainer created with config from checkpoint")
+                    except Exception as e:
+                        print(f"WARNING: Could not create trainer with checkpoint config: {e}")
+                        print("WARNING: Creating trainer with default config")
                         trainer = EnhancedDCGANTrainer()
-                        print("TRAINER: Trainer created with default config")
-                except Exception as e:
-                    print(f"WARNING: Could not create trainer with config: {e}")
-                    print("WARNING: Creating trainer without config")
+                        
+                elif isinstance(dcgan_config, dict):
+                    # It's a dictionary - need to convert to DCGANConfig
+                    print("CONFIG: Config is a dictionary, converting to DCGANConfig...")
+                    
+                    # Update config dictionary with training parameters
+                    dcgan_config['epochs'] = epochs
+                    dcgan_config['batch_size'] = actual_batch_size
+                    dcgan_config['device'] = str(device)
+                    
+                    # Set algorithm flags in dictionary
+                    if algorithm == 'cafo':
+                        dcgan_config['use_cafo'] = True
+                        if 'block_training' in dcgan_config:
+                            dcgan_config['block_training']['enabled'] = True
+                    elif algorithm == 'forward_forward':
+                        dcgan_config['use_forward_forward'] = True
+                        if 'block_training' in dcgan_config:
+                            dcgan_config['block_training']['enabled'] = True
+                    else:
+                        if 'block_training' in dcgan_config:
+                            dcgan_config['block_training']['enabled'] = False
+                    
+                    # Try to create DCGANConfig from dict
+                    if DCGANConfig is not None:
+                        try:
+                            if hasattr(DCGANConfig, 'from_dict'):
+                                dcgan_config_obj = DCGANConfig.from_dict(dcgan_config)
+                                print("CONFIG: DCGANConfig created using from_dict()")
+                                
+                                # Create trainer with config
+                                trainer = EnhancedDCGANTrainer(dcgan_config_obj)
+                                print("TRAINER: Trainer created with config from dict")
+                            else:
+                                # Fallback: create trainer with minimal config
+                                print("WARNING: DCGANConfig.from_dict not available")
+                                trainer = EnhancedDCGANTrainer()
+                        except Exception as e:
+                            print(f"WARNING: Error creating DCGANConfig from dict: {e}")
+                            trainer = EnhancedDCGANTrainer()
+                    else:
+                        print("WARNING: DCGANConfig not available")
+                        trainer = EnhancedDCGANTrainer()
+                else:
+                    print(f"WARNING: Unknown config type: {type(dcgan_config)}")
                     trainer = EnhancedDCGANTrainer()
-                
             else:
                 # Create minimal trainer
-                print("WARNING: Creating trainer with minimal configuration...")
+                print("WARNING: No config in checkpoint, creating trainer with minimal configuration...")
                 trainer = EnhancedDCGANTrainer()
             
             # Load weights if available
@@ -595,7 +619,7 @@ implementation:
         # TRAINING
         # ============================================================================
         
-        print(f"\\n" + "="*60)
+        print(f"\n" + "="*60)
         print(f"STARTING TRAINING")
         print("="*60)
         
@@ -604,7 +628,7 @@ implementation:
         
         try:
             # Simple training loop
-            print(f"\\nTRAINING: Training for {epochs} epochs...")
+            print(f"\nTRAINING: Training for {epochs} epochs...")
             
             trainer.generator.train()
             trainer.discriminator.train()
@@ -617,7 +641,7 @@ implementation:
             }
             
             for epoch in range(epochs):
-                print(f"\\nEPOCH {epoch+1}/{epochs}:")
+                print(f"\nEPOCH {epoch+1}/{epochs}:")
                 
                 epoch_g_loss = []
                 epoch_d_loss = []
@@ -695,7 +719,7 @@ implementation:
                 print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}")
             
             training_time = time.time() - start_time
-            print(f"\\nTRAINING COMPLETE: Training completed in {training_time:.2f}s")
+            print(f"\nTRAINING COMPLETE: Training completed in {training_time:.2f}s")
             training_success = True
             
         except Exception as e:
@@ -707,7 +731,7 @@ implementation:
         # GENERATE SAMPLES
         # ============================================================================
         
-        print(f"\\nGENERATING SAMPLES...")
+        print(f"\nGENERATING SAMPLES...")
         
         try:
             trainer.generator.eval()
@@ -834,7 +858,7 @@ implementation:
         # CREATE OUTPUTS
         # ============================================================================
         
-        print(f"\\nCREATING OUTPUTS...")
+        print(f"\nCREATING OUTPUTS...")
         
         # Create training history
         training_history_data = {
@@ -908,6 +932,10 @@ implementation:
             'model_info': checkpoint.get('model_info', {}) if 'checkpoint' in locals() else {}
         }
         
+        # Add the config to checkpoint if available
+        if 'dcgan_config' in locals() and dcgan_config is not None:
+            trained_checkpoint['config'] = dcgan_config
+        
         # ============================================================================
         # SAVE OUTPUTS
         # ============================================================================
@@ -952,7 +980,7 @@ implementation:
         # FINAL SUMMARY
         # ============================================================================
         
-        print(f"\\n" + "="*80)
+        print(f"\n" + "="*80)
         if training_success:
             print(f" TRAINING COMPLETED SUCCESSFULLY!")
         else:
