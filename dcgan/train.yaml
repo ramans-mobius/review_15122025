@@ -1,4 +1,4 @@
-name: Train DCGAN v31 - FIXED
+name: Train DCGAN v32 - FIXED
 description: Trains DCGAN with Backprop, CAFO, or Forward-Forward using EnhancedDCGANTrainer
 inputs:
   - name: data_path
@@ -79,7 +79,7 @@ implementation:
         # CREATE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
         # ============================================================================
         
-        print("\n" + "-" * 40)
+        print("\\n" + "-" * 40)
         print("DEFINING COMPATIBILITY CLASSES")
         print("-" * 40)
         
@@ -178,7 +178,7 @@ implementation:
         # IMPORT DCGAN WITH FALLBACKS
         # ============================================================================
         
-        print("\n" + "-" * 40)
+        print("\\n" + "-" * 40)
         print("IMPORTING DCGAN MODULES")
         print("-" * 40)
         
@@ -253,14 +253,14 @@ implementation:
         parser.add_argument("--get_cdn", required=True)
         args = parser.parse_args()
         
-        print("\n" + "="*80)
+        print("\\n" + "="*80)
         print("DCGAN TRAINING v29 - FIXED")
         print("="*80)
         
         # ============================================================================
         # CREATE ALL OUTPUT DIRECTORIES FIRST
         # ============================================================================
-        print("\n" + "-" * 40)
+        print("\\n" + "-" * 40)
         print("CREATING OUTPUT DIRECTORIES")
         print("-" * 40)
         
@@ -284,7 +284,7 @@ implementation:
         # PARSE CONFIG AND SETUP
         # ============================================================================
         
-        print("\n" + "-" * 40)
+        print("\\n" + "-" * 40)
         print("PARSING MASTER CONFIG")
         print("-" * 40)
         
@@ -311,7 +311,7 @@ implementation:
         # LOAD DATASET - COMPATIBLE WITH PREPROCESS v1 OUTPUT
         # ============================================================================
         
-        print("\n" + "-" * 40)
+        print("\\n" + "-" * 40)
         print("LOADING DATASET")
         print("-" * 40)
         
@@ -437,7 +437,7 @@ implementation:
             num_workers=0
         )
         
-        print(f"\nDATALOADER: Data loader created:")
+        print(f"\\nDATALOADER: Data loader created:")
         print(f"   SIZE: Dataset size: {len(train_dataset)}")
         print(f"   BATCH: Batch size: {actual_batch_size}")
         print(f"   BATCHES: Batches per epoch: {len(dataloader)}")
@@ -447,7 +447,7 @@ implementation:
         # ============================================================================
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"\n" + "-" * 40)
+        print(f"\\n" + "-" * 40)
         print(f"DEVICE SETUP")
         print("-" * 40)
         print(f"DEVICE: Device: {device}")
@@ -619,7 +619,7 @@ implementation:
         # TRAINING
         # ============================================================================
         
-        print(f"\n" + "="*60)
+        print(f"\\n" + "="*60)
         print(f"STARTING TRAINING")
         print("="*60)
         
@@ -628,7 +628,7 @@ implementation:
         
         try:
             # Simple training loop
-            print(f"\nTRAINING: Training for {epochs} epochs...")
+            print(f"\\nTRAINING: Training for {epochs} epochs...")
             
             trainer.generator.train()
             trainer.discriminator.train()
@@ -641,7 +641,7 @@ implementation:
             }
             
             for epoch in range(epochs):
-                print(f"\nEPOCH {epoch+1}/{epochs}:")
+                print(f"\\nEPOCH {epoch+1}/{epochs}:")
                 
                 epoch_g_loss = []
                 epoch_d_loss = []
@@ -719,7 +719,7 @@ implementation:
                 print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}")
             
             training_time = time.time() - start_time
-            print(f"\nTRAINING COMPLETE: Training completed in {training_time:.2f}s")
+            print(f"\\nTRAINING COMPLETE: Training completed in {training_time:.2f}s")
             training_success = True
             
         except Exception as e:
@@ -731,7 +731,7 @@ implementation:
         # GENERATE SAMPLES
         # ============================================================================
         
-        print(f"\nGENERATING SAMPLES...")
+        print(f"\\nGENERATING SAMPLES...")
         
         try:
             trainer.generator.eval()
@@ -858,7 +858,7 @@ implementation:
         # CREATE OUTPUTS
         # ============================================================================
         
-        print(f"\nCREATING OUTPUTS...")
+        print(f"\\nCREATING OUTPUTS...")
         
         # Create training history
         training_history_data = {
@@ -980,7 +980,7 @@ implementation:
         # FINAL SUMMARY
         # ============================================================================
         
-        print(f"\n" + "="*80)
+        print(f"\\n" + "="*80)
         if training_success:
             print(f" TRAINING COMPLETED SUCCESSFULLY!")
         else:
