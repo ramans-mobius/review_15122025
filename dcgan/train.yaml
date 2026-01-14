@@ -1,4 +1,4 @@
-name: Train DCGAN v32 - FIXED
+name: Train DCGAN v33 - FIXED
 description: Trains DCGAN with Backprop, CAFO, or Forward-Forward using EnhancedDCGANTrainer
 inputs:
   - name: data_path
@@ -667,8 +667,8 @@ implementation:
                     real_labels = torch.ones(batch_size_real, device=device)
                     d_loss_real = nn.functional.binary_cross_entropy_with_logits(real_output, real_labels)
                     
-                    # Fake data
-                    z = torch.randn(batch_size_real, latent_dim, 1, 1, device=device)
+                    # Fake data - FIXED: Remove spatial dimensions, use 2D tensor
+                    z = torch.randn(batch_size_real, latent_dim, device=device)  # Shape: (batch_size, 100)
                     fake_data = trainer.generator(z).detach()
                     fake_output = trainer.discriminator(fake_data)
                     if fake_output.dim() > 1:
@@ -687,7 +687,7 @@ implementation:
                     if hasattr(trainer, 'gen_optimizer'):
                         trainer.gen_optimizer.zero_grad()
                     
-                    z = torch.randn(batch_size_real, latent_dim, 1, 1, device=device)
+                    z = torch.randn(batch_size_real, latent_dim, device=device)  # Shape: (batch_size, 100)
                     fake_data = trainer.generator(z)
                     fake_output = trainer.discriminator(fake_data)
                     if fake_output.dim() > 1:
@@ -738,7 +738,7 @@ implementation:
             with torch.no_grad():
                 # Generate samples
                 num_samples = 16
-                z = torch.randn(num_samples, latent_dim, 1, 1, device=device)
+                z = torch.randn(num_samples, latent_dim, device=device)  # FIXED: 2D tensor, not 4D
                 samples = trainer.generator(z).cpu()
                 
                 # Convert from [-1, 1] to [0, 1] for saving
@@ -841,18 +841,41 @@ implementation:
             plt.close()
             print(f"  SAVED: Saved grid to: {save_path}")
         
-        # Read bearer token
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
+        # Read bearer token - FIX: Save to a temporary file first
+        try:
+            with open(args.bearer_token, 'r') as f:
+                bearer_token_content = f.read().strip()
+            
+            # Save to a shorter filename
+            bearer_token_file = "/tmp/bearer_token.txt"
+            with open(bearer_token_file, 'w') as f:
+                f.write(bearer_token_content)
+            
+            print(f"AUTH: Bearer token loaded ({len(bearer_token_content)} chars)")
+        except Exception as e:
+            print(f"ERROR: Could not read bearer token: {e}")
+            bearer_token_content = ""
+            bearer_token_file = ""
         
         # Create and upload sample grid
-        final_grid_path = "/tmp/final_samples_grid.png"
-        create_sample_grid(samples, f"DCGAN Samples ({algorithm.upper()})", final_grid_path)
-        
-        final_grid_url = upload_to_cdn(
-            final_grid_path, "dcgan_final_samples", 
-            bearer_token, args.domain, args.get_cdn
-        )
+        if samples is not None:
+            final_grid_path = "/tmp/final_samples_grid.png"
+            create_sample_grid(samples, f"DCGAN Samples ({algorithm.upper()})", final_grid_path)
+            
+            if bearer_token_file:
+                final_grid_url = upload_to_cdn(
+                    final_grid_path, "dcgan_final_samples", 
+                    bearer_token_content,
+                    args.domain,
+                    args.get_cdn
+                )
+            else:
+                final_grid_url = None
+                print("WARNING: No bearer token, skipping CDN upload")
+        else:
+            final_grid_path = None
+            final_grid_url = None
+            print("WARNING: No samples generated, skipping grid creation")
         
         # ============================================================================
         # CREATE OUTPUTS
@@ -884,7 +907,7 @@ implementation:
             'final_discriminator_loss': training_history_data['final_metrics']['discriminator_loss'],
             'total_training_time': training_time,
             'training_success': training_success,
-            'samples_generated': len(samples),
+            'samples_generated': len(samples) if samples is not None else 0,
             'image_size': image_size,
             'channels': channels,
             'latent_dim': latent_dim,
@@ -893,7 +916,10 @@ implementation:
         }
         
         # Prepare generated samples for output
-        generated_samples_data = ProcessedDatasetWrapper(samples)
+        if samples is not None:
+            generated_samples_data = ProcessedDatasetWrapper(samples)
+        else:
+            generated_samples_data = ProcessedDatasetWrapper(torch.zeros(0))
         
         # Generated images URLs
         generated_images_urls_data = {
@@ -904,7 +930,7 @@ implementation:
                     'phase': 'final',
                     'url': final_grid_url if final_grid_url else '',
                     'description': f'DCGAN {algorithm.upper()} samples after training',
-                    'grid_path': final_grid_path
+                    'grid_path': final_grid_path if final_grid_path else ''
                 }
             ]
         }
@@ -917,7 +943,7 @@ implementation:
             'final_metrics': training_history_data['final_metrics'],
             'image_grid_url': final_grid_url if final_grid_url else '',
             'training_time': training_time,
-            'samples_generated': len(samples)
+            'samples_generated': len(samples) if samples is not None else 0
         }
         
         # Create trained model checkpoint
@@ -991,7 +1017,7 @@ implementation:
         print(f"Total time: {training_time:.2f}s")
         print(f"Final Generator Loss: {training_history_data['final_metrics']['generator_loss']:.4f}")
         print(f"Final Discriminator Loss: {training_history_data['final_metrics']['discriminator_loss']:.4f}")
-        print(f"Samples generated: {len(samples)}")
+        print(f"Samples generated: {len(samples) if samples is not None else 0}")
         print(f"Image size: {image_size}x{image_size}")
         print(f"Channels: {channels}")
         print(f"Latent dim: {latent_dim}")
