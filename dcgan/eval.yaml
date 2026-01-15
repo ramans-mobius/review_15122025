@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v8 - FIXED WITH COMPATIBILITY
+name: Evaluate DCGAN v9 - FIXED WITH COMPATIBILITY
 description: Evaluates DCGAN with comprehensive metrics and full compatibility
 inputs:
   - name: trained_model
@@ -419,7 +419,7 @@ implementation:
         # CDN UPLOAD FUNCTION
         # ============================================================================
         
-        def upload_to_cdn(file_path, description, bearer_token, domain, get_cdn_prefix):
+        def upload_to_cdn(file_path, description, bearer_token_content, domain, get_cdn_prefix):
             if not os.path.exists(file_path):
                 print(f"    File not found: {file_path}")
                 return None
@@ -436,7 +436,7 @@ implementation:
             curl_command = [
                 "curl",
                 "--location", upload_url,
-                "--header", f"Authorization: Bearer {bearer_token}",
+                "--header", f"Authorization: Bearer {bearer_token_content}",
                 "--form", f"file=@{file_path}",
                 "--form", f"filename={cdn_filename}",
                 "--fail",
@@ -476,11 +476,10 @@ implementation:
         
         print("\\nLoading inputs...")
         
-        # Check file existence
+        # Check file existence for files, not for bearer token (it's a string value)
         for path, name in [(args.trained_model, 'trained_model'), 
                           (args.raw_test_data, 'raw_test_data'),
-                          (args.preprocessor_params, 'preprocessor_params'),
-                          (args.bearer_token, 'bearer_token')]:
+                          (args.preprocessor_params, 'preprocessor_params')]:
             if not os.path.exists(path):
                 print(f"ERROR: {name} file does not exist: {path}")
                 sys.exit(1)
@@ -518,6 +517,26 @@ implementation:
         with open(args.preprocessor_params, 'r') as f:
             preprocess_params = json.load(f)
         print(f"✓ Preprocessor parameters loaded")
+        
+        # ============================================================================
+        # HANDLE BEARER TOKEN - FIXED: It's a string value, not a file path
+        # ============================================================================
+        
+        print("\\nHandling bearer token...")
+        
+        # The bearer_token is passed as a string value, not a file path
+        bearer_token_content = args.bearer_token
+        
+        # Save to a temporary file for curl to use
+        bearer_token_file = "/tmp/bearer_token.txt"
+        try:
+            with open(bearer_token_file, 'w') as f:
+                f.write(bearer_token_content)
+            print(f"✓ Bearer token saved to temporary file: {bearer_token_file}")
+            print(f"  Token length: {len(bearer_token_content)} characters")
+        except Exception as e:
+            print(f"ERROR: Could not save bearer token to file: {e}")
+            bearer_token_content = ""
         
         # ============================================================================
         # APPLY PREPROCESSING TO TEST DATA
@@ -631,13 +650,8 @@ implementation:
             else:
                 latent_dim = 100
             
-            # Create latent vectors
+            # Create latent vectors - 2D tensor, not 4D
             z = torch.randn(num_eval_samples, latent_dim, device=device)
-            
-            # Add spatial dimensions if needed
-            if len(z.shape) == 2:
-                # Add 1x1 spatial dimensions for DCGAN
-                z = z.unsqueeze(-1).unsqueeze(-1)
             
             fake_tensor = generator(z).cpu()
         
@@ -781,18 +795,18 @@ implementation:
         # ============================================================================
         print("\\nUploading evaluation results to CDN...")
         
-        # Read bearer token
-        with open(args.bearer_token, 'r') as f:
-            bearer_token_content = f.read().strip()
-        
         # Upload metrics visualization
-        viz_url = upload_to_cdn(
-            args.metrics_visualization, 
-            "evaluation_metrics_visualization",
-            bearer_token_content,
-            args.domain,
-            args.get_cdn
-        )
+        viz_url = None
+        if bearer_token_content:
+            viz_url = upload_to_cdn(
+                args.metrics_visualization, 
+                "evaluation_metrics_visualization",
+                bearer_token_content,
+                args.domain,
+                args.get_cdn
+            )
+        else:
+            print("  WARNING: No bearer token, skipping CDN upload")
         
         # Create evaluation results package
         results_package = {
@@ -809,13 +823,15 @@ implementation:
             json.dump(results_package, f, indent=2)
         
         # Upload results package
-        results_package_url = upload_to_cdn(
-            results_package_path,
-            "evaluation_results_package",
-            bearer_token_content,
-            args.domain,
-            args.get_cdn
-        )
+        results_package_url = None
+        if bearer_token_content:
+            results_package_url = upload_to_cdn(
+                results_package_path,
+                "evaluation_results_package",
+                bearer_token_content,
+                args.domain,
+                args.get_cdn
+            )
         
         # Save results URL
         with open(args.evaluation_results_url, 'w') as f:
