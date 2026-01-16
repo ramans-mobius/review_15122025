@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop - FIXED
+name: DCGAN RLAF Loop v2 - FIXED
 description: Triggers the DCGAN RLAF pipeline in a loop to optimize GAN hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -42,9 +42,10 @@ implementation:
         import numpy as np
         from torch.utils.data import DataLoader
         import traceback
+        import sys
         
         # ============================================================================
-        # FIXED GAN RETRAINING FUNCTION
+        # FIXED GAN RETRAINING FUNCTION - ALIGNED WITH TRAIN BRICK
         # ============================================================================
         
         def gan_retraining(action_params, model_path, data_path, tasks_path, output_model_path, previous_metrics, dqn_params, base_config):
@@ -74,35 +75,55 @@ implementation:
                 with open(data_path, "rb") as f:
                     data = pickle.load(f)
                 
-                # Handle different data formats
+                # Handle different data formats - ALIGNED WITH TRAIN BRICK
                 if hasattr(data, 'images'):
                     # PreprocessedDataset format
                     images = data.images
-                    images_list = [images[i] for i in range(len(images))]
-                    
-                    if len(images.shape) == 4:
-                        channels = images.shape[1]
-                        image_size = images.shape[2]
+                    if isinstance(images, torch.Tensor):
+                        if images.dim() == 4:
+                            # Shape: (N, C, H, W)
+                            images_list = [images[i] for i in range(len(images))]
+                            channels = images.shape[1]
+                            image_size = images.shape[2]
+                        elif images.dim() == 3:
+                            # Shape: (N, H, W) - add channel dimension
+                            images_list = [images[i].unsqueeze(0) for i in range(len(images))]
+                            channels = 1
+                            image_size = images.shape[1]
+                        else:
+                            print(f"ERROR: Unexpected tensor shape: {images.shape}")
+                            return {"metrics": {}, "model_path": output_model_path}
                     else:
+                        # Convert list to tensor
+                        images_list = images
                         channels = 1
                         image_size = 64
                         
-                elif hasattr(data, 'dataset'):
-                    # Wrapper format
-                    images_list = [data.dataset[i] for i in range(len(data.dataset))]
-                    image_size = data.image_size
-                    channels = data.channels
-                    
+                elif hasattr(data, '__len__'):
+                    # Direct dataset
+                    images_list = [data[i] for i in range(min(len(data), 100))]  # Limit for speed
+                    if isinstance(images_list[0], torch.Tensor):
+                        if images_list[0].dim() == 3:
+                            channels = images_list[0].shape[0]
+                            image_size = images_list[0].shape[1]
+                        elif images_list[0].dim() == 2:
+                            channels = 1
+                            image_size = images_list[0].shape[0]
+                        else:
+                            channels = 1
+                            image_size = 64
+                    else:
+                        channels = 1
+                        image_size = 64
                 else:
-                    # Direct list
-                    images_list = [data[i] for i in range(len(data))]
-                    image_size = images_list[0].shape[1] if len(images_list[0].shape) == 3 else 64
-                    channels = images_list[0].shape[0] if len(images_list[0].shape) == 3 else 1
+                    print(f"ERROR: Unsupported data format")
+                    return {"metrics": {}, "model_path": output_model_path}
                 
                 print(f"✓ Loaded dataset: {len(images_list)} samples, {image_size}x{image_size}, {channels} channels")
                 
             except Exception as e:
                 print(f" Error loading data: {e}")
+                traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
             # Load tasks (if available)
@@ -132,49 +153,47 @@ implementation:
             
             print(f"Training algorithm: {algorithm}")
             
-            # Load existing model checkpoint
+            # Load existing model checkpoint - ALIGNED WITH TRAIN BRICK
             try:
                 checkpoint = torch.load(model_path, map_location='cpu')
                 print("✓ Loaded model checkpoint")
                 
+                # Extract config from checkpoint
+                dcgan_config = None
+                if 'config' in checkpoint and checkpoint['config'] is not None:
+                    config_dict = checkpoint['config']
+                    print(f"CONFIG: Using config from checkpoint (type: {type(config_dict)})")
+                    
+                    # Check if config is a DCGANConfig dataclass (not a dict)
+                    if hasattr(config_dict, '__dataclass_fields__'):
+                        # It's a dataclass - update attributes directly
+                        print("CONFIG: Config is a dataclass")
+                        dcgan_config = config_dict
+                        
+                    elif isinstance(config_dict, dict):
+                        # It's a dictionary - need to convert to DCGANConfig
+                        print("CONFIG: Config is a dictionary, converting to DCGANConfig...")
+                        dcgan_config = DCGANConfig.from_dict(config_dict)
+                    else:
+                        print(f"WARNING: Unknown config type: {type(config_dict)}")
+                
+                # If no valid config found, create default
+                if dcgan_config is None:
+                    print("WARNING: No valid config in checkpoint, creating default...")
+                    dcgan_config = DCGANConfig(
+                        image_size=image_size,
+                        channels=channels,
+                        latent_dim=100
+                    )
+                
             except Exception as e:
                 print(f" Error loading model: {e}")
+                traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
-            # Create DCGAN config from base config and action parameters
+            # Update config with action parameters - ALIGNED WITH TRAIN BRICK
             try:
-                # Extract base config
-                gan_cfg = base_config.get('gan', {})
-                dataset_cfg = base_config.get('dataset', {})
-                train_cfg = gan_cfg.get('training', {})
-                gen_cfg = gan_cfg.get('generator', {})
-                disc_cfg = gan_cfg.get('discriminator', {})
-                
-                # Override with action parameters
-                learning_rate_g = action_params.get('learning_rate_g', train_cfg.get('learning_rate', 0.0002))
-                learning_rate_d = action_params.get('learning_rate_d', train_cfg.get('learning_rate', 0.0001))
-                batch_size = action_params.get('batch_size', train_cfg.get('batch_size', 32))
-                dropout = action_params.get('dropout', disc_cfg.get('dropout', 0.3))
-                
-                # Create generator layers
-                generator_layers = []
-                for layer in gen_cfg.get('layers', []):
-                    generator_layers.append(DCGANLayerConfig(
-                        channels=layer['channels'],
-                        kernel_size=layer['kernel_size'],
-                        stride=layer['stride'],
-                        padding=layer['padding']
-                    ))
-                
-                # Create discriminator layers
-                discriminator_layers = []
-                for layer in disc_cfg.get('layers', []):
-                    discriminator_layers.append(DCGANLayerConfig(
-                        channels=layer['channels'],
-                        kernel_size=layer['kernel_size'],
-                        stride=layer['stride'],
-                        padding=layer['padding']
-                    ))
+                print("Updating config with action parameters...")
                 
                 # Map algorithm
                 algorithm_map = {
@@ -184,73 +203,63 @@ implementation:
                 }
                 training_algorithm = algorithm_map.get(algorithm, TrainingAlgorithm.BACKPROP)
                 
-                # Create DCGAN config
-                dcgan_config = DCGANConfig(
-                    image_size=image_size,
-                    channels=channels,
-                    latent_dim=gen_cfg.get('latent_dim', 100),
-                    generator_layers=generator_layers,
-                    discriminator_layers=discriminator_layers,
-                    training_algorithm=training_algorithm,
-                    use_cafo=(algorithm == 'cafo'),
-                    use_forward_forward=(algorithm == 'forward_forward'),
-                    use_hybrid=False,
-                    block_training=BlockTrainingConfig(
-                        enabled=(algorithm in ['cafo', 'forward_forward']),
-                        num_blocks=min(3, len(generator_layers) - 1),
-                        epochs_per_block=2,  # Reduced for RLAF
-                        block_learning_rate=0.001
-                    ),
-                    balanced_training=BalancedTrainingConfig(
-                        enabled=True,
-                        discriminator_steps=1,
-                        generator_steps=1,
-                        label_smoothing=0.1
-                    ),
-                    generator_activation=ActivationConfig(
-                        name=gen_cfg.get('activation', 'leaky_relu'),
-                        negative_slope=0.2
-                    ),
-                    discriminator_activation=ActivationConfig(
-                        name=disc_cfg.get('activation', 'leaky_relu'),
-                        negative_slope=0.2
-                    ),
-                    generator_output_activation=ActivationConfig(
-                        name=gen_cfg.get('output_activation', 'tanh')
-                    ),
-                    discriminator_output_activation=ActivationConfig(
-                        name=disc_cfg.get('output_activation', 'sigmoid')
-                    ),
-                    generator_use_batchnorm=gen_cfg.get('use_batchnorm', True),
-                    discriminator_use_batchnorm=disc_cfg.get('use_batchnorm', False),
-                    generator_dropout=0.0,
-                    discriminator_dropout=dropout,
-                    generator_optimizer=OptimizerConfig(
-                        name='adam',
-                        learning_rate=learning_rate_g,
-                        beta1=0.5,
-                        beta2=0.999
-                    ),
-                    discriminator_optimizer=OptimizerConfig(
-                        name='adam',
-                        learning_rate=learning_rate_d,
-                        beta1=0.5,
-                        beta2=0.999
-                    ),
-                    batch_size=batch_size,
-                    epochs=3,  # Reduced epochs for RLAF loop
-                    device='cuda' if torch.cuda.is_available() else 'cpu',
-                    seed=42
-                )
+                # Update config attributes if they exist
+                if hasattr(dcgan_config, 'training_algorithm'):
+                    dcgan_config.training_algorithm = training_algorithm
                 
-                print(f"✓ Created DCGAN config for {algorithm} training")
+                if hasattr(dcgan_config, 'use_cafo'):
+                    dcgan_config.use_cafo = (algorithm == 'cafo')
+                
+                if hasattr(dcgan_config, 'use_forward_forward'):
+                    dcgan_config.use_forward_forward = (algorithm == 'forward_forward')
+                
+                # Update block training config
+                if hasattr(dcgan_config, 'block_training'):
+                    if dcgan_config.block_training is None:
+                        dcgan_config.block_training = BlockTrainingConfig(
+                            enabled=(algorithm in ['cafo', 'forward_forward']),
+                            num_blocks=3,
+                            epochs_per_block=2,
+                            block_learning_rate=0.001
+                        )
+                    else:
+                        dcgan_config.block_training.enabled = (algorithm in ['cafo', 'forward_forward'])
+                        dcgan_config.block_training.epochs_per_block = 2  # Reduced for RLAF
+                
+                # Update hyperparameters from action params
+                learning_rate_g = action_params.get('learning_rate_g', 0.0002)
+                learning_rate_d = action_params.get('learning_rate_d', 0.0001)
+                batch_size = action_params.get('batch_size', 32)
+                dropout = action_params.get('dropout', 0.3)
+                epochs = action_params.get('epochs', 3)  # Reduced for RLAF
+                
+                if hasattr(dcgan_config, 'generator_optimizer'):
+                    dcgan_config.generator_optimizer.learning_rate = learning_rate_g
+                
+                if hasattr(dcgan_config, 'discriminator_optimizer'):
+                    dcgan_config.discriminator_optimizer.learning_rate = learning_rate_d
+                
+                if hasattr(dcgan_config, 'batch_size'):
+                    dcgan_config.batch_size = batch_size
+                
+                if hasattr(dcgan_config, 'epochs'):
+                    dcgan_config.epochs = epochs
+                
+                if hasattr(dcgan_config, 'discriminator_dropout'):
+                    dcgan_config.discriminator_dropout = dropout
+                
+                print(f"✓ Updated DCGAN config for {algorithm} training")
+                print(f"  Learning rates: G={learning_rate_g}, D={learning_rate_d}")
+                print(f"  Batch size: {batch_size}")
+                print(f"  Epochs: {epochs}")
+                print(f"  Dropout: {dropout}")
                 
             except Exception as e:
-                print(f" Error creating DCGAN config: {e}")
+                print(f" Error updating DCGAN config: {e}")
                 traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
-            # Create trainer and models
+            # Create trainer and models - ALIGNED WITH TRAIN BRICK
             try:
                 # Create EnhancedDCGANTrainer
                 trainer = EnhancedDCGANTrainer(dcgan_config)
@@ -264,6 +273,15 @@ implementation:
                     trainer.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
                     print("✓ Loaded discriminator weights")
                 
+                # Load optimizer states if available
+                if 'generator_optimizer_state' in checkpoint:
+                    trainer.g_optimizer.load_state_dict(checkpoint['generator_optimizer_state'])
+                    print("✓ Loaded generator optimizer state")
+                
+                if 'discriminator_optimizer_state' in checkpoint:
+                    trainer.d_optimizer.load_state_dict(checkpoint['discriminator_optimizer_state'])
+                    print("✓ Loaded discriminator optimizer state")
+                
                 print(f"✓ Trainer created for {algorithm} algorithm")
                 
             except Exception as e:
@@ -273,7 +291,7 @@ implementation:
             
             # Create data loader
             try:
-                train_dataset = DCGANDataset(images_list, normalize=False)  # Already normalized
+                train_dataset = DCGANDataset(images_list, normalize=False)
                 actual_batch_size = min(batch_size, max(1, len(train_dataset)))
                 dataloader = DataLoader(
                     train_dataset,
@@ -286,23 +304,110 @@ implementation:
                 
             except Exception as e:
                 print(f" Error creating data loader: {e}")
+                traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
-            # Training loop
-            print(f"\\nStarting training ({dcgan_config.epochs} epochs)...")
+            # Training loop - SIMPLIFIED VERSION OF TRAIN BRICK
+            print(f"\\nStarting training ({epochs} epochs)...")
             
             try:
-                # Phase 1: Block training if enabled
-                if dcgan_config.block_training.enabled:
-                    print(f" Phase 1: Block-wise training")
-                    trainer.train_blocks_with_logging(dataloader)
+                # Simple training loop (similar to train brick but simplified)
+                trainer.generator.train()
+                trainer.discriminator.train()
                 
-                # Phase 2: Adversarial training
-                print(f" Phase 2: Adversarial training")
+                training_history = {
+                    'generator_losses': [],
+                    'discriminator_losses': [],
+                    'real_scores': [],
+                    'fake_scores': []
+                }
                 
-                training_result = trainer.train_adversarial_with_logging(dataloader)
+                for epoch in range(epochs):
+                    print(f"\\nEPOCH {epoch+1}/{epochs}:")
+                    
+                    epoch_g_loss = []
+                    epoch_d_loss = []
+                    epoch_real_scores = []
+                    epoch_fake_scores = []
+                    
+                    for batch_idx, batch_data in enumerate(dataloader):
+                        # Limit batches for speed in RLAF
+                        if batch_idx > 5:  # Very small for RLAF
+                            break
+                        
+                        # Get real data
+                        real_data = batch_data
+                        if isinstance(real_data, (list, tuple)):
+                            real_data = real_data[0]
+                        
+                        batch_size_real = real_data.size(0)
+                        device = next(trainer.generator.parameters()).device
+                        real_data = real_data.to(device)
+                        
+                        # Train discriminator
+                        trainer.d_optimizer.zero_grad()
+                        
+                        # Real data
+                        real_output = trainer.discriminator(real_data)
+                        if real_output.dim() > 1:
+                            real_output = real_output.view(-1)
+                        
+                        real_labels = torch.ones(batch_size_real, device=device)
+                        d_loss_real = torch.nn.functional.binary_cross_entropy_with_logits(real_output, real_labels)
+                        
+                        # Fake data
+                        z = torch.randn(batch_size_real, trainer.generator.latent_dim, device=device)
+                        fake_data = trainer.generator(z).detach()
+                        fake_output = trainer.discriminator(fake_data)
+                        if fake_output.dim() > 1:
+                            fake_output = fake_output.view(-1)
+                        
+                        fake_labels = torch.zeros(batch_size_real, device=device)
+                        d_loss_fake = torch.nn.functional.binary_cross_entropy_with_logits(fake_output, fake_labels)
+                        
+                        d_loss = (d_loss_real + d_loss_fake) / 2
+                        d_loss.backward()
+                        trainer.d_optimizer.step()
+                        
+                        # Train generator
+                        trainer.g_optimizer.zero_grad()
+                        
+                        z = torch.randn(batch_size_real, trainer.generator.latent_dim, device=device)
+                        fake_data = trainer.generator(z)
+                        fake_output = trainer.discriminator(fake_data)
+                        if fake_output.dim() > 1:
+                            fake_output = fake_output.view(-1)
+                        
+                        g_loss = torch.nn.functional.binary_cross_entropy_with_logits(fake_output, real_labels)
+                        g_loss.backward()
+                        trainer.g_optimizer.step()
+                        
+                        # Record metrics
+                        epoch_g_loss.append(g_loss.item())
+                        epoch_d_loss.append(d_loss.item())
+                        epoch_real_scores.append(real_output.mean().item())
+                        epoch_fake_scores.append(fake_output.mean().item())
+                        
+                        if batch_idx % 2 == 0:
+                            print(f"  BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
+                    
+                    avg_g_loss = np.mean(epoch_g_loss) if epoch_g_loss else 0
+                    avg_d_loss = np.mean(epoch_d_loss) if epoch_d_loss else 0
+                    avg_real_score = np.mean(epoch_real_scores) if epoch_real_scores else 0.5
+                    avg_fake_score = np.mean(epoch_fake_scores) if epoch_fake_scores else 0.5
+                    
+                    training_history['generator_losses'].append(avg_g_loss)
+                    training_history['discriminator_losses'].append(avg_d_loss)
+                    training_history['real_scores'].append(avg_real_score)
+                    training_history['fake_scores'].append(avg_fake_score)
+                    
+                    print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}, "
+                          f"Real={avg_real_score:.3f}, Fake={avg_fake_score:.3f}")
                 
-                print(f"✓ Training completed")
+                print(f"\\n✓ Training completed")
+                
+                # Store training history in trainer for later use
+                trainer.training_history = training_history
                 
             except Exception as e:
                 print(f" Error during training: {e}")
@@ -410,14 +515,15 @@ implementation:
                 
             else:
                 # Use training history metrics if no task evaluation
-                training_history = trainer.training_history
-                if training_history and 'generator_losses' in training_history:
-                    avg_metrics = {
-                        'generator_loss': training_history['generator_losses'][-1] if training_history['generator_losses'] else 0.0,
-                        'discriminator_loss': training_history['discriminator_losses'][-1] if training_history['discriminator_losses'] else 0.0,
-                        'real_score': training_history['real_scores'][-1] if training_history['real_scores'] else 0.5,
-                        'fake_score': training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5
-                    }
+                if hasattr(trainer, 'training_history') and trainer.training_history:
+                    training_history = trainer.training_history
+                    if 'generator_losses' in training_history and training_history['generator_losses']:
+                        avg_metrics = {
+                            'generator_loss': training_history['generator_losses'][-1],
+                            'discriminator_loss': training_history['discriminator_losses'][-1] if training_history['discriminator_losses'] else 0.0,
+                            'real_score': training_history['real_scores'][-1] if training_history['real_scores'] else 0.5,
+                            'fake_score': training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5
+                        }
             
             print(f"\\nEvaluation results:")
             for key, value in avg_metrics.items():
@@ -455,54 +561,49 @@ implementation:
                 if improvement_score > 0:
                     print(f"✓ Metrics improved. Saving retrained model.")
                     
-                    # Save checkpoint
-                    trained_checkpoint = {
-                        'config': dcgan_config.to_dict(),
-                        'generator_state_dict': trainer.generator.state_dict(),
-                        'discriminator_state_dict': trainer.discriminator.state_dict(),
-                        'trainer_state': {
-                            'current_epoch': dcgan_config.epochs,
-                            'current_step': trainer.current_step,
-                            'training_history': trainer.training_history
-                        },
-                        'algorithm': algorithm,
-                        'epochs_trained': dcgan_config.epochs,
-                        'improvement_score': improvement_score,
-                        'action_params': action_params
-                    }
-                    
-                    os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
-                    torch.save(trained_checkpoint, output_model_path)
-                    print(f"✓ Saved retrained model to {output_model_path}")
-                    
                 else:
                     print(f" No improvement in metrics. Keeping original model.")
                     # Copy original model
                     if os.path.exists(model_path):
                         os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
-                        torch.save(torch.load(model_path, map_location='cpu'), output_model_path)
+                        checkpoint_to_save = torch.load(model_path, map_location='cpu')
+                        torch.save(checkpoint_to_save, output_model_path)
                         print(f"✓ Copied original model to {output_model_path}")
+                        return {"metrics": avg_metrics, "model_path": output_model_path}
             else:
-                print(f" No previous metrics for comparison. Saving retrained model anyway.")
-                
-                # Save checkpoint
-                trained_checkpoint = {
-                    'config': dcgan_config.to_dict(),
+                print(f" No previous metrics for comparison. Saving retrained model.")
+            
+            # Save retrained model checkpoint - ALIGNED WITH TRAIN BRICK
+            try:
+                # Prepare checkpoint (similar to train brick)
+                checkpoint_to_save = {
+                    'model_source': 'rlaf_trained',
+                    'model_type': 'dcgan',
+                    'algorithm': algorithm,
+                    'config': dcgan_config,
                     'generator_state_dict': trainer.generator.state_dict(),
                     'discriminator_state_dict': trainer.discriminator.state_dict(),
-                    'trainer_state': {
-                        'current_epoch': dcgan_config.epochs,
-                        'current_step': trainer.current_step,
-                        'training_history': trainer.training_history
-                    },
-                    'algorithm': algorithm,
-                    'epochs_trained': dcgan_config.epochs,
+                    'generator_optimizer_state': trainer.g_optimizer.state_dict(),
+                    'discriminator_optimizer_state': trainer.d_optimizer.state_dict(),
+                    'training_history': training_history if 'training_history' in locals() else {},
+                    'epoch': epochs,
+                    'batch_size': batch_size,
+                    'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    'latent_dim': trainer.generator.latent_dim,
+                    'image_size': image_size,
+                    'channels': channels,
+                    'improvement_score': improvement_score if 'improvement_score' in locals() else 0.0,
                     'action_params': action_params
                 }
                 
                 os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
-                torch.save(trained_checkpoint, output_model_path)
+                torch.save(checkpoint_to_save, output_model_path)
                 print(f"✓ Saved retrained model to {output_model_path}")
+                
+            except Exception as e:
+                print(f" Error saving retrained model: {e}")
+                traceback.print_exc()
+                return {"metrics": avg_metrics, "model_path": output_model_path}
             
             return {"metrics": avg_metrics, "model_path": output_model_path}
         
