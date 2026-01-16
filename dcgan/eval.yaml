@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v9 - FIXED WITH COMPATIBILITY
+name: Evaluate DCGAN v10 - FIXED WITH COMPATIBILITY
 description: Evaluates DCGAN with comprehensive metrics and full compatibility
 inputs:
   - name: trained_model
@@ -566,7 +566,7 @@ implementation:
         processed_images = raw_tensor * scale + shift
         
         # ============================================================================
-        # LOAD GENERATOR AND GENERATE SAMPLES
+        # LOAD GENERATOR AND GENERATE SAMPLES - FIXED CONFIG HANDLING
         # ============================================================================
         print("\\nLoading generator and generating samples...")
         
@@ -581,7 +581,7 @@ implementation:
                 from nesy_factory.GANs.dcgan import DCGANConfig
                 from nesy_factory.GANs.dcgan import FullyConfigurableDCGANGenerator
                 
-                # Recreate config from checkpoint
+                # Recreate config from checkpoint - FIXED: Handle DCGANConfig object
                 config_dict = checkpoint.get('config', {})
                 if not config_dict:
                     # Create minimal config
@@ -590,9 +590,28 @@ implementation:
                         'channels': 1,
                         'latent_dim': 100
                     }
-                
-                # Create config
-                dcgan_config = DCGANConfig.from_dict(config_dict)
+                    dcgan_config = DCGANConfig.from_dict(config_dict)
+                elif isinstance(config_dict, DCGANConfig):
+                    # Config is already a DCGANConfig object
+                    print("CONFIG: Config is already a DCGANConfig object")
+                    dcgan_config = config_dict
+                elif hasattr(config_dict, '__dataclass_fields__'):
+                    # It's a dataclass - treat as DCGANConfig
+                    print("CONFIG: Config is a dataclass")
+                    dcgan_config = config_dict
+                elif isinstance(config_dict, dict):
+                    # Config is a dictionary
+                    print("CONFIG: Config is a dictionary, converting to DCGANConfig...")
+                    dcgan_config = DCGANConfig.from_dict(config_dict)
+                else:
+                    print(f"WARNING: Unknown config type: {type(config_dict)}")
+                    # Create default config
+                    config_dict = {
+                        'image_size': 32,
+                        'channels': 1,
+                        'latent_dim': 100
+                    }
+                    dcgan_config = DCGANConfig.from_dict(config_dict)
                 
                 # Create generator
                 generator = FullyConfigurableDCGANGenerator(dcgan_config)
@@ -622,7 +641,15 @@ implementation:
                 generator.latent_dim = 100
                 print(f"✓ Generator loaded via fallback")
             
-            print(f"  Latent dim: {generator.latent_dim}")
+            # Get latent dim from generator or config
+            if hasattr(generator, 'latent_dim'):
+                latent_dim = generator.latent_dim
+            elif 'latent_dim' in checkpoint:
+                latent_dim = checkpoint['latent_dim']
+            else:
+                latent_dim = 100
+            
+            print(f"  Latent dim: {latent_dim}")
             
         except Exception as e:
             print(f"ERROR loading generator: {e}")
@@ -644,12 +671,6 @@ implementation:
         
         # Generate fake samples
         with torch.no_grad():
-            # Check generator input format
-            if hasattr(generator, 'latent_dim'):
-                latent_dim = generator.latent_dim
-            else:
-                latent_dim = 100
-            
             # Create latent vectors - 2D tensor, not 4D
             z = torch.randn(num_eval_samples, latent_dim, device=device)
             
@@ -897,7 +918,7 @@ implementation:
         print(f"✓ Evaluation summary saved: {args.evaluation_summary}")
         
         # ============================================================================
-        # PRINT RESULTS
+        # PRINT RESULTS - ALL EVALUATION METRICS
         # ============================================================================
         print("\\n" + "=" * 80)
         print("EVALUATION RESULTS SUMMARY")
@@ -910,13 +931,43 @@ implementation:
         print(f"  SSIM: {metrics.get('ssim_mean', 0):.3f} ± {metrics.get('ssim_std', 0):.3f}")
         print(f"  PSNR: {metrics.get('psnr_mean', 0):.1f} dB ± {metrics.get('psnr_std', 0):.1f}")
         print(f"  Diversity: {metrics.get('diversity_score', 0):.3f}")
+        print(f"  MAE: {metrics.get('mae', 0):.4f}")
+        print(f"  MSE: {metrics.get('mse', 0):.4f}")
+        print(f"  Histogram Correlation: {metrics.get('histogram_correlation', 0):.3f}")
+        
+        print("\\n REAL IMAGE STATISTICS:")
+        real_stats = metrics.get('real_stats', {})
+        print(f"  Mean: {real_stats.get('mean', 0):.3f}")
+        print(f"  Std: {real_stats.get('std', 0):.3f}")
+        print(f"  Min: {real_stats.get('min', 0):.3f}")
+        print(f"  Max: {real_stats.get('max', 0):.3f}")
+        
+        print("\\n GENERATED IMAGE STATISTICS:")
+        fake_stats = metrics.get('fake_stats', {})
+        print(f"  Mean: {fake_stats.get('mean', 0):.3f}")
+        print(f"  Std: {fake_stats.get('std', 0):.3f}")
+        print(f"  Min: {fake_stats.get('min', 0):.3f}")
+        print(f"  Max: {fake_stats.get('max', 0):.3f}")
+        
         print("\\n RLAF SCORES:")
         print(f"  Overall Quality: {rlaf_metrics['composite_scores']['overall_quality']:.3f}")
         print(f"  Image Fidelity: {rlaf_metrics['composite_scores']['image_fidelity']:.3f}")
         print(f"  Diversity Quality: {rlaf_metrics['composite_scores']['diversity_quality']:.3f}")
+        print(f"  Generator Quality: {rlaf_metrics['primary_metrics']['generator_quality_score']:.3f}")
+        print(f"  Discriminator Quality: {rlaf_metrics['primary_metrics']['discriminator_quality_score']:.3f}")
+        
         print("\\n CDN UPLOADS:")
-        print(f"  Visualization: {' Uploaded' if viz_url else ' Failed'}")
-        print(f"  Results Package: {' Uploaded' if results_package_url else ' Failed'}")
+        print(f"  Visualization: {'✓ Uploaded' if viz_url else '✗ Failed'}")
+        print(f"  Results Package: {'✓ Uploaded' if results_package_url else '✗ Failed'}")
+        
+        print("\\n OUTPUT FILES:")
+        print(f"  ✓ Evaluation metrics: {args.evaluation_metrics}")
+        print(f"  ✓ RLAF metrics: {args.rlaf_metrics}")
+        print(f"  ✓ Generated samples: {args.generated_samples}")
+        print(f"  ✓ Evaluation summary: {args.evaluation_summary}")
+        print(f"  ✓ Metrics visualization: {args.metrics_visualization}")
+        print(f"  ✓ Evaluation results URL: {args.evaluation_results_url}")
+        
         print("=" * 80)
         
     args:
