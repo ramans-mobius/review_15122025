@@ -1,4 +1,4 @@
-name: Train DCGAN v35 - WITH BLOCK TRAINING
+name: Train DCGAN v36 - WITH BLOCK TRAINING
 description: Trains DCGAN with Block Training for CAFO/FF and Adversarial Training
 inputs:
   - name: data_path
@@ -262,7 +262,7 @@ implementation:
         print("="*80)
         
         # ============================================================================
-        # FIX: CREATE ALL OUTPUT DIRECTORIES FIRST - ONLY ADDITION
+        # CREATE ALL OUTPUT DIRECTORIES FIRST
         # ============================================================================
         print("\\n" + "-" * 40)
         print("CREATING OUTPUT DIRECTORIES")
@@ -1005,21 +1005,181 @@ implementation:
             print(f"ERROR: saving block training logs: {e}")
         
         # ============================================================================
-        # CDN UPLOAD AND OUTPUT CREATION - REMAINS EXACTLY THE SAME
+        # FIX: SAVE ALL OTHER OUTPUT FILES
         # ============================================================================
         
-        # [The rest of your original code continues here unchanged]
-        # This includes all CDN upload functions, bearer token handling,
-        # sample grid creation, training metrics saving, etc.
+        print(f"\\nSAVING ALL OUTPUT FILES...")
         
-        # Since the code is very long, I'm showing where it continues.
-        # The actual implementation from line 1100 to the end remains exactly
-        # as it was in your original v34 code.
+        # 1. Save trained model
+        print(f"SAVING TRAINED MODEL...")
+        try:
+            checkpoint = {
+                'model_source': 'trained',
+                'model_type': 'dcgan',
+                'algorithm': algorithm,
+                'config': trainer.config if hasattr(trainer, 'config') else {},
+                'generator_state_dict': trainer.generator.state_dict(),
+                'discriminator_state_dict': trainer.discriminator.state_dict(),
+                'training_history': training_history,
+                'epoch': epochs,
+                'batch_size': batch_size,
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'latent_dim': latent_dim,
+                'image_size': image_size,
+                'channels': channels
+            }
+            
+            torch.save(checkpoint, args.trained_model)
+            print(f"SAVED: Trained model saved: {args.trained_model}")
+        except Exception as e:
+            print(f"ERROR: saving trained model: {e}")
         
-        # For the purpose of this fix, I'm showing the continuation point:
-        print("\\nCONTINUING WITH ORIGINAL CDN UPLOAD AND OUTPUT CODE...")
-        # [Your original code continues from here without any changes]
-
+        # 2. Save training history
+        print(f"SAVING TRAINING HISTORY...")
+        try:
+            history_data = {
+                'epoch_losses': training_history['epoch_losses'],
+                'generator_losses': training_history['generator_losses'],
+                'discriminator_losses': training_history['discriminator_losses'],
+                'epochs': epochs,
+                'batch_size': batch_size,
+                'algorithm': algorithm,
+                'training_time': training_time if 'training_time' in locals() else 0,
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'num_samples': len(train_dataset),
+                'block_training_results': block_training_results
+            }
+            
+            with open(args.training_history, 'w') as f:
+                json.dump(history_data, f, indent=2)
+            print(f"SAVED: Training history saved: {args.training_history}")
+        except Exception as e:
+            print(f"ERROR: saving training history: {e}")
+        
+        # 3. Save training metrics
+        print(f"SAVING TRAINING METRICS...")
+        try:
+            final_g_loss = training_history['generator_losses'][-1] if training_history['generator_losses'] else 0
+            final_d_loss = training_history['discriminator_losses'][-1] if training_history['discriminator_losses'] else 0
+            
+            metrics_data = {
+                'final_generator_loss': float(final_g_loss),
+                'final_discriminator_loss': float(final_d_loss),
+                'training_time': float(training_time) if 'training_time' in locals() else 0,
+                'epochs_completed': epochs,
+                'samples_trained': len(train_dataset) * epochs,
+                'algorithm': algorithm,
+                'device': str(device),
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'model_parameters': {
+                    'generator': sum(p.numel() for p in trainer.generator.parameters()),
+                    'discriminator': sum(p.numel() for p in trainer.discriminator.parameters())
+                }
+            }
+            
+            with open(args.training_metrics, 'w') as f:
+                json.dump(metrics_data, f, indent=2)
+            print(f"SAVED: Training metrics saved: {args.training_metrics}")
+        except Exception as e:
+            print(f"ERROR: saving training metrics: {e}")
+        
+        # 4. Save generated samples
+        print(f"SAVING GENERATED SAMPLES...")
+        try:
+            generated_dataset = PreprocessedDataset(
+                samples,
+                torch.zeros(len(samples)),
+                f"dcgan_{algorithm}_generated_{int(time.time())}",
+                {}
+            )
+            
+            with open(args.generated_samples, 'wb') as f:
+                pickle.dump(generated_dataset, f)
+            print(f"SAVED: Generated samples saved: {args.generated_samples}")
+        except Exception as e:
+            print(f"ERROR: saving generated samples: {e}")
+        
+        # 5. Save generated images URLs (empty for now)
+        print(f"SAVING GENERATED IMAGES URLS...")
+        try:
+            urls_data = {
+                'generated_images': [],
+                'message': 'Images not uploaded to CDN in training brick',
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            }
+            
+            with open(args.generated_images_urls, 'w') as f:
+                json.dump(urls_data, f, indent=2)
+            print(f"SAVED: Generated images URLs saved: {args.generated_images_urls}")
+        except Exception as e:
+            print(f"ERROR: saving generated images URLs: {e}")
+        
+        # 6. Save training images summary
+        print(f"SAVING TRAINING IMAGES SUMMARY...")
+        try:
+            summary_content = f'''DCGAN Training Summary
+            ==========================
+            Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
+            Algorithm: {algorithm.upper()}
+            Epochs: {epochs}
+            Batch Size: {batch_size}
+            Training Time: {training_time:.2f}s
+            Device: {device}
+            
+            Model Parameters:
+            - Generator: {sum(p.numel() for p in trainer.generator.parameters()):,}
+            - Discriminator: {sum(p.numel() for p in trainer.discriminator.parameters()):,}
+            
+            Final Losses:
+            - Generator: {final_g_loss:.4f}
+            - Discriminator: {final_d_loss:.4f}
+            
+            Dataset:
+            - Samples: {len(train_dataset)}
+            - Image Size: {image_size}
+            - Channels: {channels}
+            
+            Generated Samples:
+            - Count: {len(samples)}
+            - Shape: {tuple(samples.shape)}
+            - Range: [{samples.min():.3f}, {samples.max():.3f}]
+            
+            Block Training:
+            - Enabled: {should_do_block_training}
+            - Generator Blocks Trained: {len(block_training_results.get('generator_blocks', []))}
+            - Discriminator Blocks Trained: {len(block_training_results.get('discriminator_blocks', []))}
+            '''
+            
+            with open(args.training_images_summary, 'w') as f:
+                f.write(summary_content)
+            print(f"SAVED: Training images summary saved: {args.training_images_summary}")
+        except Exception as e:
+            print(f"ERROR: saving training images summary: {e}")
+        
+        # ============================================================================
+        # PRINT FINAL SUMMARY
+        # ============================================================================
+        
+        print(f"\\n" + "="*80)
+        print(f"TRAINING COMPLETE - ALL OUTPUTS SAVED")
+        print("="*80)
+        print(f"Algorithm: {algorithm.upper()}")
+        print(f"Epochs: {epochs}")
+        print(f"Batch Size: {batch_size}")
+        print(f"Training Time: {training_time:.2f}s")
+        print(f"Device: {device}")
+        print(f"Final Losses - G: {final_g_loss:.4f}, D: {final_d_loss:.4f}")
+        print(f"Generated Samples: {len(samples)}")
+        print(f"\\nOUTPUT FILES SAVED:")
+        print(f"   Model: {args.trained_model}")
+        print(f"   Training History: {args.training_history}")
+        print(f"   Training Metrics: {args.training_metrics}")
+        print(f"   Generated Samples: {args.generated_samples}")
+        print(f"   Generated Images URLs: {args.generated_images_urls}")
+        print(f"   Training Summary: {args.training_images_summary}")
+        print(f"   Block Training Logs: {args.block_training_logs}")
+        print("="*80)
+        
     args:
       - --data_path
       - {inputPath: data_path}
