@@ -1,4 +1,4 @@
-name: Upload Model Schema v1
+name: Upload Model Schema v2
 description: Uploads trained DCGAN model to schema database with CDN storage
 inputs:
   # Model inputs
@@ -112,7 +112,7 @@ implementation:
         # Schema parameters
         parser.add_argument('--load_from_schema', type=str, default='false')
         parser.add_argument('--schema_id', type=str, required=True)
-        parser.add_argument('--bearer_token', type=str, required=True)
+        parser.add_argument('--bearer_token', type=str, required=True)  # Actual token string
         parser.add_argument('--model_id', type=str, required=True)
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--tenant_id', type=str, required=True)
@@ -179,12 +179,6 @@ implementation:
                     print(f"  Created: {dir_path}")
         
         # ============================================================================
-        # Read bearer token
-        # ============================================================================
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
-        
-        # ============================================================================
         # Parse inputs
         # ============================================================================
         load_from_schema = args.load_from_schema.lower() == 'true'
@@ -204,6 +198,8 @@ implementation:
         print(f"  Project ID: {args.project_id}")
         print(f"  Model Name: {args.model_name}")
         print(f"  Architecture Type: {architecture_type}")
+        print(f"  Bearer Token Length: {len(args.bearer_token)} chars")
+        print(f"  Bearer Token Preview: {args.bearer_token[:50]}...")
         
         # ============================================================================
         # Load model and config data
@@ -220,23 +216,35 @@ implementation:
             print(f"✓ Loaded model checkpoint: {args.trained_model}")
             print(f"  Checkpoint keys: {list(checkpoint.keys())}")
             
-            # Load master config
-            with open(args.master_config, 'r') as f:
-                master_config = json.load(f)
+            # Load master config - it's a string, parse as JSON
+            master_config = json.loads(args.master_config)
             
-            # Load model info
-            with open(args.model_info, 'r') as f:
-                model_info = json.load(f)
+            # Load model info - check if it's a file path or JSON string
+            if os.path.exists(args.model_info):
+                with open(args.model_info, 'r') as f:
+                    model_info = json.load(f)
+                print(f"✓ Loaded model info from file: {args.model_info}")
+            else:
+                # Try to parse as JSON string
+                try:
+                    model_info = json.loads(args.model_info)
+                    print(f"✓ Loaded model info from JSON string")
+                except:
+                    print(f"ERROR: model_info is neither a valid file path nor JSON string")
+                    print(f"Value: {args.model_info[:100]}...")
+                    sys.exit(1)
             
             # Load optional training data
             training_data = {}
             if args.training_history and os.path.exists(args.training_history):
                 with open(args.training_history, 'r') as f:
                     training_data['history'] = json.load(f)
+                print(f"✓ Loaded training history")
             
             if args.training_metrics and os.path.exists(args.training_metrics):
                 with open(args.training_metrics, 'r') as f:
                     training_data['metrics'] = json.load(f)
+                print(f"✓ Loaded training metrics")
             
         except Exception as e:
             print(f"ERROR loading inputs: {e}")
@@ -248,7 +256,7 @@ implementation:
         # CDN Upload Functions
         # ============================================================================
         
-        def upload_to_cdn(file_path, description, file_type="model"):
+        def upload_to_cdn(file_path, description, file_type="model", bearer_token=bearer_token):
            
             if not os.path.exists(file_path):
                 print(f"  ✗ File not found: {file_path}")
@@ -334,14 +342,9 @@ implementation:
         # ============================================================================
         # Check existing schema entries
         # ============================================================================
-        def check_existing_schema():
+        def check_existing_schema(bearer_token):
          
             schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list?size=1000"
-            
-            headers = {
-                'Authorization': f'Bearer {bearer_token}',
-                'Content-Type': 'application/json'
-            }
             
             filter_data = {
                 "dbType": "TIDB",
@@ -400,7 +403,7 @@ implementation:
         
         if load_from_schema:
             # Check if entry exists, if so increment execution_id
-            existing_entry, exists = check_existing_schema()
+            existing_entry, exists = check_existing_schema(args.bearer_token)
             if exists:
                 print(f"  Existing entry found. Incrementing execution_id...")
                 execution_id += 1
@@ -421,7 +424,7 @@ implementation:
         
         # 1. Upload model weights
         print(f"1. Uploading model weights...")
-        model_weights_url = upload_to_cdn(args.trained_model, "Model weights", "model")
+        model_weights_url = upload_to_cdn(args.trained_model, "Model weights", "model", args.bearer_token)
         
         if not model_weights_url:
             print(f"✗ Failed to upload model weights!")
@@ -473,7 +476,7 @@ implementation:
             metadata_path = tmp_file.name
         
         # Upload metadata
-        model_metadata_url = upload_to_cdn(metadata_path, "Model metadata", "metadata")
+        model_metadata_url = upload_to_cdn(metadata_path, "Model metadata", "metadata", args.bearer_token)
         
         if not model_metadata_url:
             print(f"✗ Failed to upload model metadata!")
@@ -579,7 +582,7 @@ implementation:
         
         # Check if we should update or create
         if load_from_schema:
-            existing_entry, exists = check_existing_schema()
+            existing_entry, exists = check_existing_schema(args.bearer_token)
             if exists:
                 # Update existing entry
                 print(f"  Updating existing schema entry...")
@@ -598,7 +601,7 @@ implementation:
                 curl_command = [
                     "curl",
                     "--location", schema_update_url,
-                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", f"Authorization: Bearer {args.bearer_token}",
                     "--header", "Content-Type: application/json",
                     "--data", json.dumps(schema_entry),
                     "--fail",
@@ -613,7 +616,7 @@ implementation:
                 curl_command = [
                     "curl",
                     "--location", schema_create_url,
-                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", f"Authorization: Bearer {args.bearer_token}",
                     "--header", "Content-Type: application/json",
                     "--data", json.dumps(schema_entry),
                     "--fail",
@@ -628,7 +631,7 @@ implementation:
             curl_command = [
                 "curl",
                 "--location", schema_create_url,
-                "--header", f"Authorization: Bearer {bearer_token}",
+                "--header", f"Authorization: Bearer {args.bearer_token}",
                 "--header", "Content-Type: application/json",
                 "--data", json.dumps(schema_entry),
                 "--fail",
@@ -753,7 +756,7 @@ implementation:
       - --master_config
       - {inputValue: master_config}
       - --model_info
-      - {inputPath: model_info}
+      - {inputValue: model_info}
       
       # Schema parameters
       - --load_from_schema
