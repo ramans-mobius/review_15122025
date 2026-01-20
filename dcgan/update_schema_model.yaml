@@ -1,4 +1,4 @@
-name: Upload Model Schema v3
+name: Upload Model Schema v4
 description: Uploads trained DCGAN model to schema database with CDN storage
 inputs:
   # Model inputs
@@ -257,7 +257,7 @@ implementation:
         # ============================================================================
         
         def upload_to_cdn(file_path, description, file_type="model"):
-            """Upload a file to CDN and return the URL"""
+            
             
             if not os.path.exists(file_path):
                 print(f"  ✗ File not found: {file_path}")
@@ -344,7 +344,7 @@ implementation:
         # Check existing schema entries
         # ============================================================================
         def check_existing_schema():
-            """Check if an entry already exists in the schema"""
+         
             
             schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list?size=1000"
             
