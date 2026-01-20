@@ -58,7 +58,7 @@ implementation:
         
         # Inputs
         parser.add_argument('--trained_model', type=str, required=True)
-        parser.add_argument('--bearer_token', type=str, required=True)
+        parser.add_argument('--bearer_token', type=str, required=True)  # This is the actual token string
         parser.add_argument('--domain', type=str, required=True)
         parser.add_argument('--get_cdn', type=str, required=True)
         parser.add_argument('--model_id', type=str, required=True)
@@ -113,9 +113,7 @@ implementation:
         # ============================================================================
         # CDN upload function
         # ============================================================================
-        def upload_to_cdn(file_path, description):
-          
-            
+        def upload_to_cdn(file_path, description, bearer_token):
             print(f"  Uploading {description}...")
             
             # Generate unique filename
@@ -129,7 +127,7 @@ implementation:
             curl_command = [
                 "curl",
                 "--location", upload_url,
-                "--header", f"Authorization: Bearer {args.bearer_token}",
+                "--header", f"Authorization: Bearer {bearer_token}",
                 "--form", f"file=@{file_path}",
                 "--form", f"filename={cdn_filename}",
                 "--fail",
@@ -162,6 +160,7 @@ implementation:
                 
             except subprocess.CalledProcessError as e:
                 print(f"    ✗ Upload failed: {e.stderr[:200]}")
+                print(f"    Command: {' '.join(curl_command[:5])}...")  # Show first part of command
                 return None
             except Exception as e:
                 print(f"    ✗ Error: {str(e)[:100]}")
@@ -172,11 +171,12 @@ implementation:
         # ============================================================================
         print(f"\\nUploading model to CDN...")
         
-        # Read bearer token
-        with open(args.bearer_token, 'r') as f:
-            bearer_token_content = f.read().strip()
+        # args.bearer_token is already the token string (not a file path)
+        bearer_token_content = args.bearer_token.strip()
+        print(f"  Bearer token length: {len(bearer_token_content)} chars")
+        print(f"  Bearer token preview: {bearer_token_content[:50]}...")
         
-        model_url = upload_to_cdn(args.trained_model, "trained model")
+        model_url = upload_to_cdn(args.trained_model, "trained model", bearer_token_content)
         
         if not model_url:
             print(f" Failed to upload model to CDN")
@@ -237,7 +237,7 @@ implementation:
       - --trained_model
       - {inputPath: trained_model}
       - --bearer_token
-      - {inputValue: bearer_token}
+      - {inputValue: bearer_token}  # This passes the token string directly
       - --domain
       - {inputValue: domain}
       - --get_cdn
