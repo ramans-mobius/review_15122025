@@ -1,4 +1,4 @@
-name: Trigger Pipeline v19
+name: Trigger Pipeline v20
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -182,12 +182,9 @@ implementation:
         args = parser.parse_args()
         
         def fix_cdn_url(url):
+          
             print(f"\\n=== Processing URL ===")
-            print(f"Input URL: {url}...")
-            
-            if not url:
-                print("WARNING: Empty URL provided")
-                return url
+            print(f"Input URL: {url}")
             
             # Step 1: First, decode any existing URL encoding
             try:
@@ -195,14 +192,14 @@ implementation:
             except:
                 pass
             
-            print(f"After unquote: {url}...")
+            print(f"After unquote: {url}")
             
             # Step 2: CRITICAL - Restore the $$ pattern from _$_
-            # Replace _$_ with _$$_ (double dollar)
+            # Replace _$_ with _$$_ (double dollar) - DCGAN specific
             if "_$_" in url:
                 print(f"Found _$_ pattern at positions: {[i for i in range(len(url)) if url.startswith('_$_', i)]}")
                 url = url.replace("_$_", "_$$_")
-                print(f"Restored to _$$_: {url}...")
+                print(f"Restored to _$$_: {url}")
             
             # Step 3: Also check for other single dollar patterns that should be double
             # Look for pattern: _X$X_ where X is any character or end of string
@@ -216,9 +213,9 @@ implementation:
                     replacement = f"{before}_$${after}"
                     url = url.replace(pattern, replacement)
             
-            print(f"After dollar restoration: {url}...")
+            print(f"After dollar restoration: {url}")
             
-            # Step 4: Handle _ENC( pattern
+            # Step 4: Handle _ENC( pattern - DCGAN specific
             if "_ENC(" in url:
                 print(f"Found _ENC( pattern - preserving")
             elif "_ENC%28" in url:
@@ -228,11 +225,17 @@ implementation:
             # Step 5: Remove any spaces
             url = url.replace(" ", "")
             
-            print(f"After cleanup: {url}...")
+            # Step 5.5: Handle special DCGAN patterns with parentheses and brackets
+            # Check for patterns like: something(something) or something[something]
+            if "(" in url and ")" in url:
+                print(f"Found parentheses in URL, will encode properly")
+            
+            print(f"After cleanup: {url}")
             
             # Step 6: Now properly URL encode for JSON transmission
             # We need to encode $ as %24, so _$$_ becomes _%24%24_
             # Also encode parentheses: ( -> %28, ) -> %29
+            # Also encode brackets: [ -> %5B, ] -> %5D
             
             # First, handle special patterns we want to preserve
             # Replace _ENC( with placeholder
@@ -266,9 +269,16 @@ implementation:
                 if paren_pos != -1:
                     encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
             
-            print(f"Final encoded URL: {encoded_url}...")
+            # Also encode any remaining parentheses and brackets
+            encoded_url = encoded_url.replace("(", "%28")
+            encoded_url = encoded_url.replace(")", "%29")
+            encoded_url = encoded_url.replace("[", "%5B")
+            encoded_url = encoded_url.replace("]", "%5D")
+            
+            print(f"Final encoded URL: {encoded_url}")
             print(f"Contains %24%24 (double dollar encoded): {'%24%24' in encoded_url}")
             print(f"Contains _ENC%28: {'_ENC%28' in encoded_url}")
+            print(f"Contains %28%29 (parentheses encoded): {'%28' in encoded_url and '%29' in encoded_url}")
             print(f"URL length: {len(encoded_url)} chars")
             
             return encoded_url
@@ -301,8 +311,8 @@ implementation:
             access_token = f.read().strip()
         print(f"Access token length: {len(access_token)} chars")
         
-        # Fix all CDN URLs
-        print("\\nFixing CDN URLs...")
+        # Fix all CDN URLs with DCGAN-specific handling
+        print("\\nFixing CDN URLs with DCGAN-specific handling...")
         urls_to_fix = {
             'raw_train_data_url': args.raw_train_data_url,
             'raw_test_data_url': args.raw_test_data_url,
@@ -395,7 +405,7 @@ implementation:
         print(f"Experiment ID: {args.experiment_id}")
         print(f"Number of URLs: {len(fixed_urls)}")
         print(f"Master config length: {len(args.master_config)} chars")
-        print(f"train_schema: {args.train_schema[:50]}..." if len(args.train_schema) > 50 else f"train_schema: {args.train_schema}")
+        print(f"train_schema: {args.train_schema}")
         print(f"execution_id: {args.execution_id}")
         print(f"model_id: {args.model_id}")
         print(f"dqn_pipeline_id: {args.dqn_pipeline_id}")
