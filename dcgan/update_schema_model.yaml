@@ -1,4 +1,4 @@
-name: Upload Model Schema v2
+name: Upload Model Schema v3
 description: Uploads trained DCGAN model to schema database with CDN storage
 inputs:
   # Model inputs
@@ -256,8 +256,9 @@ implementation:
         # CDN Upload Functions
         # ============================================================================
         
-        def upload_to_cdn(file_path, description, file_type="model", bearer_token=bearer_token):
-           
+        def upload_to_cdn(file_path, description, file_type="model"):
+            """Upload a file to CDN and return the URL"""
+            
             if not os.path.exists(file_path):
                 print(f"  ✗ File not found: {file_path}")
                 return None
@@ -292,7 +293,7 @@ implementation:
             curl_command = [
                 "curl",
                 "--location", upload_url,
-                "--header", f"Authorization: Bearer {bearer_token}",
+                "--header", f"Authorization: Bearer {args.bearer_token}",
                 "--form", f"file=@{file_path}",
                 "--form", f"filename={cdn_filename}",
                 "--fail",
@@ -342,8 +343,9 @@ implementation:
         # ============================================================================
         # Check existing schema entries
         # ============================================================================
-        def check_existing_schema(bearer_token):
-         
+        def check_existing_schema():
+            """Check if an entry already exists in the schema"""
+            
             schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list?size=1000"
             
             filter_data = {
@@ -361,7 +363,7 @@ implementation:
                 curl_command = [
                     "curl",
                     "--location", schema_url,
-                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", f"Authorization: Bearer {args.bearer_token}",
                     "--header", "Content-Type: application/json",
                     "--data", json.dumps(filter_data),
                     "--fail",
@@ -403,7 +405,7 @@ implementation:
         
         if load_from_schema:
             # Check if entry exists, if so increment execution_id
-            existing_entry, exists = check_existing_schema(args.bearer_token)
+            existing_entry, exists = check_existing_schema()
             if exists:
                 print(f"  Existing entry found. Incrementing execution_id...")
                 execution_id += 1
@@ -424,7 +426,7 @@ implementation:
         
         # 1. Upload model weights
         print(f"1. Uploading model weights...")
-        model_weights_url = upload_to_cdn(args.trained_model, "Model weights", "model", args.bearer_token)
+        model_weights_url = upload_to_cdn(args.trained_model, "Model weights", "model")
         
         if not model_weights_url:
             print(f"✗ Failed to upload model weights!")
@@ -476,7 +478,7 @@ implementation:
             metadata_path = tmp_file.name
         
         # Upload metadata
-        model_metadata_url = upload_to_cdn(metadata_path, "Model metadata", "metadata", args.bearer_token)
+        model_metadata_url = upload_to_cdn(metadata_path, "Model metadata", "metadata")
         
         if not model_metadata_url:
             print(f"✗ Failed to upload model metadata!")
@@ -582,7 +584,7 @@ implementation:
         
         # Check if we should update or create
         if load_from_schema:
-            existing_entry, exists = check_existing_schema(args.bearer_token)
+            existing_entry, exists = check_existing_schema()
             if exists:
                 # Update existing entry
                 print(f"  Updating existing schema entry...")
