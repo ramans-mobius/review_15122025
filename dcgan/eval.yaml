@@ -1,5 +1,5 @@
-name: Evaluate DCGAN v12 - FIXED WITH COMPATIBILITY
-description: Evaluates DCGAN with comprehensive metrics and full compatibility
+name: Evaluate DCGAN v13 
+description: Evaluates DCGAN with comprehensive metrics (no visualization to avoid issues)
 inputs:
   - name: trained_model
     type: Model
@@ -26,8 +26,6 @@ outputs:
     type: Dataset
   - name: evaluation_summary
     type: String
-  - name: metrics_visualization
-    type: String
   - name: rlaf_metrics
     type: Metrics
   - name: evaluation_results_url
@@ -41,19 +39,14 @@ implementation:
       - sh
       - -c
       - |
-        echo "Installing required packages for metrics..."
         apt-get update > /dev/null && apt-get install -y curl > /dev/null
-        pip install scikit-image scipy pillow matplotlib > /dev/null 2>&1
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
         import argparse, pickle, json, os, torch, time, sys, uuid, subprocess
-        import torchvision.transforms as transforms
         import numpy as np
-        from PIL import Image
-        import matplotlib.pyplot as plt
         import warnings
         warnings.filterwarnings('ignore')
         
@@ -129,13 +122,12 @@ implementation:
         parser.add_argument('--evaluation_metrics', type=str, required=True)
         parser.add_argument('--generated_samples', type=str, required=True)
         parser.add_argument('--evaluation_summary', type=str, required=True)
-        parser.add_argument('--metrics_visualization', type=str, required=True)
         parser.add_argument('--rlaf_metrics', type=str, required=True)
         parser.add_argument('--evaluation_results_url', type=str, required=True)
         args = parser.parse_args()
         
         print("=" * 80)
-        print("EVALUATE DCGAN v10 - FIXED WITH COMPATIBILITY")
+        print("EVALUATE DCGAN v12 - NO VISUALIZATION")
         print("=" * 80)
         
         # ============================================================================
@@ -146,7 +138,6 @@ implementation:
             args.evaluation_metrics,
             args.generated_samples,
             args.evaluation_summary,
-            args.metrics_visualization,
             args.rlaf_metrics,
             args.evaluation_results_url
         ]
@@ -416,7 +407,7 @@ implementation:
             return rlaf_metrics
         
         # ============================================================================
-        # CDN UPLOAD FUNCTION - FIXED: Use bearer_token from args directly
+        # CDN UPLOAD FUNCTION
         # ============================================================================
         
         def upload_to_cdn(file_path, description):
@@ -429,21 +420,26 @@ implementation:
             
             # Generate unique filename
             unique_id = str(uuid.uuid4())[:8]
-            cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.png"
+            
+            # Use appropriate extension
+            if description.lower().endswith('json') or '.json' in file_path.lower():
+                cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.json"
+            else:
+                cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.bin"
             
             upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
             
             curl_command = [
                 "curl",
                 "--location", upload_url,
-                "--header", f"Authorization: Bearer {args.bearer_token}",  # Use args.bearer_token directly
+                "--header", f"Authorization: Bearer {args.bearer_token}",
                 "--form", f"file=@{file_path}",
                 "--form", f"filename={cdn_filename}",
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
                 "--max-time", "120",
-                "--silent"  # Add silent flag
+                "--silent"
             ]
             
             try:
@@ -459,7 +455,6 @@ implementation:
                 
                 if not relative_cdn_url:
                     print(f"    Error: No cdnUrl in response")
-                    print(f"    Response: {process.stdout[:200]}")
                     return None
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
@@ -470,8 +465,7 @@ implementation:
             except subprocess.CalledProcessError as e:
                 print(f"    Upload error: {e.stderr[:200]}")
                 return None
-            except json.JSONDecodeError as e:
-                print(f"    JSON decode error: {e}")
+            except json.JSONDecodeError:
                 return None
             except Exception as e:
                 print(f"    Error: {str(e)[:100]}")
@@ -483,7 +477,7 @@ implementation:
         
         print("\\nLoading inputs...")
         
-        # Check file existence for files, not for bearer token (it's a string value)
+        # Check file existence for files
         for path, name in [(args.trained_model, 'trained_model'), 
                           (args.raw_test_data, 'raw_test_data'),
                           (args.preprocessor_params, 'preprocessor_params')]:
@@ -526,26 +520,6 @@ implementation:
         print(f"✓ Preprocessor parameters loaded")
         
         # ============================================================================
-        # HANDLE BEARER TOKEN - FIXED: It's a string value, not a file path
-        # ============================================================================
-        
-        print("\\nHandling bearer token...")
-        
-        # The bearer_token is passed as a string value, not a file path
-        bearer_token_content = args.bearer_token
-        
-        # Save to a temporary file for curl to use
-        bearer_token_file = "/tmp/bearer_token.txt"
-        try:
-            with open(bearer_token_file, 'w') as f:
-                f.write(bearer_token_content)
-            print(f"✓ Bearer token saved to temporary file: {bearer_token_file}")
-            print(f"  Token length: {len(bearer_token_content)} characters")
-        except Exception as e:
-            print(f"ERROR: Could not save bearer token to file: {e}")
-            bearer_token_content = ""
-        
-        # ============================================================================
         # APPLY PREPROCESSING TO TEST DATA
         # ============================================================================
         print("\\nApplying preprocessing to test data...")
@@ -573,7 +547,7 @@ implementation:
         processed_images = raw_tensor * scale + shift
         
         # ============================================================================
-        # LOAD GENERATOR AND GENERATE SAMPLES - FIXED CONFIG HANDLING
+        # LOAD GENERATOR AND GENERATE SAMPLES
         # ============================================================================
         print("\\nLoading generator and generating samples...")
         
@@ -588,7 +562,7 @@ implementation:
                 from nesy_factory.GANs.dcgan import DCGANConfig
                 from nesy_factory.GANs.dcgan import FullyConfigurableDCGANGenerator
                 
-                # Recreate config from checkpoint - FIXED: Handle DCGANConfig object
+                # Recreate config from checkpoint
                 config_dict = checkpoint.get('config', {})
                 if not config_dict:
                     # Create minimal config
@@ -599,20 +573,12 @@ implementation:
                     }
                     dcgan_config = DCGANConfig.from_dict(config_dict)
                 elif isinstance(config_dict, DCGANConfig):
-                    # Config is already a DCGANConfig object
-                    print("CONFIG: Config is already a DCGANConfig object")
                     dcgan_config = config_dict
                 elif hasattr(config_dict, '__dataclass_fields__'):
-                    # It's a dataclass - treat as DCGANConfig
-                    print("CONFIG: Config is a dataclass")
                     dcgan_config = config_dict
                 elif isinstance(config_dict, dict):
-                    # Config is a dictionary
-                    print("CONFIG: Config is a dictionary, converting to DCGANConfig...")
                     dcgan_config = DCGANConfig.from_dict(config_dict)
                 else:
-                    print(f"WARNING: Unknown config type: {type(config_dict)}")
-                    # Create default config
                     config_dict = {
                         'image_size': 32,
                         'channels': 1,
@@ -628,7 +594,6 @@ implementation:
                 
             except ImportError:
                 print(" nesy_factory not available, using fallback generator loading")
-                # Create simple generator from state dict
                 generator = torch.nn.Sequential(
                     torch.nn.Linear(100, 128 * 8 * 8),
                     torch.nn.ReLU(),
@@ -643,12 +608,10 @@ implementation:
                     torch.nn.Tanh()
                 )
                 generator.load_state_dict(checkpoint['generator_state_dict'])
-                
-                # Set latent dim manually
                 generator.latent_dim = 100
                 print(f"✓ Generator loaded via fallback")
             
-            # Get latent dim from generator or config
+            # Get latent dim
             if hasattr(generator, 'latent_dim'):
                 latent_dim = generator.latent_dim
             elif 'latent_dim' in checkpoint:
@@ -678,9 +641,7 @@ implementation:
         
         # Generate fake samples
         with torch.no_grad():
-            # Create latent vectors - 2D tensor, not 4D
             z = torch.randn(num_eval_samples, latent_dim, device=device)
-            
             fake_tensor = generator(z).cpu()
         
         print(f"✓ Generated {num_eval_samples} fake samples")
@@ -721,138 +682,17 @@ implementation:
         print(f"  Diversity quality: {rlaf_metrics['composite_scores']['diversity_quality']:.3f}")
         
         # ============================================================================
-        # CREATE VISUALIZATION - FIXED: Save to the exact path Argo expects
-        # ============================================================================
-        print("\\nCreating metrics visualization...")
-        try:
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-            
-            # Plot 1: Real vs Fake sample comparison
-            for i in range(2):
-                ax = axes[0, i]
-                if i == 0:
-                    sample_data = real_tensor[0].cpu()
-                    title = 'Real Sample'
-                else:
-                    sample_data = fake_tensor[0]
-                    title = 'Generated Sample'
-                
-                if len(sample_data.shape) == 3 and sample_data.shape[0] == 1:
-                    img_data = sample_data[0].numpy()
-                elif len(sample_data.shape) == 3:
-                    img_data = sample_data.permute(1, 2, 0).numpy()
-                else:
-                    img_data = sample_data.numpy()
-                
-                # Denormalize for display
-                img_data = (img_data + 1) / 2
-                
-                if len(img_data.shape) == 2 or (len(img_data.shape) == 3 and img_data.shape[2] == 1):
-                    ax.imshow(img_data, cmap='gray')
-                else:
-                    ax.imshow(img_data)
-                
-                ax.set_title(title)
-                ax.axis('off')
-            
-            # Plot 2: SSIM/PSNR
-            ax = axes[0, 2]
-            metric_values = [metrics.get('ssim_mean', 0), metrics.get('psnr_mean', 0)]
-            metric_names = ['SSIM', 'PSNR']
-            bars = ax.bar(metric_names, metric_values)
-            ax.set_title('Quality Metrics')
-            ax.set_ylabel('Score')
-            ax.grid(True, alpha=0.3, axis='y')
-            
-            for bar, val in zip(bars, metric_values):
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                       f'{val:.3f}', ha='center', va='bottom')
-            
-            # Plot 3: FID Score
-            ax = axes[1, 0]
-            fid_score = metrics.get('fid_score', float('nan'))
-            if not np.isnan(fid_score):
-                ax.bar(['FID'], [fid_score])
-                ax.set_title('FID Score (Lower is Better)')
-                ax.set_ylabel('Score')
-                ax.text(0.5, fid_score + 0.1, f'{fid_score:.1f}', 
-                       ha='center', va='bottom')
-                ax.grid(True, alpha=0.3, axis='y')
-            else:
-                ax.text(0.5, 0.5, 'FID: N/A', ha='center', va='center')
-                ax.set_title('FID Score')
-                ax.axis('off')
-            
-            # Plot 4: Diversity Score
-            ax = axes[1, 1]
-            diversity = metrics.get('diversity_score', 0)
-            ax.bar(['Diversity'], [diversity])
-            ax.set_title('Diversity Score')
-            ax.set_ylabel('Score')
-            ax.text(0.5, diversity + 0.1, f'{diversity:.3f}', 
-                   ha='center', va='bottom')
-            ax.grid(True, alpha=0.3, axis='y')
-            
-            # Plot 5: Pixel value distributions
-            ax = axes[1, 2]
-            real_vals = real_tensor.flatten().cpu().numpy()
-            fake_vals = fake_tensor.flatten().numpy()
-            ax.hist(real_vals, bins=50, alpha=0.5, label='Real', density=True)
-            ax.hist(fake_vals, bins=50, alpha=0.5, label='Fake', density=True)
-            ax.set_title('Pixel Value Distribution')
-            ax.set_xlabel('Value')
-            ax.set_ylabel('Density')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            
-            # FIX: Save to exact path Argo expects (without .png extension)
-            # args.metrics_visualization should be a directory path like /tmp/outputs/metrics_visualization
-            # But we need to save a file, not a directory
-            # The correct approach is to save as data file in that directory
-            
-            # Check if the path exists and is a directory
-            if os.path.isdir(args.metrics_visualization):
-                # Save as data file inside the directory
-                viz_file_path = os.path.join(args.metrics_visualization, "data")
-            else:
-                # Use the exact path provided (for backward compatibility)
-                viz_file_path = args.metrics_visualization
-            
-            plt.savefig(viz_file_path, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            print(f"✓ Visualization saved: {viz_file_path}")
-            
-        except Exception as e:
-            print(f"  Warning: Visualization failed: {e}")
-            import traceback
-            traceback.print_exc()
-            viz_file_path = None
-        
-        # ============================================================================
-        # UPLOAD RESULTS TO CDN - FIXED: Use simplified upload function
+        # UPLOAD RESULTS TO CDN
         # ============================================================================
         print("\\nUploading evaluation results to CDN...")
-        
-        # Upload metrics visualization if it was created
-        viz_url = None
-        if viz_file_path and os.path.exists(viz_file_path) and args.bearer_token:
-            viz_url = upload_to_cdn(viz_file_path, "evaluation_metrics_visualization")
-        else:
-            if not viz_file_path:
-                print("  WARNING: Visualization file not created")
-            if not args.bearer_token:
-                print("  WARNING: No bearer token provided")
         
         # Create evaluation results package
         results_package = {
             'metrics': metrics,
             'rlaf_metrics': rlaf_metrics,
-            'visualization_url': viz_url if viz_url else '',
             'model_info': model_info,
-            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'version': 'v12-no-visualization'
         }
         
         # Save results package locally
@@ -920,11 +760,11 @@ implementation:
                 'image_fidelity': rlaf_metrics['composite_scores']['image_fidelity'],
                 'diversity_quality': rlaf_metrics['composite_scores']['diversity_quality']
             },
-            'visualization_url': viz_url if viz_url else '',
             'results_package_url': results_package_url if results_package_url else '',
             'calculation_time': metrics.get('calculation_time'),
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-            'model_info': model_info
+            'model_info': model_info,
+            'note': 'Visualization skipped to avoid file system issues'
         }
         
         with open(args.evaluation_summary, 'w') as f:
@@ -932,7 +772,7 @@ implementation:
         print(f"✓ Evaluation summary saved: {args.evaluation_summary}")
         
         # ============================================================================
-        # PRINT RESULTS - ALL EVALUATION METRICS
+        # PRINT RESULTS
         # ============================================================================
         print("\\n" + "=" * 80)
         print("EVALUATION RESULTS SUMMARY")
@@ -971,7 +811,6 @@ implementation:
         print(f"  Discriminator Quality: {rlaf_metrics['primary_metrics']['discriminator_quality_score']:.3f}")
         
         print("\\n CDN UPLOADS:")
-        print(f"  Visualization: {'✓ Uploaded' if viz_url else '✗ Failed'}")
         print(f"  Results Package: {'✓ Uploaded' if results_package_url else '✗ Failed'}")
         
         print("\\n OUTPUT FILES:")
@@ -979,10 +818,6 @@ implementation:
         print(f"  ✓ RLAF metrics: {args.rlaf_metrics}")
         print(f"  ✓ Generated samples: {args.generated_samples}")
         print(f"  ✓ Evaluation summary: {args.evaluation_summary}")
-        if viz_file_path and os.path.exists(viz_file_path):
-            print(f"  ✓ Metrics visualization: {viz_file_path}")
-        else:
-            print(f"  ✗ Metrics visualization: Failed to create")
         print(f"  ✓ Evaluation results URL: {args.evaluation_results_url}")
         
         print("=" * 80)
@@ -1008,8 +843,6 @@ implementation:
       - {outputPath: generated_samples}
       - --evaluation_summary
       - {outputPath: evaluation_summary}
-      - --metrics_visualization
-      - {outputPath: metrics_visualization}
       - --rlaf_metrics
       - {outputPath: rlaf_metrics}
       - --evaluation_results_url
