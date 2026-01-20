@@ -1,4 +1,4 @@
-name: Trigger Pipeline v18
+name: Trigger Pipeline v19
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -183,7 +183,7 @@ implementation:
         
         def fix_cdn_url(url):
             print(f"\\n=== Processing URL ===")
-            print(f"Input URL: {url[:100]}...")
+            print(f"Input URL: {url}...")
             
             if not url:
                 print("WARNING: Empty URL provided")
@@ -195,14 +195,14 @@ implementation:
             except:
                 pass
             
-            print(f"After unquote: {url[:100]}...")
+            print(f"After unquote: {url}...")
             
             # Step 2: CRITICAL - Restore the $$ pattern from _$_
             # Replace _$_ with _$$_ (double dollar)
             if "_$_" in url:
                 print(f"Found _$_ pattern at positions: {[i for i in range(len(url)) if url.startswith('_$_', i)]}")
                 url = url.replace("_$_", "_$$_")
-                print(f"Restored to _$$_: {url[:100]}...")
+                print(f"Restored to _$$_: {url}...")
             
             # Step 3: Also check for other single dollar patterns that should be double
             # Look for pattern: _X$X_ where X is any character or end of string
@@ -216,7 +216,7 @@ implementation:
                     replacement = f"{before}_$${after}"
                     url = url.replace(pattern, replacement)
             
-            print(f"After dollar restoration: {url[:100]}...")
+            print(f"After dollar restoration: {url}...")
             
             # Step 4: Handle _ENC( pattern
             if "_ENC(" in url:
@@ -228,7 +228,7 @@ implementation:
             # Step 5: Remove any spaces
             url = url.replace(" ", "")
             
-            print(f"After cleanup: {url[:100]}...")
+            print(f"After cleanup: {url}...")
             
             # Step 6: Now properly URL encode for JSON transmission
             # We need to encode $ as %24, so _$$_ becomes _%24%24_
@@ -266,7 +266,7 @@ implementation:
                 if paren_pos != -1:
                     encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
             
-            print(f"Final encoded URL: {encoded_url[:100]}...")
+            print(f"Final encoded URL: {encoded_url}...")
             print(f"Contains %24%24 (double dollar encoded): {'%24%24' in encoded_url}")
             print(f"Contains _ENC%28: {'_ENC%28' in encoded_url}")
             print(f"URL length: {len(encoded_url)} chars")
