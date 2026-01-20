@@ -1,4 +1,4 @@
-name: Trigger Pipeline v22
+name: Trigger Pipeline v24
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -198,7 +198,9 @@ implementation:
             # Replace _$_ with _$$_ (double dollar) - DCGAN specific
             if "_$_" in url:
                 print(f"Found _$_ pattern at positions: {[i for i in range(len(url)) if url.startswith('_$_', i)]}")
-                url = url.replace("_$_", "_$$_")
+                url = url.replace("_$_", "_dollar_")
+                print(f"With dollar: {url}")
+                url = url.replace("_dollar_", "_$$_")
                 print(f"Restored to _$$_: {url}")
             
             # Step 3: Also check for other single dollar patterns that should be double
