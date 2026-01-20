@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v11 - FIXED WITH COMPATIBILITY
+name: Evaluate DCGAN v12 - FIXED WITH COMPATIBILITY
 description: Evaluates DCGAN with comprehensive metrics and full compatibility
 inputs:
   - name: trained_model
@@ -416,10 +416,10 @@ implementation:
             return rlaf_metrics
         
         # ============================================================================
-        # CDN UPLOAD FUNCTION
+        # CDN UPLOAD FUNCTION - FIXED: Use bearer_token from args directly
         # ============================================================================
         
-        def upload_to_cdn(file_path, description, bearer_token_content, domain, get_cdn_prefix):
+        def upload_to_cdn(file_path, description):
             if not os.path.exists(file_path):
                 print(f"    File not found: {file_path}")
                 return None
@@ -431,18 +431,19 @@ implementation:
             unique_id = str(uuid.uuid4())[:8]
             cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.png"
             
-            upload_url = f"{domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
+            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
             
             curl_command = [
                 "curl",
                 "--location", upload_url,
-                "--header", f"Authorization: Bearer {bearer_token_content}",
+                "--header", f"Authorization: Bearer {args.bearer_token}",  # Use args.bearer_token directly
                 "--form", f"file=@{file_path}",
                 "--form", f"filename={cdn_filename}",
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "120"
+                "--max-time", "120",
+                "--silent"  # Add silent flag
             ]
             
             try:
@@ -458,16 +459,22 @@ implementation:
                 
                 if not relative_cdn_url:
                     print(f"    Error: No cdnUrl in response")
+                    print(f"    Response: {process.stdout[:200]}")
                     return None
                 
-                full_url = f"{get_cdn_prefix}{relative_cdn_url}"
-                print(f"    Uploaded: {full_url[:80]}...")
+                full_url = f"{args.get_cdn}{relative_cdn_url}"
+                print(f"    Uploaded: {cdn_filename}")
+                print(f"    URL: {full_url[:80]}...")
                 return full_url
                 
             except subprocess.CalledProcessError as e:
                 print(f"    Upload error: {e.stderr[:200]}")
                 return None
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                print(f"    JSON decode error: {e}")
+                return None
+            except Exception as e:
+                print(f"    Error: {str(e)[:100]}")
                 return None
         
         # ============================================================================
@@ -714,7 +721,7 @@ implementation:
         print(f"  Diversity quality: {rlaf_metrics['composite_scores']['diversity_quality']:.3f}")
         
         # ============================================================================
-        # CREATE VISUALIZATION
+        # CREATE VISUALIZATION - FIXED: Save to the exact path Argo expects
         # ============================================================================
         print("\\nCreating metrics visualization...")
         try:
@@ -800,14 +807,18 @@ implementation:
             
             plt.tight_layout()
             
-            # Create visualization file with proper PNG extension
-            # args.metrics_visualization might be a directory path or file path
-            # We need to ensure we save as a PNG file
-            if args.metrics_visualization.endswith('.png'):
-                viz_file_path = args.metrics_visualization
+            # FIX: Save to exact path Argo expects (without .png extension)
+            # args.metrics_visualization should be a directory path like /tmp/outputs/metrics_visualization
+            # But we need to save a file, not a directory
+            # The correct approach is to save as data file in that directory
+            
+            # Check if the path exists and is a directory
+            if os.path.isdir(args.metrics_visualization):
+                # Save as data file inside the directory
+                viz_file_path = os.path.join(args.metrics_visualization, "data")
             else:
-                # Append .png extension if not present
-                viz_file_path = f"{args.metrics_visualization}.png"
+                # Use the exact path provided (for backward compatibility)
+                viz_file_path = args.metrics_visualization
             
             plt.savefig(viz_file_path, dpi=150, bbox_inches='tight')
             plt.close()
@@ -821,22 +832,19 @@ implementation:
             viz_file_path = None
         
         # ============================================================================
-        # UPLOAD RESULTS TO CDN
+        # UPLOAD RESULTS TO CDN - FIXED: Use simplified upload function
         # ============================================================================
         print("\\nUploading evaluation results to CDN...")
         
         # Upload metrics visualization if it was created
         viz_url = None
-        if viz_file_path and os.path.exists(viz_file_path) and bearer_token_content:
-            viz_url = upload_to_cdn(
-                viz_file_path, 
-                "evaluation_metrics_visualization",
-                bearer_token_content,
-                args.domain,
-                args.get_cdn
-            )
+        if viz_file_path and os.path.exists(viz_file_path) and args.bearer_token:
+            viz_url = upload_to_cdn(viz_file_path, "evaluation_metrics_visualization")
         else:
-            print("  WARNING: Visualization file not found or no bearer token, skipping CDN upload")
+            if not viz_file_path:
+                print("  WARNING: Visualization file not created")
+            if not args.bearer_token:
+                print("  WARNING: No bearer token provided")
         
         # Create evaluation results package
         results_package = {
@@ -854,18 +862,15 @@ implementation:
         
         # Upload results package
         results_package_url = None
-        if bearer_token_content:
-            results_package_url = upload_to_cdn(
-                results_package_path,
-                "evaluation_results_package",
-                bearer_token_content,
-                args.domain,
-                args.get_cdn
-            )
+        if args.bearer_token:
+            results_package_url = upload_to_cdn(results_package_path, "evaluation_results_package")
         
         # Save results URL
         with open(args.evaluation_results_url, 'w') as f:
-            f.write(results_package_url if results_package_url else "")
+            if results_package_url:
+                f.write(results_package_url)
+            else:
+                f.write("")
         
         # ============================================================================
         # SAVE OUTPUTS
@@ -974,7 +979,7 @@ implementation:
         print(f"  ✓ RLAF metrics: {args.rlaf_metrics}")
         print(f"  ✓ Generated samples: {args.generated_samples}")
         print(f"  ✓ Evaluation summary: {args.evaluation_summary}")
-        if viz_file_path:
+        if viz_file_path and os.path.exists(viz_file_path):
             print(f"  ✓ Metrics visualization: {viz_file_path}")
         else:
             print(f"  ✗ Metrics visualization: Failed to create")
