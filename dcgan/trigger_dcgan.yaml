@@ -1,4 +1,4 @@
-name: Trigger Pipeline v20
+name: Trigger Pipeline v21
 description: Triggers DCGAN training pipeline with new data format
 inputs:
   # CDN URLs from Upload Data To CDN v11 (UPDATED NAMES)
@@ -225,17 +225,11 @@ implementation:
             # Step 5: Remove any spaces
             url = url.replace(" ", "")
             
-            # Step 5.5: Handle special DCGAN patterns with parentheses and brackets
-            # Check for patterns like: something(something) or something[something]
-            if "(" in url and ")" in url:
-                print(f"Found parentheses in URL, will encode properly")
-            
             print(f"After cleanup: {url}")
             
             # Step 6: Now properly URL encode for JSON transmission
             # We need to encode $ as %24, so _$$_ becomes _%24%24_
             # Also encode parentheses: ( -> %28, ) -> %29
-            # Also encode brackets: [ -> %5B, ] -> %5D
             
             # First, handle special patterns we want to preserve
             # Replace _ENC( with placeholder
@@ -269,11 +263,9 @@ implementation:
                 if paren_pos != -1:
                     encoded_url = encoded_url[:paren_pos] + "%29" + encoded_url[paren_pos+1:]
             
-            # Also encode any remaining parentheses and brackets
+            # Also encode any remaining parentheses
             encoded_url = encoded_url.replace("(", "%28")
             encoded_url = encoded_url.replace(")", "%29")
-            encoded_url = encoded_url.replace("[", "%5B")
-            encoded_url = encoded_url.replace("]", "%5D")
             
             print(f"Final encoded URL: {encoded_url}")
             print(f"Contains %24%24 (double dollar encoded): {'%24%24' in encoded_url}")
@@ -546,7 +538,7 @@ implementation:
                         'error': e.stderr[:500] if e.stderr else str(e),
                         'exit_code': e.returncode,
                         'stdout': e.stdout[:500] if e.stdout else None,
-                        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        'timestamp': time.strftime('%Y-%m-dT%H:%M:%SZ'),
                         'attempts': retries
                     }
                     
