@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v10 - FIXED WITH COMPATIBILITY
+name: Evaluate DCGAN v11 - FIXED WITH COMPATIBILITY
 description: Evaluates DCGAN with comprehensive metrics and full compatibility
 inputs:
   - name: trained_model
@@ -135,7 +135,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("EVALUATE DCGAN v8 - FIXED WITH COMPATIBILITY")
+        print("EVALUATE DCGAN v10 - FIXED WITH COMPATIBILITY")
         print("=" * 80)
         
         # ============================================================================
@@ -800,34 +800,43 @@ implementation:
             
             plt.tight_layout()
             
-            # Save visualization
-            plt.savefig(args.metrics_visualization, dpi=150, bbox_inches='tight')
+            # Create visualization file with proper PNG extension
+            # args.metrics_visualization might be a directory path or file path
+            # We need to ensure we save as a PNG file
+            if args.metrics_visualization.endswith('.png'):
+                viz_file_path = args.metrics_visualization
+            else:
+                # Append .png extension if not present
+                viz_file_path = f"{args.metrics_visualization}.png"
+            
+            plt.savefig(viz_file_path, dpi=150, bbox_inches='tight')
             plt.close()
             
-            print(f"✓ Visualization saved: {args.metrics_visualization}")
+            print(f"✓ Visualization saved: {viz_file_path}")
             
         except Exception as e:
             print(f"  Warning: Visualization failed: {e}")
             import traceback
             traceback.print_exc()
+            viz_file_path = None
         
         # ============================================================================
         # UPLOAD RESULTS TO CDN
         # ============================================================================
         print("\\nUploading evaluation results to CDN...")
         
-        # Upload metrics visualization
+        # Upload metrics visualization if it was created
         viz_url = None
-        if bearer_token_content:
+        if viz_file_path and os.path.exists(viz_file_path) and bearer_token_content:
             viz_url = upload_to_cdn(
-                args.metrics_visualization, 
+                viz_file_path, 
                 "evaluation_metrics_visualization",
                 bearer_token_content,
                 args.domain,
                 args.get_cdn
             )
         else:
-            print("  WARNING: No bearer token, skipping CDN upload")
+            print("  WARNING: Visualization file not found or no bearer token, skipping CDN upload")
         
         # Create evaluation results package
         results_package = {
@@ -965,7 +974,10 @@ implementation:
         print(f"  ✓ RLAF metrics: {args.rlaf_metrics}")
         print(f"  ✓ Generated samples: {args.generated_samples}")
         print(f"  ✓ Evaluation summary: {args.evaluation_summary}")
-        print(f"  ✓ Metrics visualization: {args.metrics_visualization}")
+        if viz_file_path:
+            print(f"  ✓ Metrics visualization: {viz_file_path}")
+        else:
+            print(f"  ✗ Metrics visualization: Failed to create")
         print(f"  ✓ Evaluation results URL: {args.evaluation_results_url}")
         
         print("=" * 80)
