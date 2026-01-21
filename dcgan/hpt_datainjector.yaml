@@ -1,0 +1,134 @@
+name: HPTDataInjector
+description: Injects hyperparameter tuning data into HPT-4 schema with proper create/update logic
+
+inputs:
+  - { name: schema_id, type: String, description: "The ID of the HPT-4 schema" }
+  - { name: tuning_data_json, type: String, description: "JSON string containing hyperparameter tuning results" }
+  - { name: project_id, type: String, description: "The project ID" }
+  - { name: bearer_auth_token, type: String, description: "Bearer token for authentication" }
+  - { name: domain, type: String, description: "The domain for the API endpoint" }
+
+implementation:
+  container:
+    image: python:3.9-slim
+    command:
+      - sh
+      - -c
+      - |
+        pip install requests
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import json
+        import argparse
+        import requests
+        import time
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--tuning_data_json', type=str, required=True)
+        parser.add_argument('--project_id', type=str, required=True)
+        parser.add_argument('--bearer_auth_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, required=True)
+        args = parser.parse_args()
+
+        # Read bearer token
+        with open(args.bearer_auth_token, 'r') as f:
+            bearer_auth_token = f.read().strip()
+
+        # Parse tuning data
+        tuning_data = json.loads(args.tuning_data_json)
+        print(f"Tuning data received: {json.dumps(tuning_data, indent=2)}")
+
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_auth_token}'
+        }
+
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[408, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "PUT", "POST", "DELETE", "OPTIONS", "TRACE"],
+            backoff_factor=1
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        http = requests.Session()
+        http.mount("https://", adapter)
+        http.mount("http://", adapter)
+
+        # Process each trial in the tuning data
+        if 'data' in tuning_data and isinstance(tuning_data['data'], list):
+            rows_to_create = []
+            
+            for trial_data in tuning_data['data']:
+                # Ensure required fields are present
+                if 'model_name' not in trial_data or 'timestamp' not in trial_data:
+                    print(f"Skipping trial data missing required fields: {trial_data}")
+                    continue
+                
+                # Add projectId to each trial
+                trial_data['projectId'] = args.project_id
+                
+                # Convert metrics_value to proper format if needed
+                if 'metrics_value' in trial_data and isinstance(trial_data['metrics_value'], list):
+                    # Ensure metrics are in proper JSON format
+                    trial_data['metrics_value'] = [json.loads(json.dumps(metric)) for metric in trial_data['metrics_value']]
+                
+                rows_to_create.append(trial_data)
+
+            if rows_to_create:
+                create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                create_payload = {"data": rows_to_create}
+                
+                print(f"Creating {len(rows_to_create)} hyperparameter tuning records")
+                print(f"Request URL: POST {create_url}")
+                print(f"Request Payload: {json.dumps(create_payload, indent=2)}")
+
+                try:
+                    response = http.post(create_url, headers=headers, json=create_payload, timeout=60)
+                    response.raise_for_status()
+                    print("Successfully created hyperparameter tuning records")
+                    print(f"Response: {response.json()}")
+                    
+                    # Verify the data was inserted
+                    verify_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
+                    verify_payload = {
+                        "dbType": "TIDB",
+                        "ownedOnly": True,
+                        "filter": {
+                            "projectId": args.project_id
+                        }
+                    }
+                    
+                    verify_response = http.post(verify_url, headers=headers, json=verify_payload, timeout=60)
+                    if verify_response.status_code == 200:
+                        existing_data = verify_response.json()
+                        total_count = existing_data.get('totalElements', 0)
+                        print(f"Total records for project {args.project_id}: {total_count}")
+                    
+                except requests.exceptions.RequestException as e:
+                    print(f"Error creating hyperparameter tuning records: {e}")
+                    if e.response:
+                        print(f"Response Status Code: {e.response.status_code}")
+                        print(f"Response Content: {e.response.text}")
+                    exit(1)
+            else:
+                print("No valid trial data to process")
+        else:
+            print("Invalid tuning data format - expected object with 'data' array")
+
+    args:
+      - --schema_id
+      - {inputValue: schema_id}
+      - --tuning_data_json
+      - {inputValue: tuning_data_json}
+      - --project_id
+      - {inputValue: project_id}
+      - --bearer_auth_token
+      - {inputPath: bearer_auth_token}
+      - --domain
+      - {inputValue: domain}
