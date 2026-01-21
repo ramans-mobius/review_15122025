@@ -1,5 +1,5 @@
-name: DCGAN RLAF Loop v3
-description: Triggers the DCGAN RLAF pipeline in a loop to optimize GAN hyperparameters, with proper token handling.
+name: DCGAN RLAF Loop v4
+description: Triggers the DCGAN RLAF pipeline in a loop with automatic domain detection for schema API
 inputs:
   - {name: trained_model, type: Model}
   - {name: init_metrics, type: Metrics}
@@ -11,7 +11,7 @@ inputs:
   - {name: dqn_pipeline_id, type: String}
   - {name: pipeline_domain, type: String}
   - {name: dqn_experiment_id, type: String}
-  - {name: access_token, type: String}  # CRITICAL: Must be present
+  - {name: access_token, type: String}
   - {name: tasks, type: Dataset}
 outputs:
   - {name: rlaf_output, type: Dataset}
@@ -608,7 +608,7 @@ implementation:
             return {"metrics": avg_metrics, "model_path": output_model_path}
         
         # ============================================================================
-        # API FUNCTIONS - UPDATED TO MATCH CNN VERSION
+        # SMART DOMAIN DETECTION FUNCTIONS
         # ============================================================================
         
         def get_retry_session():
@@ -623,7 +623,151 @@ implementation:
             session.mount("http://", adapter)
             return session
         
+        def check_domain_health(domain):
+          
+            try:
+                http = get_retry_session()
+                health_url = f"{domain}/pi-entity-instances-service/v3.0/health"
+                response = http.get(health_url, timeout=10)
+                return response.status_code == 200
+            except:
+                return False
+        
+        def check_schema_exists(access_token, domain, schema_id):
+          
+            try:
+                http = get_retry_session()
+                url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}"
+                headers = {
+                    "Authorization": f"Bearer {access_token}", 
+                    "Content-Type": "application/json"
+                }
+                response = http.get(url, headers=headers, timeout=30)
+                return response.status_code == 200
+            except:
+                return False
+        
+        def check_instance_exists(access_token, domain, schema_id, model_id):
+          
+            try:
+                http = get_retry_session()
+                url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
+                headers = {
+                    "Authorization": f"Bearer {access_token}", 
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "dbType": "TIDB", 
+                    "ownedOnly": True, 
+                    "filter": {"model_id": model_id}
+                }
+                response = http.post(url, headers=headers, json=payload, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    return len(data.get('content', [])) > 0
+                return False
+            except:
+                return False
+        
+        def detect_correct_domain(access_token, possible_domains, schema_id, model_id):
+          
+            print(f"\\nDetecting correct domain for schema {schema_id}, model {model_id}...")
+            
+            for domain in possible_domains:
+                print(f"\\nTesting domain: {domain}")
+                
+                # Check domain health
+                if not check_domain_health(domain):
+                    print(f"  ✗ Domain not reachable")
+                    continue
+                print(f"  ✓ Domain reachable")
+                
+                # Check if schema exists
+                if not check_schema_exists(access_token, domain, schema_id):
+                    print(f"  ✗ Schema {schema_id} not found")
+                    continue
+                print(f"  ✓ Schema exists")
+                
+                # Check if instance exists
+                if not check_instance_exists(access_token, domain, schema_id, model_id):
+                    print(f"  ✗ Instance for model {model_id} not found")
+                    # Schema exists but instance doesn't - might be okay for first run
+                    print(f"  ⚠ Instance not found (might be first run)")
+                    return domain
+                
+                print(f"  ✓ Instance exists")
+                return domain
+            
+            print(f"\\n✗ Could not find schema/instance in any domain")
+            return None
+        
+        # ============================================================================
+        # API FUNCTIONS WITH SMART DOMAIN HANDLING
+        # ============================================================================
+        
+        def get_instance(access_token, domain, schema_id, model_id):
+      
+            print(f"DEBUG: Getting instance for model_id: {model_id} at domain: {domain}")
+            http = get_retry_session()
+            url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
+            
+            headers = {
+                "Authorization": f"Bearer {access_token}", 
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "dbType": "TIDB", 
+                "ownedOnly": True, 
+                "filter": {"model_id": model_id}
+            }
+            print(f"DEBUG: Sending request to: {url}")
+            print(f"DEBUG: Payload: {payload}")
+            
+            response = http.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data['content']:
+                raise ValueError(f"No instance found for model_id: {model_id}")
+            
+            instance = data['content'][0]
+            print(f"DEBUG: Retrieved instance: {instance.get('model_id')}")
+            return instance
+        
+        def update_instance_field(access_token, domain, schema_id, model_id, field, value):
+          
+            print(f"DEBUG: Updating instance field: {field} for model_id: {model_id} at domain: {domain}")
+            http = get_retry_session()
+            url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
+            
+            headers = {
+                "Authorization": f"Bearer {access_token}", 
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "dbType": "TIDB",
+                "conditionalFilter": {
+                    "conditions": [{
+                        "field": "model_id", 
+                        "operator": "EQUAL", 
+                        "value": model_id
+                    }]
+                },
+                "partialUpdateRequests": [{
+                    "patch": [{
+                        "operation": "REPLACE", 
+                        "path": f"{field}", 
+                        "value": value
+                    }]
+                }]
+            }
+            print(f"DEBUG: Sending update request to: {url}")
+            response = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+            response.raise_for_status()
+            print(f"DEBUG: Instance field {field} updated successfully")
+        
         def trigger_pipeline(config, pipeline_domain, dqn_params=None, model_id=None):
+          
             print(f"DEBUG: Triggering DQN pipeline with config: {config}")
             try:
                 http = get_retry_session()
@@ -649,7 +793,6 @@ implementation:
                     'Content-Type': 'application/json'
                 }
                 print(f"DEBUG: Sending request to: {url}")
-                print(f"DEBUG: Payload: {payload}")
                 response = http.post(url, headers=headers, data=payload, timeout=30)
                 response.raise_for_status()
                 result = response.json()
@@ -660,6 +803,7 @@ implementation:
                 raise
         
         def get_pipeline_status(config, pipeline_domain):
+          
             print(f"DEBUG: Checking pipeline status for run ID: {config['run_id']}")
             try:
                 http = get_retry_session()
@@ -678,63 +822,8 @@ implementation:
                 print(f"ERROR: Failed to get pipeline status: {e}")
                 raise
         
-        def get_instance(access_token, domain, schema_id, model_id):
-            print(f"DEBUG: Getting instance for model_id: {model_id}")
-            http = get_retry_session()
-            url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
-            headers = {
-                "Authorization": f"Bearer {access_token}", 
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "dbType": "TIDB", 
-                "ownedOnly": True, 
-                "filter": {"model_id": model_id}
-            }
-            print(f"DEBUG: Sending request to: {url}")
-            print(f"DEBUG: Payload: {payload}")
-            response = http.post(url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            print(f"DEBUG: Instance response: {data}")
-            if not data['content']:
-                raise ValueError(f"No instance found for model_id: {model_id}")
-            instance = data['content'][0]
-            print(f"DEBUG: Retrieved instance: {instance.get('model_id')}")
-            return instance
-        
-        def update_instance_field(access_token, domain, schema_id, model_id, field, value):
-            print(f"DEBUG: Updating instance field: {field} for model_id: {model_id}")
-            http = get_retry_session()
-            url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
-            headers = {
-                "Authorization": f"Bearer {access_token}", 
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "dbType": "TIDB",
-                "conditionalFilter": {
-                    "conditions": [{
-                        "field": "model_id", 
-                        "operator": "EQUAL", 
-                        "value": model_id
-                    }]
-                },
-                "partialUpdateRequests": [{
-                    "patch": [{
-                        "operation": "REPLACE", 
-                        "path": f"{field}", 
-                        "value": value
-                    }]
-                }]
-            }
-            print(f"DEBUG: Sending update request to: {url}")
-            print(f"DEBUG: Update payload: {payload}")
-            response = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
-            response.raise_for_status()
-            print(f"DEBUG: Instance field {field} updated successfully")
-        
         def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, dqn_params, model_id):
+           
             print("DEBUG: Starting DQN pipeline trigger and wait")
             try:
                 run_id = trigger_pipeline(config, pipeline_domain, dqn_params, model_id)
@@ -767,7 +856,7 @@ implementation:
                 raise
         
         # ============================================================================
-        # MAIN FUNCTION - UPDATED WITH TOKEN HANDLING
+        # MAIN FUNCTION WITH DOMAIN DETECTION
         # ============================================================================
         
         def main():
@@ -782,23 +871,21 @@ implementation:
             parser.add_argument('--model_id', type=str, required=True)
             parser.add_argument('--dqn_pipeline_id', type=str, required=True)
             parser.add_argument('--dqn_experiment_id', type=str, required=True)
-            parser.add_argument('--access_token', type=str, required=True)  # CRITICAL: Must match input
+            parser.add_argument('--access_token', type=str, required=True)
             parser.add_argument('--tasks', type=str, required=True)
             parser.add_argument('--pipeline_domain', type=str, required=True)
             parser.add_argument('--retrained_model', type=str, required=True)
             args = parser.parse_args()
             
             print("\\n" + "="*60)
-            print("DCGAN RLAF LOOP STARTING - FIXED WITH TOKEN HANDLING")
+            print("DCGAN RLAF LOOP - SMART DOMAIN DETECTION")
             print("="*60)
             
-            # CRITICAL: Load access token from file (matches CNN version)
-            print("DEBUG: Loading access token...")
+            # Load access token
             with open(args.access_token, 'r') as f:
                 access_token = f.read().strip()
             
             print(f"DEBUG: Access token loaded (length: {len(access_token)} chars)")
-            print(f"DEBUG: Token preview: {access_token[:50]}...")
             
             # Load initial metrics
             with open(args.init_metrics, 'r') as f:
@@ -807,6 +894,56 @@ implementation:
             # Load base config
             base_config = json.loads(args.config)
             
+            # ============================================================================
+            # DOMAIN DETECTION LOGIC
+            # ============================================================================
+            print(f"\\nDEBUG: Provided domain parameter: {args.domain}")
+            print(f"DEBUG: Provided pipeline domain: {args.pipeline_domain}")
+            
+            # Define possible domains to check
+            possible_domains = [
+                args.domain,  # First try the provided domain
+                "https://ig.gov-cloud.ai",  # Pipeline works here
+                "https://ig.mobiusdtaas.ai",  # CNN works here
+                args.pipeline_domain.replace('/bob-service-test', ''),  # Derive from pipeline domain
+            ]
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_domains = []
+            for domain in possible_domains:
+                if domain and domain not in seen:
+                    seen.add(domain)
+                    unique_domains.append(domain)
+            
+            print(f"\\nDomains to check:")
+            for i, domain in enumerate(unique_domains, 1):
+                print(f"  {i}. {domain}")
+            
+            # Detect correct domain
+            detected_domain = detect_correct_domain(
+                access_token, 
+                unique_domains, 
+                args.schema_id, 
+                args.model_id
+            )
+            
+            if not detected_domain:
+                print("\\n✗ ERROR: Could not find schema in any domain")
+                print(f"  Schema ID: {args.schema_id}")
+                print(f"  Model ID: {args.model_id}")
+                print(f"  Possible domains tested: {unique_domains}")
+                sys.exit(1)
+            
+            print(f"\\n✓ Using domain: {detected_domain}")
+            
+            # Update the domain for schema operations
+            original_domain = args.domain
+            args.domain = detected_domain
+            
+            # ============================================================================
+            # RLAF LOOP
+            # ============================================================================
             action_id_for_next_pierce = -1
             
             # Run RLAF loop (max 2 iterations)
@@ -852,7 +989,7 @@ implementation:
                 
                 print(f"Prepared {len(cleaned_metrics)} metrics for DQN")
                 
-                # Get current instance - USING ACCESS TOKEN
+                # Get current instance
                 try:
                     instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                     
@@ -876,7 +1013,6 @@ implementation:
                     pierce2rlaf_history = instance.get("pierce2rlaf", [])
                     pierce2rlaf_history.append(new_pierce2rlaf_entry)
                     
-                    # Update instance field - USING ACCESS TOKEN
                     update_instance_field(access_token, args.domain, args.schema_id, args.model_id, 
                                          "pierce2rlaf", pierce2rlaf_history)
                     
@@ -888,7 +1024,7 @@ implementation:
                 dqn_config = {
                     "pipeline_id": args.dqn_pipeline_id,
                     "experiment_id": args.dqn_experiment_id,
-                    "access_token": access_token  # USING ACCESS TOKEN
+                    "access_token": access_token
                 }
                 
                 try:
@@ -899,7 +1035,7 @@ implementation:
                     print(f" Error triggering DQN pipeline: {e}")
                     break
                 
-                # Get updated instance with RLAF action - USING ACCESS TOKEN
+                # Get updated instance with RLAF action
                 try:
                     updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                     
@@ -959,13 +1095,20 @@ implementation:
                     "iterations_completed": min(i + 1, 2),
                     "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
                     "model_type": "DCGAN",
-                    "token_status": "loaded_successfully" if access_token else "missing"
+                    "domain_detection": {
+                        "original_domain": original_domain,
+                        "detected_domain": detected_domain,
+                        "pipeline_domain": args.pipeline_domain,
+                        "schema_id": args.schema_id,
+                        "model_id": args.model_id
+                    }
                 }, f, indent=4)
             
             print(f"\\n{'='*60}")
             print("RLAF LOOP COMPLETED")
             print(f"Final metrics saved to: {args.rlaf_output}")
             print(f"Retrained model saved to: {args.retrained_model}")
+            print(f"Detected domain: {detected_domain}")
             print(f"{'='*60}")
         
         if __name__ == '__main__':
@@ -992,7 +1135,7 @@ implementation:
       - --dqn_experiment_id
       - {inputValue: dqn_experiment_id}
       - --access_token
-      - {inputPath: access_token}  # CRITICAL: Must match input definition
+      - {inputPath: access_token}
       - --tasks
       - {inputPath: tasks}
       - --pipeline_domain
