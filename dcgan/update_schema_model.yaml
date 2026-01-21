@@ -1,4 +1,4 @@
-name: Upload Model Schema v5 - FIXED CDN STRUCTURE
+name: Upload Model Schema v6 - FIXED CDN STRUCTURE
 description: Uploads trained DCGAN model to schema database with CDN storage - CDN URLs match Data Upload brick
 inputs:
   # Model inputs
@@ -257,7 +257,7 @@ implementation:
         # ============================================================================
         
         def upload_file_to_cdn(file_path, output_url_path, description, file_tag):
-            """EXACT SAME FUNCTION AS DATA UPLOAD BRICK"""
+         
             file_size = os.path.getsize(file_path)
             size_kb = file_size / 1024
             
