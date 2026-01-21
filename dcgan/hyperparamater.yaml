@@ -1,4 +1,4 @@
-name: DCGAN Hyperparamtertuning v1
+name: DCGAN Hyperparamtertuning v2
 description: Launches a Katib experiment for Boost using a predefined objective function.
 
 inputs:
@@ -228,6 +228,7 @@ implementation:
         trial_parameters = []
         trial_args = []
         
+        # First, add all hyperparameters to trial args
         for p in params_input:
             param_name = p["name"]
             trial_parameters.append({
@@ -238,15 +239,157 @@ implementation:
             trial_args.extend(["--" + param_name, "${trialParameters." + param_name + "}"])
             print(f"DEBUG: Added trial parameter: {param_name}")
         
-        # Add fixed arguments
+        # Add fixed arguments - NO config here, we'll inject it
         trial_args.extend([
             "--model_name", args.model_name,
-            "--process_data_url", args.process_data_url,
-            "--config", cfg_b64
+            "--process_data_url", args.process_data_url
         ])
         
         print(f"DEBUG: Final trial args: {trial_args}")
         print(f"DEBUG: Trial parameters: {trial_parameters}")
+        
+        # Create wrapper script that injects parameters into config
+        wrapper_script = '''
+        import json
+        import base64
+        import sys
+        import os
+        import subprocess
+        
+        def auto_cast(value):
+         
+            if isinstance(value, (int, float, bool)):
+                return value
+            if isinstance(value, str):
+                value = value.strip()
+                if value.lower() in ["true", "false"]:
+                    return value.lower() == "true"
+                if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+                    return int(value)
+                try:
+                    return float(value)
+                except ValueError:
+                    return value
+            return value
+        
+        def inject_params_into_config(base_config_b64, params):
+           
+            try:
+                # Decode base config
+                config_str = base64.b64decode(base_config_b64).decode('utf-8')
+                config_dict = json.loads(config_str)
+                
+                print(f"Original config structure: {json.dumps(config_dict, indent=2)[:500]}...")
+                
+                # Map parameter names to config paths (DCGAN specific)
+                param_mapping = {
+                    'batch_size': ['gan', 'training', 'batch_size'],
+                    'learning_rate': ['gan', 'generator', 'learning_rate'],
+                    'latent_dim': ['gan', 'generator', 'latent_dim'],
+                    'beta1': ['gan', 'generator', 'beta1'],
+                    'beta2': ['gan', 'generator', 'beta2'],
+                    'dropout': ['gan', 'discriminator', 'dropout'],
+                    'label_smoothing': ['gan', 'balanced_training', 'label_smoothing'],
+                    'epochs': ['gan', 'training', 'epochs'],
+                    'algorithm': ['gan', 'training', 'algorithm'],
+                    'image_size': ['dataset', 'image_size'],
+                    'channels': ['dataset', 'channels']
+                }
+                
+                # Inject each parameter
+                for param_name, value in params.items():
+                    if param_name in param_mapping:
+                        value = auto_cast(value)
+                        path = param_mapping[param_name]
+                        
+                        # Navigate through config dict
+                        current = config_dict
+                        for key in path[:-1]:
+                            if key not in current:
+                                current[key] = {}
+                            current = current[key]
+                        
+                        # Set the value
+                        current[path[-1]] = value
+                        print(f"Injected {param_name} = {value} into config path: {'.'.join(path)}")
+                        
+                        # Special handling for learning_rate (set for both generator and discriminator)
+                        if param_name == 'learning_rate':
+                            config_dict['gan']['discriminator']['learning_rate'] = value
+                            print(f"Also set discriminator learning_rate = {value}")
+                
+                # Re-encode config
+                updated_config_str = json.dumps(config_dict)
+                updated_config_b64 = base64.b64encode(updated_config_str.encode('utf-8')).decode('utf-8')
+                print(f"Config updated successfully. Length: {len(updated_config_b64)}")
+                
+                return updated_config_b64
+                
+            except Exception as e:
+                print(f"Error injecting parameters into config: {e}")
+                import traceback
+                traceback.print_exc()
+                return base_config_b64
+        
+        def main():
+            # Parse command line arguments
+            params = {}
+            fixed_args = {}
+            
+            i = 1
+            while i < len(sys.argv):
+                arg = sys.argv[i]
+                if arg.startswith('--'):
+                    param_name = arg[2:]
+                    if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith('--'):
+                        params[param_name] = sys.argv[i + 1]
+                        i += 2
+                    else:
+                        params[param_name] = True
+                        i += 1
+                else:
+                    i += 1
+            
+            print(f"Parsed parameters: {params}")
+            
+            # Get base config from environment variable
+            base_config_b64 = os.environ.get('BASE_CONFIG_B64', '')
+            if not base_config_b64:
+                print("ERROR: BASE_CONFIG_B64 environment variable not set")
+                sys.exit(1)
+            
+            # Inject parameters into config
+            updated_config_b64 = inject_params_into_config(base_config_b64, params)
+            
+            # Prepare command for original training script
+            cmd = [
+                'python', 'train_dcgan_hpt.py',
+                '--model_name', params.get('model_name', 'dcgan'),
+                '--process_data_url', params.get('process_data_url', ''),
+                '--config', updated_config_b64
+            ]
+            
+            print(f"Executing command: {' '.join(cmd[:6])}... [config truncated]")
+            print(f"Config preview: {updated_config_b64[:100]}...")
+            
+            # Run the training script
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            # Print output
+            print("=== TRAINING SCRIPT OUTPUT ===")
+            print(result.stdout)
+            if result.stderr:
+                print("=== TRAINING SCRIPT ERRORS ===")
+                print(result.stderr)
+            
+            sys.exit(result.returncode)
+        
+        if __name__ == "__main__":
+            main()
+        '''
+        
+        # Base64 encode the base config and wrapper script
+        wrapper_script_b64 = base64.b64encode(wrapper_script.encode('utf-8')).decode('utf-8')
         
         trial_template = V1beta1TrialTemplate(
             retain=True,
@@ -268,8 +411,14 @@ implementation:
                                 {
                                     "name": "training-container",
                                     "image": "deepak0147/nessy-facotry:1.0.0",
-                                    "command": ["python", "train_dcgan_hpt.py"],
+                                    "command": ["python", "-c", wrapper_script],
                                     "args": trial_args,
+                                    "env": [
+                                        {
+                                            "name": "BASE_CONFIG_B64",
+                                            "value": cfg_b64
+                                        }
+                                    ],
                                     "resources": {
                                         "limits": {"cpu": "2", "memory": "4Gi"}
                                     }
