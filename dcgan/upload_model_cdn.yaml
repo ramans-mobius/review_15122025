@@ -1,4 +1,4 @@
-name: Upload Trained Model to CDN v6 - EXACT MATCHING STRUCTURE
+name: Upload Trained Model to CDN 7 - EXACT MATCHING STRUCTURE
 description: Uploads trained model .pth file to CDN with EXACT same structure as Data Upload brick
 inputs:
   - name: trained_model
