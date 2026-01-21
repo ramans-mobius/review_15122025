@@ -1,4 +1,4 @@
-name: Upload Model Schema v8 - EXACT CDN STRUCTURE WITH VERIFICATION
+name: Upload Model Schema v9 - EXACT CDN STRUCTURE WITH VERIFICATION
 description: Uploads trained DCGAN model to schema database with EXACT same CDN structure and verification
 inputs:
   # Model inputs
@@ -175,8 +175,7 @@ implementation:
         # ============================================================================
         
         def verify_url_exists(url, max_retries=3):
-            """Verify that a URL exists and is accessible"""
-            print(f"  Verifying URL: {url[:80]}...")
+            print(f"  Verifying URL: {url}...")
             
             for attempt in range(max_retries):
                 try:
@@ -226,10 +225,10 @@ implementation:
                         else:
                             print(f"    ⚠ URL check failed (attempt {attempt+1})")
                             if process.stderr:
-                                print(f"      Error: {process.stderr[:200]}")
+                                print(f"      Error: {process.stderr}")
                 
                 except Exception as e:
-                    print(f"    ⚠ Verification error (attempt {attempt+1}): {str(e)[:100]}")
+                    print(f"    ⚠ Verification error (attempt {attempt+1}): {str(e)}")
                 
                 if attempt < max_retries - 1:
                     time.sleep(2)
@@ -314,7 +313,7 @@ implementation:
                     full_url = f"{args.get_cdn}{relative_cdn_url}"
                 
                 print(f"    ✓ Uploaded: {cdn_filename}")
-                print(f"    Full URL: {full_url[:80]}...")
+                print(f"    Full URL: {full_url}...")
                 
                 # Verify URL exists
                 url_verified, verify_error = verify_url_exists(full_url)
