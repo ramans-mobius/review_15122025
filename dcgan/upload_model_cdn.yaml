@@ -1,5 +1,5 @@
-name: Upload Trained Model to CDN v3
-description: Uploads trained model .pth file to CDN and returns URL
+name: Upload Trained Model to CDN v4 - EXACT STRUCTURE
+description: Uploads trained model .pth file to CDN with EXACT same structure as Data Upload brick
 inputs:
   - name: trained_model
     type: Model
@@ -44,7 +44,6 @@ implementation:
       - -u
       - -c
       - |
-        import torch
         import argparse
         import json
         import os
@@ -58,7 +57,7 @@ implementation:
         
         # Inputs
         parser.add_argument('--trained_model', type=str, required=True)
-        parser.add_argument('--bearer_token', type=str, required=True)  # This is the actual token string
+        parser.add_argument('--bearer_token', type=str, required=True)
         parser.add_argument('--domain', type=str, required=True)
         parser.add_argument('--get_cdn', type=str, required=True)
         parser.add_argument('--model_id', type=str, required=True)
@@ -72,7 +71,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD TRAINED MODEL TO CDN v1")
+        print("UPLOAD TRAINED MODEL TO CDN - EXACT STRUCTURE")
         print("=" * 80)
         
         # ============================================================================
@@ -80,12 +79,7 @@ implementation:
         # ============================================================================
         print("\\nCreating output directories...")
         
-        output_paths = [
-            args.model_cdn_url,
-            args.upload_status
-        ]
-        
-        for path in output_paths:
+        for path in [args.model_cdn_url, args.upload_status]:
             if path:
                 dir_path = os.path.dirname(path)
                 if dir_path and not os.path.exists(dir_path):
@@ -93,36 +87,34 @@ implementation:
                     print(f"  Created: {dir_path}")
         
         # ============================================================================
-        # Verify model file exists
+        # Load bearer token
         # ============================================================================
-        print(f"\\nVerifying model file...")
-        
-        if not os.path.exists(args.trained_model):
-            print(f" Model file not found: {args.trained_model}")
-            sys.exit(1)
-        
-        file_size = os.path.getsize(args.trained_model)
-        file_size_mb = file_size / (1024 * 1024)
-        
-        print(f"✓ Model file found: {args.trained_model}")
-        print(f"  File size: {file_size_mb:.2f} MB")
-        print(f"  Model ID: {args.model_id}")
-        print(f"  Model Name: {args.model_name}")
-        print(f"  Execution ID: {args.execution_id}")
+        with open(args.bearer_token, 'r') as f:
+            bearer_token = f.read().strip()
         
         # ============================================================================
-        # CDN upload function
+        # CDN upload function - EXACT AS DATA UPLOAD BRICK
         # ============================================================================
-        def upload_to_cdn(file_path, description, bearer_token):
-            print(f"  Uploading {description}...")
+        
+        def upload_file_to_cdn(file_path, description, file_tag):
+           
+            file_size = os.path.getsize(file_path)
+            size_kb = file_size / 1024
             
-            # Generate unique filename
+            print(f"  Uploading {description} ({size_kb:.1f} KB)...")
+            
+            # Generate unique filename - IDENTICAL TO DATA UPLOAD BRICK
             unique_id = str(uuid.uuid4())[:8]
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = uuid.uuid4().hex[:6]  # Short timestamp - MUST MATCH
             
-            cdn_filename = f"model_{args.model_id}_{args.model_name}_{timestamp}_{unique_id}.pth"
+            # Determine extension based on file type
+            file_ext = '.pth'  # Model files use .pth
             
-            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fmodels%2F"
+            # CRITICAL: Use same filename pattern as Data Upload brick
+            cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}{file_ext}"
+            
+            # CRITICAL: Use same upload URL pattern
+            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
             
             curl_command = [
                 "curl",
@@ -133,8 +125,7 @@ implementation:
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "120",
-                "--silent"
+                "--max-time", "120"
             ]
             
             try:
@@ -152,15 +143,19 @@ implementation:
                     print(f"    ✗ Error: No cdnUrl in response")
                     return None
                 
+                # CRITICAL: Construct full URL exactly as Data Upload brick does
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
                 print(f"    ✓ Uploaded: {cdn_filename}")
-                print(f"    URL: {full_url}...")
+                print(f"    URL: {full_url[:80]}...")
                 
-                return full_url
+                return {
+                    'url': full_url,
+                    'cdn_filename': cdn_filename,
+                    'size_kb': size_kb
+                }
                 
             except subprocess.CalledProcessError as e:
-                print(f"    ✗ Upload failed: {e.stderr[:200]}")
-                print(f"    Command: {' '.join(curl_command[:5])}...")  # Show first part of command
+                print(f"    ✗ Upload failed: {e.stderr[:100]}")
                 return None
             except Exception as e:
                 print(f"    ✗ Error: {str(e)[:100]}")
@@ -171,15 +166,10 @@ implementation:
         # ============================================================================
         print(f"\\nUploading model to CDN...")
         
-        # args.bearer_token is already the token string (not a file path)
-        bearer_token_content = args.bearer_token.strip()
-        print(f"  Bearer token length: {len(bearer_token_content)} chars")
-        print(f"  Bearer token preview: {bearer_token_content[:50]}...")
+        result = upload_file_to_cdn(args.trained_model, "trained model", "model_weights")
         
-        model_url = upload_to_cdn(args.trained_model, "trained model", bearer_token_content)
-        
-        if not model_url:
-            print(f" Failed to upload model to CDN")
+        if not result:
+            print(f"✗ Failed to upload model to CDN")
             sys.exit(1)
         
         # ============================================================================
@@ -190,20 +180,23 @@ implementation:
         try:
             # Save CDN URL
             with open(args.model_cdn_url, 'w') as f:
-                f.write(model_url)
+                f.write(result['url'])
             print(f"✓ Model CDN URL saved: {args.model_cdn_url}")
             
             # Create upload status
             upload_status_data = {
                 'success': True,
-                'model_url': model_url,
+                'model_url': result['url'],
+                'cdn_filename': result['cdn_filename'],
                 'model_id': args.model_id,
                 'model_name': args.model_name,
                 'execution_id': args.execution_id,
-                'file_size_bytes': file_size,
-                'file_size_mb': file_size_mb,
-                'upload_timestamp': int(time.time()),
-                'timestamp_human': datetime.now().isoformat()
+                'size_kb': result['size_kb'],
+                'upload_timestamp': datetime.now().isoformat(),
+                'cdn_structure': {
+                    'filename_pattern': 'dcgan_{tag}_{timestamp}_{uuid}.ext',
+                    'matches_data_upload_brick': True
+                }
             }
             
             with open(args.upload_status, 'w') as f:
@@ -212,24 +205,13 @@ implementation:
             
         except Exception as e:
             print(f"ERROR saving outputs: {e}")
-            import traceback
-            traceback.print_exc()
             sys.exit(1)
         
         # ============================================================================
         # Final summary
         # ============================================================================
         print(f"\\n" + "=" * 80)
-        print(" MODEL UPLOADED TO CDN SUCCESSFULLY!")
-        print("=" * 80)
-        
-        print(f"\\nSummary:")
-        print(f"  Model: {args.model_name}")
-        print(f"  Model ID: {args.model_id}")
-        print(f"  Execution ID: {args.execution_id}")
-        print(f"  File Size: {file_size_mb:.2f} MB")
-        print(f"  Upload Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"  CDN URL: {model_url}...")
+        print("✓ MODEL UPLOADED TO CDN SUCCESSFULLY!")
         print("=" * 80)
 
     args:
@@ -237,7 +219,7 @@ implementation:
       - --trained_model
       - {inputPath: trained_model}
       - --bearer_token
-      - {inputValue: bearer_token}  # This passes the token string directly
+      - {inputPath: bearer_token}  # CHANGED: Reading from file
       - --domain
       - {inputValue: domain}
       - --get_cdn
