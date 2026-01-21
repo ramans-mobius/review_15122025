@@ -1,5 +1,5 @@
-name: DCGAN RLAF Loop v2 - FIXED
-description: Triggers the DCGAN RLAF pipeline in a loop to optimize GAN hyperparameters, controlled by a pierce_or_not flag.
+name: DCGAN RLAF Loop v3
+description: Triggers the DCGAN RLAF pipeline in a loop to optimize GAN hyperparameters, with proper token handling.
 inputs:
   - {name: trained_model, type: Model}
   - {name: init_metrics, type: Metrics}
@@ -11,7 +11,7 @@ inputs:
   - {name: dqn_pipeline_id, type: String}
   - {name: pipeline_domain, type: String}
   - {name: dqn_experiment_id, type: String}
-  - {name: access_token, type: String}
+  - {name: access_token, type: String}  # CRITICAL: Must be present
   - {name: tasks, type: Dataset}
 outputs:
   - {name: rlaf_output, type: Dataset}
@@ -608,7 +608,7 @@ implementation:
             return {"metrics": avg_metrics, "model_path": output_model_path}
         
         # ============================================================================
-        # API FUNCTIONS (unchanged)
+        # API FUNCTIONS - UPDATED TO MATCH CNN VERSION
         # ============================================================================
         
         def get_retry_session():
@@ -623,68 +623,151 @@ implementation:
             session.mount("http://", adapter)
             return session
         
-        def trigger_pipeline(config, pipeline_domain, model_id, dqn_params=None):
-            http = get_retry_session()
-            url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
-            pipeline_params = {"param_json": json.dumps(dqn_params), "model_id": model_id} if dqn_params else {"model_id": model_id}
-            payload = json.dumps({
-                "pipelineType": "ML", "containerResources": {}, "experimentId": config['experiment_id'],
-                "enableCaching": True, "parameters": pipeline_params, "version": 1
-            })
-            headers = {
-                'accept': 'application/json', 'Authorization': f"Bearer {config['access_token']}",
-                'Content-Type': 'application/json'
-            }
-            response = http.post(url, headers=headers, data=payload, timeout=30)
-            response.raise_for_status()
-            return response.json()['runId']
+        def trigger_pipeline(config, pipeline_domain, dqn_params=None, model_id=None):
+            print(f"DEBUG: Triggering DQN pipeline with config: {config}")
+            try:
+                http = get_retry_session()
+                url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
+                
+                pipeline_params = {}
+                if dqn_params:
+                    pipeline_params["param_json"] = json.dumps(dqn_params)
+                if model_id:
+                    pipeline_params["model_id"] = model_id
+                    
+                payload = json.dumps({
+                    "pipelineType": "ML", 
+                    "containerResources": {}, 
+                    "experimentId": config['experiment_id'],
+                    "enableCaching": True, 
+                    "parameters": pipeline_params,
+                    "version": 1
+                })
+                headers = {
+                    'accept': 'application/json', 
+                    'Authorization': f"Bearer {config['access_token']}",
+                    'Content-Type': 'application/json'
+                }
+                print(f"DEBUG: Sending request to: {url}")
+                print(f"DEBUG: Payload: {payload}")
+                response = http.post(url, headers=headers, data=payload, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                print(f"DEBUG: DQN pipeline triggered successfully. Run ID: {result['runId']}")
+                return result['runId']
+            except Exception as e:
+                print(f"ERROR: Failed to trigger DQN pipeline: {e}")
+                raise
         
         def get_pipeline_status(config, pipeline_domain):
-            http = get_retry_session()
-            url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
-            headers = {'accept': 'application/json', 'Authorization': f"Bearer {config['access_token']}"}
-            response = http.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            pipeline_status = response.json()
-            latest_state = pipeline_status['run_details']['state_history'][-1]
-            return latest_state['state']
+            print(f"DEBUG: Checking pipeline status for run ID: {config['run_id']}")
+            try:
+                http = get_retry_session()
+                url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
+                headers = {
+                    'accept': 'application/json', 
+                    'Authorization': f"Bearer {config['access_token']}"
+                }
+                response = http.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                pipeline_status = response.json()
+                latest_state = pipeline_status['run_details']['state_history'][-1]
+                print(f"DEBUG: DQN pipeline status: {latest_state['state']}")
+                return latest_state['state']
+            except Exception as e:
+                print(f"ERROR: Failed to get pipeline status: {e}")
+                raise
         
         def get_instance(access_token, domain, schema_id, model_id):
+            print(f"DEBUG: Getting instance for model_id: {model_id}")
             http = get_retry_session()
             url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
-            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-            payload = {"dbType": "TIDB", "ownedOnly": True, "filter": {"model_id": model_id}}
+            headers = {
+                "Authorization": f"Bearer {access_token}", 
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "dbType": "TIDB", 
+                "ownedOnly": True, 
+                "filter": {"model_id": model_id}
+            }
+            print(f"DEBUG: Sending request to: {url}")
+            print(f"DEBUG: Payload: {payload}")
             response = http.post(url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
-            return response.json()['content'][0]
+            data = response.json()
+            print(f"DEBUG: Instance response: {data}")
+            if not data['content']:
+                raise ValueError(f"No instance found for model_id: {model_id}")
+            instance = data['content'][0]
+            print(f"DEBUG: Retrieved instance: {instance.get('model_id')}")
+            return instance
         
         def update_instance_field(access_token, domain, schema_id, model_id, field, value):
+            print(f"DEBUG: Updating instance field: {field} for model_id: {model_id}")
             http = get_retry_session()
             url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
-            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            headers = {
+                "Authorization": f"Bearer {access_token}", 
+                "Content-Type": "application/json"
+            }
             payload = {
                 "dbType": "TIDB",
-                "conditionalFilter": {"conditions": [{"field": "model_id", "operator": "EQUAL", "value": model_id}]},
-                "partialUpdateRequests": [{"patch": [{"operation": "REPLACE", "path": f"{field}", "value": value}]}]
+                "conditionalFilter": {
+                    "conditions": [{
+                        "field": "model_id", 
+                        "operator": "EQUAL", 
+                        "value": model_id
+                    }]
+                },
+                "partialUpdateRequests": [{
+                    "patch": [{
+                        "operation": "REPLACE", 
+                        "path": f"{field}", 
+                        "value": value
+                    }]
+                }]
             }
+            print(f"DEBUG: Sending update request to: {url}")
+            print(f"DEBUG: Update payload: {payload}")
             response = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
             response.raise_for_status()
+            print(f"DEBUG: Instance field {field} updated successfully")
         
-        def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, model_id, dqn_params):
-            run_id = trigger_pipeline(config, pipeline_domain, model_id, dqn_params)
-            config["run_id"] = run_id
-            while True:
-                status = get_pipeline_status(config, pipeline_domain)
-                print(f"Current DQN pipeline status: {status}")
-                if status == 'SUCCEEDED':
-                    print("DQN Pipeline execution completed.")
-                    break
-                elif status in ['FAILED', 'ERROR']:
-                    raise RuntimeError(f"DQN Pipeline failed with status {status}")
-                time.sleep(60)
+        def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, dqn_params, model_id):
+            print("DEBUG: Starting DQN pipeline trigger and wait")
+            try:
+                run_id = trigger_pipeline(config, pipeline_domain, dqn_params, model_id)
+                config["run_id"] = run_id
+                
+                max_wait_time = 1800
+                start_time = time.time()
+                check_count = 0
+                
+                while time.time() - start_time < max_wait_time:
+                    check_count += 1
+                    print(f"DEBUG: Checking pipeline status (attempt {check_count})")
+                    status = get_pipeline_status(config, pipeline_domain)
+                    
+                    if status == 'SUCCEEDED':
+                        print("DEBUG: DQN pipeline completed successfully")
+                        return True
+                    elif status in ['FAILED', 'ERROR', 'CANCELLED']:
+                        print(f"ERROR: DQN pipeline failed with status: {status}")
+                        raise RuntimeError(f"DQN pipeline failed with status: {status}")
+                    
+                    print(f"DEBUG: Pipeline still running, waiting 30 seconds...")
+                    time.sleep(30)
+                
+                print("ERROR: DQN pipeline timeout")
+                raise RuntimeError("DQN pipeline timeout after 30 minutes")
+                
+            except Exception as e:
+                print(f"ERROR: Error in DQN pipeline execution: {e}")
+                raise
         
         # ============================================================================
-        # MAIN FUNCTION
+        # MAIN FUNCTION - UPDATED WITH TOKEN HANDLING
         # ============================================================================
         
         def main():
@@ -699,19 +782,23 @@ implementation:
             parser.add_argument('--model_id', type=str, required=True)
             parser.add_argument('--dqn_pipeline_id', type=str, required=True)
             parser.add_argument('--dqn_experiment_id', type=str, required=True)
-            parser.add_argument('--access_token', type=str, required=True)
+            parser.add_argument('--access_token', type=str, required=True)  # CRITICAL: Must match input
             parser.add_argument('--tasks', type=str, required=True)
             parser.add_argument('--pipeline_domain', type=str, required=True)
             parser.add_argument('--retrained_model', type=str, required=True)
             args = parser.parse_args()
             
             print("\\n" + "="*60)
-            print("DCGAN RLAF LOOP STARTING - FIXED")
+            print("DCGAN RLAF LOOP STARTING - FIXED WITH TOKEN HANDLING")
             print("="*60)
             
-            # Load access token
+            # CRITICAL: Load access token from file (matches CNN version)
+            print("DEBUG: Loading access token...")
             with open(args.access_token, 'r') as f:
                 access_token = f.read().strip()
+            
+            print(f"DEBUG: Access token loaded (length: {len(access_token)} chars)")
+            print(f"DEBUG: Token preview: {access_token[:50]}...")
             
             # Load initial metrics
             with open(args.init_metrics, 'r') as f:
@@ -765,7 +852,7 @@ implementation:
                 
                 print(f"Prepared {len(cleaned_metrics)} metrics for DQN")
                 
-                # Get current instance
+                # Get current instance - USING ACCESS TOKEN
                 try:
                     instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                     
@@ -788,7 +875,10 @@ implementation:
                     
                     pierce2rlaf_history = instance.get("pierce2rlaf", [])
                     pierce2rlaf_history.append(new_pierce2rlaf_entry)
-                    update_instance_field(access_token, args.domain, args.schema_id, args.model_id, "pierce2rlaf", pierce2rlaf_history)
+                    
+                    # Update instance field - USING ACCESS TOKEN
+                    update_instance_field(access_token, args.domain, args.schema_id, args.model_id, 
+                                         "pierce2rlaf", pierce2rlaf_history)
                     
                 except Exception as e:
                     print(f" Error updating instance: {e}")
@@ -798,18 +888,18 @@ implementation:
                 dqn_config = {
                     "pipeline_id": args.dqn_pipeline_id,
                     "experiment_id": args.dqn_experiment_id,
-                    "access_token": access_token
+                    "access_token": access_token  # USING ACCESS TOKEN
                 }
                 
                 try:
                     print(f"Triggering DQN pipeline with {len(dqn_params)} parameters...")
-                    trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, dqn_params)
+                    trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, dqn_params, args.model_id)
                     
                 except Exception as e:
                     print(f" Error triggering DQN pipeline: {e}")
                     break
                 
-                # Get updated instance with RLAF action
+                # Get updated instance with RLAF action - USING ACCESS TOKEN
                 try:
                     updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                     
@@ -867,7 +957,9 @@ implementation:
                 json.dump({
                     "final_metrics": current_metrics,
                     "iterations_completed": min(i + 1, 2),
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "model_type": "DCGAN",
+                    "token_status": "loaded_successfully" if access_token else "missing"
                 }, f, indent=4)
             
             print(f"\\n{'='*60}")
@@ -900,7 +992,7 @@ implementation:
       - --dqn_experiment_id
       - {inputValue: dqn_experiment_id}
       - --access_token
-      - {inputPath: access_token}
+      - {inputPath: access_token}  # CRITICAL: Must match input definition
       - --tasks
       - {inputPath: tasks}
       - --pipeline_domain
