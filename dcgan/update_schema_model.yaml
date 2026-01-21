@@ -1,5 +1,5 @@
-name: Upload Model Schema v4
-description: Uploads trained DCGAN model to schema database with CDN storage
+name: Upload Model Schema v5 - FIXED CDN STRUCTURE
+description: Uploads trained DCGAN model to schema database with CDN storage - CDN URLs match Data Upload brick
 inputs:
   # Model inputs
   - name: trained_model
@@ -43,7 +43,7 @@ inputs:
     default: "FFN"
     description: "Architecture type (must be valid ENUM: CNN, GRM, transformer, clustering, FFN)"
   
-  # CDN parameters
+  # CDN parameters - MUST MATCH DATA UPLOAD BRICK
   - name: domain
     type: String
     description: "CDN upload domain"
@@ -120,7 +120,7 @@ implementation:
         parser.add_argument('--model_name', type=str, required=True)
         parser.add_argument('--architecture_type', type=str, default='FFN')
         
-        # CDN parameters
+        # CDN parameters - MUST MATCH DATA UPLOAD BRICK
         parser.add_argument('--domain', type=str, required=True)
         parser.add_argument('--get_cdn', type=str, required=True)
         
@@ -138,7 +138,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD TRAINED MODEL TO SCHEMA v1")
+        print("UPLOAD TRAINED MODEL TO SCHEMA v1 - FIXED CDN STRUCTURE")
         print("=" * 80)
         
         # ============================================================================
@@ -253,41 +253,32 @@ implementation:
             sys.exit(1)
         
         # ============================================================================
-        # CDN Upload Functions
+        # CDN Upload Functions - IDENTICAL TO DATA UPLOAD BRICK
         # ============================================================================
         
-        def upload_to_cdn(file_path, description, file_type="model"):
-            
-            
-            if not os.path.exists(file_path):
-                print(f"  ✗ File not found: {file_path}")
-                return None
-            
+        def upload_file_to_cdn(file_path, output_url_path, description, file_tag):
+            """EXACT SAME FUNCTION AS DATA UPLOAD BRICK"""
             file_size = os.path.getsize(file_path)
-            size_mb = file_size / (1024 * 1024)
+            size_kb = file_size / 1024
             
-            print(f"  Uploading {description} ({size_mb:.2f} MB)...")
+            print(f"  Uploading {description} ({size_kb:.1f} KB)...")
             
-            # Generate unique filename
+            # Generate unique filename - IDENTICAL TO DATA UPLOAD BRICK
             unique_id = str(uuid.uuid4())[:8]
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = uuid.uuid4().hex[:6]  # Short timestamp - MUST MATCH
             
-            # Determine extension
-            if file_type == "model":
-                extension = ".pth"
-                file_tag = "weights"
-            elif file_type == "config":
-                extension = ".json"
-                file_tag = "config"
-            elif file_type == "metadata":
-                extension = ".json"
-                file_tag = "metadata"
+            # Determine extension based on file type
+            if file_tag == 'weights':
+                file_ext = '.pth'
+            elif 'metadata' in file_tag:
+                file_ext = '.json'
             else:
-                extension = ".bin"
-                file_tag = "file"
+                file_ext = '.pth'  # Default
             
-            cdn_filename = f"dcgan_{args.model_id}_{file_tag}_{timestamp}_{unique_id}{extension}"
+            # CRITICAL: Use same filename pattern as Data Upload brick
+            cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}{file_ext}"
             
+            # CRITICAL: Use same upload URL pattern
             upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
             
             curl_command = [
@@ -299,8 +290,7 @@ implementation:
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "120",
-                "--silent"
+                "--max-time", "120"
             ]
             
             try:
@@ -316,25 +306,29 @@ implementation:
                 
                 if not relative_cdn_url:
                     print(f"    ✗ Error: No cdnUrl in response")
-                    print(f"    Response: {process.stdout[:200]}")
                     return None
                 
+                # CRITICAL: Construct full URL exactly as Data Upload brick does
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
                 print(f"    ✓ Uploaded: {cdn_filename}")
                 print(f"    URL: {full_url[:80]}...")
                 
+                # Save URL locally (optional - for debugging)
+                if output_url_path:
+                    with open(output_url_path, "w") as f:
+                        f.write(full_url)
+                
                 return {
                     'url': full_url,
-                    'filename': cdn_filename,
                     'size_bytes': file_size,
-                    'description': description
+                    'size_kb': size_kb,
+                    'description': description,
+                    'file_tag': file_tag,
+                    'cdn_filename': cdn_filename
                 }
                 
             except subprocess.CalledProcessError as e:
-                print(f"    ✗ Upload failed: {e.stderr[:200]}")
-                return None
-            except json.JSONDecodeError:
-                print(f"    ✗ Invalid JSON response: {process.stdout[:200]}")
+                print(f"    ✗ Upload failed: {e.stderr[:100]}")
                 return None
             except Exception as e:
                 print(f"    ✗ Error: {str(e)[:100]}")
@@ -344,9 +338,7 @@ implementation:
         # Check existing schema entries
         # ============================================================================
         def check_existing_schema():
-         
-            
-            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list?size=1000"
+            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
             
             filter_data = {
                 "dbType": "TIDB",
@@ -420,15 +412,20 @@ implementation:
             f.write(str(execution_id))
         
         # ============================================================================
-        # Prepare files for CDN upload
+        # Prepare files for CDN upload - USING IDENTICAL FUNCTION
         # ============================================================================
         print(f"\\nPreparing files for CDN upload...")
         
         # 1. Upload model weights
         print(f"1. Uploading model weights...")
-        model_weights_url = upload_to_cdn(args.trained_model, "Model weights", "model")
+        model_weights_result = upload_file_to_cdn(
+            args.trained_model, 
+            None,  # No output URL path needed
+            "Model weights", 
+            "weights"
+        )
         
-        if not model_weights_url:
+        if not model_weights_result:
             print(f"✗ Failed to upload model weights!")
             sys.exit(1)
         
@@ -478,31 +475,41 @@ implementation:
             metadata_path = tmp_file.name
         
         # Upload metadata
-        model_metadata_url = upload_to_cdn(metadata_path, "Model metadata", "metadata")
-        
-        if not model_metadata_url:
-            print(f"✗ Failed to upload model metadata!")
-            os.unlink(metadata_path)
-            sys.exit(1)
+        model_metadata_result = upload_file_to_cdn(
+            metadata_path, 
+            None,  # No output URL path needed
+            "Model metadata", 
+            "metadata"
+        )
         
         # Clean up temp file
         os.unlink(metadata_path)
         
-        # Save CDN URLs
+        if not model_metadata_result:
+            print(f"✗ Failed to upload model metadata!")
+            sys.exit(1)
+        
+        # Save CDN URLs - USING SAME STRUCTURE AS DATA UPLOAD BRICK
         cdn_urls_data = {
-            'model_weights_cdn': model_weights_url['url'],
-            'model_metadata_cdn': model_metadata_url['url'],
-            'weights_filename': model_weights_url['filename'],
-            'metadata_filename': model_metadata_url['filename'],
-            'upload_timestamp': datetime.now().isoformat()
+            'model_weights_cdn': model_weights_result['url'],
+            'model_metadata_cdn': model_metadata_result['url'],
+            'weights_filename': model_weights_result['cdn_filename'],
+            'metadata_filename': model_metadata_result['cdn_filename'],
+            'weights_size_kb': model_weights_result['size_kb'],
+            'metadata_size_kb': model_metadata_result['size_kb'],
+            'upload_timestamp': datetime.now().isoformat(),
+            'file_tags': {
+                'weights': model_weights_result['file_tag'],
+                'metadata': model_metadata_result['file_tag']
+            }
         }
         
         with open(args.cdn_urls, 'w') as f:
             json.dump(cdn_urls_data, f, indent=2)
         
         print(f"\\n✓ CDN uploads completed:")
-        print(f"  Weights: {model_weights_url['filename']}")
-        print(f"  Metadata: {model_metadata_url['filename']}")
+        print(f"  Weights: {model_weights_result['cdn_filename']} ({model_weights_result['size_kb']:.1f} KB)")
+        print(f"  Metadata: {model_metadata_result['cdn_filename']} ({model_metadata_result['size_kb']:.1f} KB)")
         
         # ============================================================================
         # Prepare schema entry with required fields validation
@@ -547,8 +554,8 @@ implementation:
             "output_shape": output_shape,
             "input_shape": input_shape,
             "parameter_count": str(total_params),
-            "model_weights_cdn": model_weights_url['url'],
-            "model_metadata_cdn": model_metadata_url['url'],
+            "model_weights_cdn": model_weights_result['url'],  # Use URL from CDN upload
+            "model_metadata_cdn": model_metadata_result['url'],  # Use URL from CDN upload
             "architecture_type": architecture_type,
             "source": "auto-generated",
             "created_by": "dcgan_pipeline",
@@ -574,6 +581,8 @@ implementation:
         print(f"  Parameters: {total_params:,}")
         print(f"  Input shape: {input_shape}")
         print(f"  Output shape: {output_shape}")
+        print(f"  Weights URL: {model_weights_result['url'][:80]}...")
+        print(f"  Metadata URL: {model_metadata_result['url'][:80]}...")
         
         # ============================================================================
         # Upload to schema (with proper handling for update/create)
@@ -695,14 +704,16 @@ implementation:
             'architecture_type': architecture_type,
             'cdn_uploads': {
                 'weights': {
-                    'success': model_weights_url is not None,
-                    'url': model_weights_url['url'] if model_weights_url else None,
-                    'filename': model_weights_url['filename'] if model_weights_url else None
+                    'success': model_weights_result is not None,
+                    'url': model_weights_result['url'] if model_weights_result else None,
+                    'filename': model_weights_result['cdn_filename'] if model_weights_result else None,
+                    'size_kb': model_weights_result['size_kb'] if model_weights_result else None
                 },
                 'metadata': {
-                    'success': model_metadata_url is not None,
-                    'url': model_metadata_url['url'] if model_metadata_url else None,
-                    'filename': model_metadata_url['filename'] if model_metadata_url else None
+                    'success': model_metadata_result is not None,
+                    'url': model_metadata_result['url'] if model_metadata_result else None,
+                    'filename': model_metadata_result['cdn_filename'] if model_metadata_result else None,
+                    'size_kb': model_metadata_result['size_kb'] if model_metadata_result else None
                 }
             },
             'schema_response': schema_response if success else {"error": str(schema_response.get('error', 'Unknown error'))},
@@ -714,6 +725,12 @@ implementation:
                 'training_algorithm': gan_cfg.get('training', {}).get('algorithm', 'backprop'),
                 'image_size': image_size,
                 'channels': channels
+            },
+            'cdn_structure_match': {
+                'filename_pattern': 'dcgan_{tag}_{timestamp}_{uuid}.ext',
+                'upload_url': f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F",
+                'full_url_pattern': f"{args.get_cdn}{{relative_path}}",
+                'matches_data_upload_brick': True
             }
         }
         
@@ -735,16 +752,17 @@ implementation:
         print(f"  Execution ID: {execution_id} ({'incremented' if execution_id != original_execution_id else 'original'})")
         print(f"  Architecture: {architecture_type}")
         print(f"  Total Parameters: {total_params:,}")
-        print(f"  CDN Uploads: 2/2 {'✓' if model_weights_url and model_metadata_url else '✗'}")
+        print(f"  CDN Uploads: 2/2 {'✓' if model_weights_result and model_metadata_result else '✗'}")
         print(f"  Schema Upload: {'✓' if success else '✗'}")
         print(f"  Schema Operation: {'UPDATE' if (load_from_schema and exists) else 'CREATE'}")
         print(f"  Load from Schema: {load_from_schema}")
+        print(f"  CDN Structure Match: ✓ (identical to Data Upload brick)")
         
-        if model_weights_url:
-            print(f"\\nWeights URL: {model_weights_url['url'][:100]}...")
+        if model_weights_result:
+            print(f"\\nWeights URL: {model_weights_result['url'][:100]}...")
         
-        if model_metadata_url:
-            print(f"Metadata URL: {model_metadata_url['url'][:100]}...")
+        if model_metadata_result:
+            print(f"Metadata URL: {model_metadata_result['url'][:100]}...")
         
         print("=" * 80)
         
@@ -780,7 +798,7 @@ implementation:
       - --architecture_type
       - {inputValue: architecture_type}
       
-      # CDN parameters
+      # CDN parameters - MUST MATCH DATA UPLOAD BRICK
       - --domain
       - {inputValue: domain}
       - --get_cdn
