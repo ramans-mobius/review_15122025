@@ -1,4 +1,4 @@
-name: Upload Trained Model to CDN 7 - EXACT MATCHING STRUCTURE
+name: Upload Trained Model to CDN v8 - EXACT MATCHING STRUCTURE
 description: Uploads trained model .pth file to CDN with EXACT same structure as Data Upload brick
 inputs:
   - name: trained_model
@@ -189,7 +189,7 @@ implementation:
                     full_url = f"{args.get_cdn}{relative_cdn_url}"
                 
                 print(f"    ✓ Uploaded: {cdn_filename}")
-                print(f"    Full URL: {full_url[:100]}...")
+                print(f"    Full URL: {full_url}...")
                 
                 # Verify the URL structure matches Data Upload
                 if '_ENC(' in full_url:
@@ -245,7 +245,7 @@ implementation:
                 # Example: /_ENC(encoded)/dcgan/UUID_$$_V1_data
                 constructed_url = f"{args.get_cdn}/_ENC({tenant_id_encoded})/dcgan/{file_path}"
                 
-                print(f"    Constructed URL: {constructed_url[:100]}...")
+                print(f"    Constructed URL: {constructed_url}...")
                 return constructed_url
                 
             except Exception as e:
@@ -269,7 +269,7 @@ implementation:
             
             if constructed_url:
                 # Try to verify if constructed URL would work
-                print(f"  Constructed alternative URL: {constructed_url[:100]}...")
+                print(f"  Constructed alternative URL: {constructed_url}...")
                 
                 result = {
                     'url': constructed_url,
@@ -295,7 +295,7 @@ implementation:
             result['uses_enc_format'] = True
         else:
             print(f"  ⚠ URL does NOT use _ENC format (differs from Data Upload brick)")
-            print(f"  Actual URL: {result['url'][:100]}...")
+            print(f"  Actual URL: {result['url']}...")
             print(f"  Expected pattern: https://cdn-new.gov-cloud.ai/_ENC(...)/dcgan/...")
             
             # Try to analyze what we got
@@ -335,7 +335,7 @@ implementation:
                     'constructed_url': result.get('constructed', False)
                 },
                 'expected_pattern': 'https://cdn-new.gov-cloud.ai/_ENC(...)/dcgan/UUID_$$_V1_data',
-                'actual_url_preview': result['url'][:100] + '...'
+                'actual_url_preview': result['url'] + '...'
             }
             
             with open(args.upload_status, 'w') as f:
@@ -362,7 +362,7 @@ implementation:
         print(f"\\nUpload Details:")
         print(f"  Model: {args.model_name} ({args.model_id})")
         print(f"  File Size: {result['size_kb']:.1f} KB")
-        print(f"  CDN URL: {result['url'][:80]}...")
+        print(f"  CDN URL: {result['url']}...")
         
         if not result.get('uses_enc_format'):
             print(f"\\n⚠ WARNING: URL format differs from Data Upload brick!")
