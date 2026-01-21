@@ -1,4 +1,4 @@
-name: Upload Trained Model to CDN v2
+name: Upload Trained Model to CDN v3
 description: Uploads trained model .pth file to CDN and returns URL
 inputs:
   - name: trained_model
@@ -154,7 +154,7 @@ implementation:
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
                 print(f"    ✓ Uploaded: {cdn_filename}")
-                print(f"    URL: {full_url[:80]}...")
+                print(f"    URL: {full_url}...")
                 
                 return full_url
                 
@@ -229,7 +229,7 @@ implementation:
         print(f"  Execution ID: {args.execution_id}")
         print(f"  File Size: {file_size_mb:.2f} MB")
         print(f"  Upload Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"  CDN URL: {model_url[:100]}...")
+        print(f"  CDN URL: {model_url}...")
         print("=" * 80)
 
     args:
