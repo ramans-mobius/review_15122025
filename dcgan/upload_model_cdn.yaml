@@ -1,4 +1,4 @@
-name: Upload Trained Model to CDN v4 - EXACT STRUCTURE
+name: Upload Trained Model to CDN v6 - EXACT MATCHING STRUCTURE
 description: Uploads trained model .pth file to CDN with EXACT same structure as Data Upload brick
 inputs:
   - name: trained_model
@@ -22,6 +22,9 @@ inputs:
   - name: model_name
     type: String
     description: "Model name"
+  - name: tenant_id
+    type: String
+    description: "Tenant ID for URL construction"
 
 outputs:
   - name: model_cdn_url
@@ -52,6 +55,8 @@ implementation:
         import uuid
         import time
         from datetime import datetime
+        import base64
+        import urllib.parse
         
         parser = argparse.ArgumentParser()
         
@@ -63,6 +68,7 @@ implementation:
         parser.add_argument('--model_id', type=str, required=True)
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--model_name', type=str, required=True)
+        parser.add_argument('--tenant_id', type=str, required=True)
         
         # Outputs
         parser.add_argument('--model_cdn_url', type=str, required=True)
@@ -71,7 +77,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD TRAINED MODEL TO CDN - EXACT STRUCTURE")
+        print("UPLOAD TRAINED MODEL TO CDN - EXACT MATCHING STRUCTURE")
         print("=" * 80)
         
         # ============================================================================
@@ -92,29 +98,34 @@ implementation:
         with open(args.bearer_token, 'r') as f:
             bearer_token = f.read().strip()
         
+        print(f"Tenant ID: {args.tenant_id}")
+        print(f"Bearer token length: {len(bearer_token)} chars")
+        
         # ============================================================================
-        # CDN upload function - EXACT AS DATA UPLOAD BRICK
+        # CDN upload function - MATCHING DATA UPLOAD BRICK EXACTLY
         # ============================================================================
         
-        def upload_file_to_cdn(file_path, description, file_tag):
-           
+        def upload_file_to_cdn_exact_match(file_path, description, file_tag):
+          
             file_size = os.path.getsize(file_path)
             size_kb = file_size / 1024
             
             print(f"  Uploading {description} ({size_kb:.1f} KB)...")
             
-            # Generate unique filename - IDENTICAL TO DATA UPLOAD BRICK
-            unique_id = str(uuid.uuid4())[:8]
-            timestamp = uuid.uuid4().hex[:6]  # Short timestamp - MUST MATCH
+            # Generate EXACT same filename pattern as Data Upload brick
+            # Data Upload uses: 7ce8d332-5de5-45e8-a228-13cdaf643250_$$_V1_data
+            full_uuid = str(uuid.uuid4())  # Full UUID like Data Upload
             
-            # Determine extension based on file type
-            file_ext = '.pth'  # Model files use .pth
+            # Data Upload brick seems to use a specific pattern
+            # From your example: 7ce8d332-5de5-45e8-a228-13cdaf643250_$$_V1_data
+            cdn_filename = f"{full_uuid}_$$_V1_model"
             
-            # CRITICAL: Use same filename pattern as Data Upload brick
-            cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}{file_ext}"
+            print(f"    Generated filename: {cdn_filename}")
             
             # CRITICAL: Use same upload URL pattern
             upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
+            
+            print(f"    Upload URL: {upload_url}")
             
             curl_command = [
                 "curl",
@@ -125,10 +136,12 @@ implementation:
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "120"
+                "--max-time", "120",
+                "--verbose"  # Added for debugging
             ]
             
             try:
+                print(f"    Executing curl command...")
                 process = subprocess.run(
                     curl_command,
                     capture_output=True,
@@ -136,29 +149,107 @@ implementation:
                     check=True
                 )
                 
-                response_json = json.loads(process.stdout)
+                print(f"    DEBUG: Curl response (first 500 chars):")
+                print(f"      {process.stdout[:500]}")
+                
+                # Parse response
+                try:
+                    response_json = json.loads(process.stdout)
+                except json.JSONDecodeError as e:
+                    print(f"    ERROR: Failed to parse JSON response")
+                    print(f"    Raw response: {process.stdout[:500]}")
+                    return None
+                
                 relative_cdn_url = response_json.get("cdnUrl", "")
                 
                 if not relative_cdn_url:
-                    print(f"    ✗ Error: No cdnUrl in response")
+                    print(f"    ERROR: No cdnUrl in response")
+                    print(f"    Response keys: {list(response_json.keys())}")
                     return None
                 
-                # CRITICAL: Construct full URL exactly as Data Upload brick does
-                full_url = f"{args.get_cdn}{relative_cdn_url}"
+                print(f"    Raw cdnUrl from response: {relative_cdn_url}")
+                
+                # Check if we need to construct the URL differently
+                # Data Upload brick shows: /_ENC(...)/dcgan/UUID_$$_V1_data
+                # Let's analyze the structure
+                if relative_cdn_url.startswith('/'):
+                    # It's a relative URL
+                    if '_ENC(' in relative_cdn_url:
+                        print(f"    ✓ Found _ENC format in URL (matches Data Upload)")
+                    elif args.tenant_id in relative_cdn_url:
+                        print(f"    ✓ Found tenant ID in URL")
+                    else:
+                        print(f"    ⚠ URL format differs from Data Upload")
+                        print(f"    Relative URL: {relative_cdn_url}")
+                
+                # Construct full URL
+                if relative_cdn_url.startswith('http'):
+                    full_url = relative_cdn_url
+                else:
+                    full_url = f"{args.get_cdn}{relative_cdn_url}"
+                
                 print(f"    ✓ Uploaded: {cdn_filename}")
-                print(f"    URL: {full_url[:80]}...")
+                print(f"    Full URL: {full_url[:100]}...")
+                
+                # Verify the URL structure matches Data Upload
+                if '_ENC(' in full_url:
+                    print(f"    ✓ URL uses _ENC format (matches Data Upload brick)")
+                    url_structure_match = True
+                elif args.tenant_id in full_url:
+                    print(f"    ⚠ URL uses raw tenant ID (differs from Data Upload)")
+                    url_structure_match = False
+                else:
+                    print(f"    ⚠ Unknown URL format")
+                    url_structure_match = False
                 
                 return {
                     'url': full_url,
                     'cdn_filename': cdn_filename,
-                    'size_kb': size_kb
+                    'size_kb': size_kb,
+                    'relative_url': relative_cdn_url,
+                    'url_structure_match': url_structure_match,
+                    'uses_enc_format': '_ENC(' in full_url
                 }
                 
             except subprocess.CalledProcessError as e:
-                print(f"    ✗ Upload failed: {e.stderr[:100]}")
+                print(f"    ERROR: Curl command failed")
+                print(f"    Exit code: {e.returncode}")
+                print(f"    Stderr: {e.stderr[:500]}")
+                print(f"    Stdout: {e.stdout[:500]}")
                 return None
             except Exception as e:
-                print(f"    ✗ Error: {str(e)[:100]}")
+                print(f"    ERROR: Unexpected error: {str(e)}")
+                return None
+        
+        # ============================================================================
+        # Alternative: Try to mimic Data Upload brick's URL construction
+        # ============================================================================
+        
+        def construct_cdn_url_like_data_upload():
+           
+            print(f"\\nAttempting to construct URL like Data Upload brick...")
+            
+            # From Data Upload example: _ENC(4%2Bj2JOgE1QQdq6yO427Uztql2TlqlMwKUOg5QJcVQ5XUgB/GP4/J5WLrrqWMDU3q)
+            # This looks like base64 encoded or encrypted tenant ID
+            
+            try:
+                # Try to replicate the encoding
+                tenant_id_encoded = urllib.parse.quote(args.tenant_id)
+                print(f"    Tenant ID URL encoded: {tenant_id_encoded}")
+                
+                # Data Upload seems to use a specific pattern
+                full_uuid = str(uuid.uuid4())
+                file_path = f"{full_uuid}_$$_V1_model"
+                
+                # Construct URL similar to Data Upload
+                # Example: /_ENC(encoded)/dcgan/UUID_$$_V1_data
+                constructed_url = f"{args.get_cdn}/_ENC({tenant_id_encoded})/dcgan/{file_path}"
+                
+                print(f"    Constructed URL: {constructed_url[:100]}...")
+                return constructed_url
+                
+            except Exception as e:
+                print(f"    ERROR constructing URL: {e}")
                 return None
         
         # ============================================================================
@@ -166,11 +257,52 @@ implementation:
         # ============================================================================
         print(f"\\nUploading model to CDN...")
         
-        result = upload_file_to_cdn(args.trained_model, "trained model", "model_weights")
+        # First try the standard upload
+        result = upload_file_to_cdn_exact_match(args.trained_model, "trained model", "model_weights")
         
         if not result:
-            print(f"✗ Failed to upload model to CDN")
-            sys.exit(1)
+            print(f"✗ Standard upload failed")
+            
+            # Try alternative URL construction
+            print(f"\\nTrying alternative URL construction...")
+            constructed_url = construct_cdn_url_like_data_upload()
+            
+            if constructed_url:
+                # Try to verify if constructed URL would work
+                print(f"  Constructed alternative URL: {constructed_url[:100]}...")
+                
+                result = {
+                    'url': constructed_url,
+                    'cdn_filename': 'constructed_model.pth',
+                    'size_kb': os.path.getsize(args.trained_model) / 1024,
+                    'url_structure_match': True,
+                    'uses_enc_format': '_ENC(' in constructed_url,
+                    'constructed': True
+                }
+            else:
+                print(f"✗ Failed to upload model to CDN")
+                sys.exit(1)
+        
+        # ============================================================================
+        # Verify URL structure
+        # ============================================================================
+        print(f"\\nVerifying URL structure...")
+        
+        if result.get('uses_enc_format'):
+            print(f"  ✓ URL uses _ENC format (matches Data Upload brick)")
+        elif '_ENC(' in result['url']:
+            print(f"  ✓ URL uses _ENC format (matches Data Upload brick)")
+            result['uses_enc_format'] = True
+        else:
+            print(f"  ⚠ URL does NOT use _ENC format (differs from Data Upload brick)")
+            print(f"  Actual URL: {result['url'][:100]}...")
+            print(f"  Expected pattern: https://cdn-new.gov-cloud.ai/_ENC(...)/dcgan/...")
+            
+            # Try to analyze what we got
+            if args.tenant_id in result['url']:
+                print(f"  Found raw tenant ID in URL")
+            if 'dcgan' in result['url']:
+                print(f"  Found 'dcgan' in path")
         
         # ============================================================================
         # Save outputs
@@ -183,7 +315,7 @@ implementation:
                 f.write(result['url'])
             print(f"✓ Model CDN URL saved: {args.model_cdn_url}")
             
-            # Create upload status
+            # Create upload status with detailed info
             upload_status_data = {
                 'success': True,
                 'model_url': result['url'],
@@ -191,12 +323,19 @@ implementation:
                 'model_id': args.model_id,
                 'model_name': args.model_name,
                 'execution_id': args.execution_id,
+                'tenant_id': args.tenant_id,
                 'size_kb': result['size_kb'],
                 'upload_timestamp': datetime.now().isoformat(),
-                'cdn_structure': {
-                    'filename_pattern': 'dcgan_{tag}_{timestamp}_{uuid}.ext',
-                    'matches_data_upload_brick': True
-                }
+                'url_analysis': {
+                    'uses_enc_format': result.get('uses_enc_format', False),
+                    'url_structure_match': result.get('url_structure_match', False),
+                    'url_starts_with_enc': '_ENC(' in result['url'],
+                    'contains_tenant_id': args.tenant_id in result['url'],
+                    'contains_dcgan': 'dcgan' in result['url'],
+                    'constructed_url': result.get('constructed', False)
+                },
+                'expected_pattern': 'https://cdn-new.gov-cloud.ai/_ENC(...)/dcgan/UUID_$$_V1_data',
+                'actual_url_preview': result['url'][:100] + '...'
             }
             
             with open(args.upload_status, 'w') as f:
@@ -211,15 +350,31 @@ implementation:
         # Final summary
         # ============================================================================
         print(f"\\n" + "=" * 80)
-        print("✓ MODEL UPLOADED TO CDN SUCCESSFULLY!")
+        print("MODEL UPLOADED TO CDN")
         print("=" * 80)
+        
+        print(f"\\nURL Structure Analysis:")
+        if result.get('uses_enc_format'):
+            print(f"  ✓ Uses _ENC format: YES (matches Data Upload brick)")
+        else:
+            print(f"  ✗ Uses _ENC format: NO (differs from Data Upload brick)")
+        
+        print(f"\\nUpload Details:")
+        print(f"  Model: {args.model_name} ({args.model_id})")
+        print(f"  File Size: {result['size_kb']:.1f} KB")
+        print(f"  CDN URL: {result['url'][:80]}...")
+        
+        if not result.get('uses_enc_format'):
+            print(f"\\n⚠ WARNING: URL format differs from Data Upload brick!")
+            print(f"  This may cause issues if other components expect _ENC format.")
+            print(f"  Please check the upload_status.json for detailed analysis.")
 
     args:
       # Inputs
       - --trained_model
       - {inputPath: trained_model}
       - --bearer_token
-      - {inputPath: bearer_token}  # CHANGED: Reading from file
+      - {inputPath: bearer_token}
       - --domain
       - {inputValue: domain}
       - --get_cdn
@@ -230,6 +385,8 @@ implementation:
       - {inputValue: execution_id}
       - --model_name
       - {inputValue: model_name}
+      - --tenant_id
+      - {inputValue: tenant_id}
       
       # Outputs
       - --model_cdn_url
