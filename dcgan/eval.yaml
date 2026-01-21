@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v13 
+name: Evaluate DCGAN v14
 description: Evaluates DCGAN with comprehensive metrics (no visualization to avoid issues)
 inputs:
   - name: trained_model
@@ -40,6 +40,7 @@ implementation:
       - -c
       - |
         apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        pip install --no-cache-dir scikit-image==0.21.0 scipy==1.11.0 > /dev/null
         exec "$0" "$@"
       - python3
       - -u
