@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v4
+name: DCGAN RLAF Loop v5
 description: Triggers the DCGAN RLAF pipeline in a loop with automatic domain detection for schema API
 inputs:
   - {name: trained_model, type: Model}
@@ -904,7 +904,8 @@ implementation:
             possible_domains = [
                 args.domain,  # First try the provided domain
                 "https://ig.gov-cloud.ai",  # Pipeline works here
-                "https://ig.mobiusdtaas.ai",  # CNN works here
+                "https://ig.mobiusdtaas.ai",  # CNN works here,
+                "https://igs.gov-cloud.ai",
                 args.pipeline_domain.replace('/bob-service-test', ''),  # Derive from pipeline domain
             ]
             
