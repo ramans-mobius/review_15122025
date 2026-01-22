@@ -1,14 +1,21 @@
-name: DCGAN Hyperparamtertuning v3
-description: Launches a Katib experiment for Boost using a predefined objective function.
+name: DCGAN Hyperparameter Tuner
+description: Launches a Katib experiment for CNN using a predefined objective function.
 
 inputs:
   - name: model_name
     type: String
+    default: dcgan
     description: Name of the GNN model to train (e.g., simple_cnn, resnet etc.)
 
   - name: projectid
     type: String
+    default: ui_analysis
     description: Name or ID of the use case (e.g., ui_analysis)
+    
+  - name: model_type
+    type: String
+    default: gnn
+    description: Type of model(e.g., gnn, cnn, etc)
 
   - name: config_json
     type: String
@@ -65,7 +72,7 @@ outputs:
     description: Best parameter set found by Katib
 
   - name: payload
-    type: String
+    type: string
     description: Parameters tuning
   
 implementation:
@@ -128,6 +135,7 @@ implementation:
         parser.add_argument("--model_name", type=str, required=True)
         parser.add_argument("--projectid", type=str, required=True)
         parser.add_argument("--payload", type=str, required=True)
+        parser.add_argument("--model_type", type=str, required=True)
         parser.add_argument("--config_json", type=str, required=True)
         
         args = parser.parse_args()
@@ -135,6 +143,7 @@ implementation:
         print("=== DEBUG: PARSED ARGUMENTS ===")
         print(f"DEBUG: model_name: {args.model_name}")
         print(f"DEBUG: projectid: {args.projectid}")
+        print(f"DEBUG: model_type: {args.model_type}")
         print(f"DEBUG: objective_metric_name: {args.objective_metric_name}")
         print(f"DEBUG: objective_type: {args.objective_type}")
         print(f"DEBUG: objective_goal: {args.objective_goal}")
@@ -220,20 +229,14 @@ implementation:
         print(f"DEBUG: Algorithm: {args.algorithm_name}")
 
         print("=== DEBUG: CREATING EARLY STOPPING SPEC ===")
-        # Handle early stopping - if "none", don't create the spec
-        early_stopping_spec = None
-        if args.early_stopping_algorithm.lower() != "none":
-            early_stopping_spec = V1beta1EarlyStoppingSpec(algorithm_name=args.early_stopping_algorithm)
-            print(f"DEBUG: Early stopping: {args.early_stopping_algorithm}")
-        else:
-            print("DEBUG: Early stopping disabled (none)")
-        
+        early_stopping_spec = V1beta1EarlyStoppingSpec(algorithm_name=args.early_stopping_algorithm)
+        print(f"DEBUG: Early stopping: {args.early_stopping_algorithm}")
+
         print("=== DEBUG: CREATING TRIAL TEMPLATE ===")
         # Build trial parameters
         trial_parameters = []
         trial_args = []
         
-        # Add all hyperparameters to trial args
         for p in params_input:
             param_name = p["name"]
             trial_parameters.append({
@@ -254,7 +257,6 @@ implementation:
         print(f"DEBUG: Final trial args: {trial_args}")
         print(f"DEBUG: Trial parameters: {trial_parameters}")
         
-        # SIMPLE TRIAL TEMPLATE - no wrapper script needed!
         trial_template = V1beta1TrialTemplate(
             retain=True,
             primary_container_name="training-container",
@@ -274,8 +276,8 @@ implementation:
                             "containers": [
                                 {
                                     "name": "training-container",
-                                    "image": "deepak0147/nessy-facotry:1.0.0",
-                                    "command": ["python", "train_dcgan_hpt.py"],  # Direct call!
+                                    "image": "sanram00/cnn-image:v3",
+                                    "command": ["python", "train_cnn_ui.py"],
                                     "args": trial_args,
                                     "resources": {
                                         "limits": {"cpu": "2", "memory": "4Gi"}
@@ -298,7 +300,7 @@ implementation:
             max_trial_count=args.max_trial_count,
             parallel_trial_count=args.parallel_trial_count,
             max_failed_trial_count=args.max_failed_trial_count,
-            early_stopping=early_stopping_spec  # This can be None now
+            early_stopping=early_stopping_spec
         )
 
         print("=== DEBUG: CREATING KATIB CLIENT ===")
@@ -365,17 +367,12 @@ implementation:
         for idx, trial in enumerate(trials, start=1):
             print(f"DEBUG: Processing trial {idx}")
             paramss = {}
-            # FIX 1: Ensure projectId has no spaces and is properly formatted
-            paramss['projectId'] = args.projectid.strip()
-            # FIX 2: Add unique identifier to model_name to prevent collisions
-            unique_suffix = str(uuid.uuid4())[:8]
-            paramss['model_name'] = f"{args.model_name}_trial{idx}_{unique_suffix}"
-            paramss['model_type'] = "GAN"
-            # FIX 3: Use proper millisecond timestamp instead of formatted string
-            timestamp = int(time.time() * 1000)  # Current time in milliseconds
+            paramss['project_id'] = f"{args.projectid}"
+            paramss['model_name'] = f"{args.model_name}_trial{idx}"
+            paramss['model_type'] = args.model_type
+            # Add timestamp (epoch milliseconds)
+            timestamp = time.strftime("%Y%m%d%H%M%S")
             paramss["timestamp"] = timestamp
-            
-            print(f"DEBUG: Trial {idx}: model_name={paramss['model_name']}, timestamp={timestamp}")
             
             # Add hyperparameters
             if hasattr(trial, 'spec') and hasattr(trial.spec, 'parameter_assignments'):
@@ -408,7 +405,6 @@ implementation:
         }
 
         print(f"DEBUG: Final payload has {len(payload_data)} trials")
-        print(f"DEBUG: Sample trial data: {json.dumps(payload_data[0] if payload_data else {}, indent=2)}")
 
         # Save for next brick
         os.makedirs(os.path.dirname(args.payload), exist_ok=True)
@@ -442,6 +438,8 @@ implementation:
     args:
       - --model_name
       - {inputValue: model_name}
+      - --model_type
+      - {inputValue: model_type}
       - --config_json
       - {inputValue: config_json}
       - --process_data_url
