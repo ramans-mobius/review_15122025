@@ -75,7 +75,7 @@ outputs:
   
 implementation:
   container:
-    image: sanram00/dcgan-image:v2
+    image: sanram00/dcgan-image:v3
     command:
       - python3
       - -u
@@ -274,7 +274,7 @@ implementation:
                             "containers": [
                                 {
                                     "name": "training-container",
-                                    "image": "sanram00/dcgan-image:v2",
+                                    "image": "sanram00/dcgan-image:v3",
                                     "command": ["python", "train_dcgan_hpt.py"],
                                     "args": trial_args,
                                     "resources": {
