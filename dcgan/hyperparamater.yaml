@@ -1,4 +1,4 @@
-name: DCGAN Hyperparameter Tuner v3
+name: DCGAN Hyperparameter Tuner v4
 description: Launches a Katib experiment for DCGAN using a predefined objective function.
 
 inputs:
@@ -365,7 +365,7 @@ implementation:
         for idx, trial in enumerate(trials, start=1):
             print(f"DEBUG: Processing trial {idx}")
             paramss = {}
-            paramss['project_id'] = f"{args.projectid}"
+            paramss['projectId'] = f"{args.projectid}"
             paramss['model_name'] = f"{args.model_name}_trial{idx}"
             paramss['model_type'] = args.model_type
             # Add timestamp (epoch milliseconds)
