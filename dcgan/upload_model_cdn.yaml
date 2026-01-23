@@ -1,9 +1,12 @@
-name: Upload CDN Model As PT File v2
-description: Uploads model as .pt file and shows full response
+name: Upload CDN Model As PT File v3
+description: Uploads model as .pt file and metadata as JSON file
 inputs:
   - name: trained_model
     type: Model
     description: "Trained DCGAN model"
+  - name: model_metadata
+    type: String
+    description: "Model metadata JSON"
   - name: bearer_token
     type: String
     description: "Bearer token"
@@ -20,6 +23,9 @@ outputs:
   - name: cdn_url
     type: String
     description: "CDN URL for .pt file"
+  - name: metadata_url
+    type: String
+    description: "CDN URL for model metadata JSON"
   - name: upload_response
     type: String
     description: "Full upload response JSON"
@@ -44,10 +50,12 @@ implementation:
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--trained_model', type=str, required=True)
+        parser.add_argument('--model_metadata', type=str, required=True)
         parser.add_argument('--bearer_token', type=str, required=True)
         parser.add_argument('--domain', type=str, default="https://ig.mobiusdtaas.ai")
         parser.add_argument('--cdn_base', type=str, default="https://cdn-new.gov-cloud.ai")
         parser.add_argument('--cdn_url', type=str, required=True)
+        parser.add_argument('--metadata_url', type=str, required=True)
         parser.add_argument('--upload_response', type=str, required=True)
         parser.add_argument('--raw_response', type=str, required=True)
         
@@ -55,6 +63,7 @@ implementation:
         
         # Create output directories
         os.makedirs(os.path.dirname(args.cdn_url), exist_ok=True)
+        os.makedirs(os.path.dirname(args.metadata_url), exist_ok=True)
         os.makedirs(os.path.dirname(args.upload_response), exist_ok=True)
         os.makedirs(os.path.dirname(args.raw_response), exist_ok=True)
         
@@ -73,27 +82,34 @@ implementation:
         print(f"✓ Model file: {args.trained_model}")
         print(f"✓ File size: {model_size:,} bytes ({model_size/1024/1024:.2f} MB)")
         
-        # STEP 2: Prepare upload - Use data endpoint for .pt file
+        # STEP 1b: Load and validate metadata
+        try:
+            with open(args.model_metadata, 'r') as f:
+                metadata = json.load(f)
+            print(f"✓ Model metadata loaded: {len(json.dumps(metadata)):,} bytes")
+        except Exception as e:
+            print(f"✗ ERROR loading metadata: {e}")
+            sys.exit(1)
+        
+        # STEP 2: Prepare upload
         print("\\n" + "=" * 80)
         print("2. PREPARING UPLOAD")
         print("=" * 80)
         
-        # Try different endpoints to get proper .pt file URL
         upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2Fmodels%2F"
-        print(f"Upload URL: {upload_url}")
-        print(f"Domain: {args.domain}")
-        print(f"CDN Base: {args.cdn_base}")
         
         timestamp = int(time.time())
         unique_id = str(uuid.uuid4())[:8]
         filename = f"dcgan_model_{timestamp}_{unique_id}.pt"
+        metadata_filename = f"dcgan_metadata_{timestamp}_{unique_id}.json"
         
-        print(f"Generated filename: {filename}")
-        print(f"File extension: .pt (PyTorch model file)")
+        print(f"Generated filenames:")
+        print(f"  Model: {filename}")
+        print(f"  Metadata: {metadata_filename}")
         
-        # STEP 3: Execute upload
+        # STEP 3: Upload model file
         print("\\n" + "=" * 80)
-        print("3. EXECUTING UPLOAD")
+        print("3. UPLOADING MODEL FILE")
         print("=" * 80)
         
         curl_command = [
@@ -105,18 +121,15 @@ implementation:
             "--fail",
             "--show-error",
             "--connect-timeout", "60",
-            "--max-time", "300",
-            "--verbose"
+            "--max-time", "300"
         ]
         
-        # Print the curl command (with token redacted)
         debug_cmd = ' '.join(curl_command).replace(bearer_token, '***REDACTED***')
         print("CURL COMMAND:")
         print("-" * 40)
         print(debug_cmd)
         print("-" * 40)
         
-        # Execute with capture
         print("\\nEXECUTING CURL...")
         try:
             process = subprocess.run(
@@ -126,297 +139,184 @@ implementation:
                 check=False
             )
             
-            # Save raw response immediately
             raw_output = process.stdout + process.stderr
             with open(args.raw_response, 'w') as f:
                 f.write(raw_output)
-            
-            print("\\n" + "=" * 80)
-            print("4. FULL CURL OUTPUT")
-            print("=" * 80)
-            
-            # Print stderr (verbose info)
-            if process.stderr:
-                print("STDERR (VERBOSE OUTPUT):")
-                print("-" * 40)
-                # Print only important parts of verbose output
-                for line in process.stderr.split('\\n'):
-                    if any(x in line for x in ['HTTP/', '< HTTP/', '> POST', 'cdnUrl', 'Content-Type', 'Content-Length']):
-                        print(line)
-                print("-" * 40)
-            
-            # Print stdout (response body)
-            print("\\nSTDOUT (RESPONSE BODY):")
-            print("-" * 40)
-            print(process.stdout)
-            print("-" * 40)
             
             print(f"\\nExit code: {process.returncode}")
             
             if process.returncode != 0:
                 print("✗ Upload failed!")
+                print(f"Stderr: {process.stderr[:500]}")
                 sys.exit(1)
             
-            # STEP 4: Parse and analyze response
-            print("\\n" + "=" * 80)
-            print("5. PARSING RESPONSE")
-            print("=" * 80)
+            print("✓ Model file upload successful")
             
-            response_data = None
-            cdn_url_result = None
-            
+            # Parse response
+            model_cdn_url = None
             try:
                 response_data = json.loads(process.stdout)
-                print("✓ Response is valid JSON")
-                
-                # Pretty print the JSON
-                print("\\nRESPONSE JSON (PRETTY PRINTED):")
-                print("-" * 40)
-                print(json.dumps(response_data, indent=2))
-                print("-" * 40)
-                
-                # Analyze the response structure
-                print("\\nRESPONSE ANALYSIS:")
-                print("-" * 40)
-                print(f"Response type: {type(response_data)}")
-                print(f"Response keys: {list(response_data.keys())}")
                 
                 # Extract CDN URL
                 cdn_path = None
-                
-                # First check for cdnUrl at top level
                 if 'cdnUrl' in response_data:
                     cdn_path = response_data['cdnUrl']
-                    print(f"✓ Found 'cdnUrl' at top level: {cdn_path}")
-                # Check in info object if exists
                 elif 'info' in response_data and 'cdnUrl' in response_data['info']:
                     cdn_path = response_data['info']['cdnUrl']
-                    print(f"✓ Found 'cdnUrl' in info object: {cdn_path}")
-                # Check for url field
                 elif 'url' in response_data:
                     cdn_path = response_data['url']
-                    print(f"✓ Found 'url': {cdn_path}")
                 
                 if cdn_path:
-                    # Fix common issues with CDN URLs
-                    # 1. Remove trailing dots if present
-                    if cdn_path.endswith('.'):
-                        original_path = cdn_path
-                        cdn_path = cdn_path.rstrip('.')
-                        print(f"✓ Removed trailing dot from CDN path")
-                        print(f"  Original: {original_path}")
-                        print(f"  Fixed: {cdn_path}")
-                    
-                    # 2. Ensure it has .pt extension if missing
-                    if not cdn_path.endswith('.pt'):
-                        print(f"⚠ CDN path doesn't end with .pt: {cdn_path}")
-                        # Check if we should add .pt extension
-                        if 'name' in response_data.get('info', {}):
-                            original_name = response_data['info']['name']
-                            if original_name.endswith('.pt'):
-                                print(f"  Original filename has .pt: {original_name}")
-                    
-                    # Construct full URL
                     if cdn_path.startswith("http"):
-                        full_url = cdn_path
-                        print(f"✓ URL is already complete: {full_url}")
+                        model_cdn_url = cdn_path
                     else:
-                        full_url = f"{args.cdn_base}{cdn_path}"
-                        print(f"✓ Constructed full URL: {full_url}")
+                        model_cdn_url = f"{args.cdn_base}{cdn_path}"
                     
-                    cdn_url_result = full_url
+                    print(f"✓ Model CDN URL: {model_cdn_url}")
                     
                     # Save the URL
                     with open(args.cdn_url, 'w') as f:
-                        f.write(full_url)
-                    print(f"\\n✓ CDN URL saved to: {args.cdn_url}")
-                    
-                    # Verify the filename in response
-                    if 'info' in response_data and 'name' in response_data['info']:
-                        uploaded_filename = response_data['info']['name']
-                        print(f"✓ Uploaded filename in response: {uploaded_filename}")
-                        if uploaded_filename.endswith('.pt'):
-                            print(f" File has .pt extension in CDN")
-                        else:
-                            print(f"⚠ File does NOT have .pt extension in CDN: {uploaded_filename}")
-                    
+                        f.write(model_cdn_url)
                 else:
-                    print("\\n✗ No CDN URL found in response!")
-                    print("Trying alternative parsing...")
+                    print("✗ No CDN URL found in response")
                     
-                    # Try to find any URL-like string in the response
-                    import re
-                    url_patterns = [
-                        r'/_[\w\-/]+/[\w\-]+_\$\$_V1_[\w\.\-]+',
-                        r'cdn-new\.gov-cloud\.ai[/\w\-\._]+',
-                        r"https?://[^\s\"']+"  # FIXED LINE: Changed from r'https?://[^\s"']+' to r"https?://[^\s\"']+"
-                    ]
-                    
-                    for pattern in url_patterns:
-                        matches = re.findall(pattern, process.stdout)
-                        if matches:
-                            print(f"Found potential URL with pattern {pattern}:")
-                            for match in matches[:3]:  # Show first 3 matches
-                                print(f"  - {match}")
-                            if matches:
-                                cdn_path = matches[0]
-                                if not cdn_path.startswith("http"):
-                                    cdn_path = f"{args.cdn_base}{cdn_path}"
-                                cdn_url_result = cdn_path
-                                with open(args.cdn_url, 'w') as f:
-                                    f.write(cdn_path)
-                                print(f"✓ Using found URL: {cdn_path}")
-                                break
-                
             except json.JSONDecodeError as e:
-                print(f"✗ Response is NOT valid JSON")
-                print(f"Error: {e}")
-                print(f"\\nRaw response text:")
-                print("-" * 40)
-                print(process.stdout[:500] + "..." if len(process.stdout) > 500 else process.stdout)
-                print("-" * 40)
+                print(f"✗ Response is NOT valid JSON: {e}")
                 
-                # Save empty response
-                response_data = {"error": "Invalid JSON", "raw_response": process.stdout[:500]}
-                
-                # Save empty URL
-                with open(args.cdn_url, 'w') as f:
-                    f.write("")
-            
-            # STEP 5: Save processed response
-            print("\\n" + "=" * 80)
-            print("6. SAVING RESULTS")
-            print("=" * 80)
-            
-            processed_response = {
-                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                'upload_success': process.returncode == 0,
-                'curl_exit_code': process.returncode,
-                'model_file': args.trained_model,
-                'model_size': model_size,
-                'upload_url': upload_url,
-                'filename_used': filename,
-                'cdn_url': cdn_url_result,
-                'parsed_response': response_data,
-                'domain': args.domain,
-                'cdn_base': args.cdn_base,
-                'is_pt_file': filename.endswith('.pt')
-            }
-            
-            with open(args.upload_response, 'w') as f:
-                json.dump(processed_response, f, indent=2)
-            
-            print(f"✓ Processed response saved to: {args.upload_response}")
-            print(f"✓ Raw response saved to: {args.raw_response}")
-            
-            if cdn_url_result:
-                print(f"✓ CDN URL: {cdn_url_result}")
-                
-                # Check if URL ends with .pt
-                if cdn_url_result.endswith('.pt'):
-                    print(f" CDN URL has .pt extension")
-                else:
-                    print(f"⚠ CDN URL does NOT have .pt extension")
-            else:
-                print("✗ No CDN URL extracted from response")
-            
-            # STEP 6: Test download if we got a URL
-            if cdn_url_result:
-                print("\\n" + "=" * 80)
-                print("7. TESTING DOWNLOAD")
-                print("=" * 80)
-                
-                test_file = "/tmp/downloaded_model.pt"
-                
-                # First HEAD request
-                print("Testing with HEAD request...")
-                head_command = [
-                    "curl",
-                    "--head",
-                    "--location", cdn_url_result,
-                    "--header", f"Authorization: Bearer {bearer_token}",
-                    "--connect-timeout", "30",
-                    "--max-time", "60",
-                    "--silent"
-                ]
-                
-                try:
-                    head_process = subprocess.run(
-                        head_command,
-                        capture_output=True,
-                        text=True,
-                        check=False
-                    )
-                    
-                    print("HEAD Response:")
-                    print("-" * 40)
-                    for line in head_process.stdout.split('\\n'):
-                        if line.strip():
-                            print(line)
-                    print("-" * 40)
-                    
-                    # Check if it's a 200 OK
-                    if "200" in head_process.stdout:
-                        print(" HEAD request successful (HTTP 200)")
-                        
-                        # Try to download the file
-                        print("\\nAttempting to download file...")
-                        download_command = [
-                            "curl",
-                            "--location", cdn_url_result,
-                            "--header", f"Authorization: Bearer {bearer_token}",
-                            "--output", test_file,
-                            "--connect-timeout", "30",
-                            "--max-time", "120",
-                            "--silent",
-                            "--show-error"
-                        ]
-                        
-                        download_process = subprocess.run(
-                            download_command,
-                            capture_output=True,
-                            text=True,
-                            check=False
-                        )
-                        
-                        if download_process.returncode == 0 and os.path.exists(test_file):
-                            downloaded_size = os.path.getsize(test_file)
-                            print(f"✓ Download successful: {downloaded_size:,} bytes")
-                            
-                            if downloaded_size == model_size:
-                                print(f" Downloaded file size matches original: {downloaded_size:,} bytes")
-                            else:
-                                print(f"⚠ Downloaded file size mismatch:")
-                                print(f"  Original: {model_size:,} bytes")
-                                print(f"  Downloaded: {downloaded_size:,} bytes")
-                        else:
-                            print(f"✗ Download failed: {download_process.stderr[:200]}")
-                            
-                    else:
-                        print(f"⚠ HEAD request returned non-200 status")
-                        
-                except Exception as e:
-                    print(f"✗ Test failed: {str(e)}")
-            
         except Exception as e:
-            print(f"✗ Fatal error during upload: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"✗ Error uploading model: {str(e)}")
             sys.exit(1)
         
+        # STEP 4: Upload metadata
         print("\\n" + "=" * 80)
-        if cdn_url_result:
-            if cdn_url_result.endswith('.pt'):
-                print(" UPLOAD COMPLETE - .PT FILE AVAILABLE")
+        print("4. UPLOADING METADATA")
+        print("=" * 80)
+        
+        # Create temporary metadata file
+        metadata_path = "/tmp/model_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        curl_command_metadata = [
+            "curl",
+            "--location", upload_url,
+            "--header", f"Authorization: Bearer {bearer_token}",
+            "--form", f"file=@{metadata_path}",
+            "--form", f"filename={metadata_filename}",
+            "--fail",
+            "--show-error",
+            "--connect-timeout", "60",
+            "--max-time", "300"
+        ]
+        
+        print("EXECUTING CURL FOR METADATA...")
+        metadata_cdn_url = None
+        
+        try:
+            process_meta = subprocess.run(
+                curl_command_metadata,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            print(f"Exit code: {process_meta.returncode}")
+            
+            if process_meta.returncode != 0:
+                print("✗ Metadata upload failed!")
+                print(f"Stderr: {process_meta.stderr[:500]}")
             else:
-                print("⚠ UPLOAD COMPLETE BUT NOT A .PT FILE")
+                print("✓ Metadata upload successful")
+                
+                # Parse metadata response
+                try:
+                    response_meta = json.loads(process_meta.stdout)
+                    
+                    # Extract CDN URL
+                    cdn_path_meta = None
+                    if 'cdnUrl' in response_meta:
+                        cdn_path_meta = response_meta['cdnUrl']
+                    elif 'info' in response_meta and 'cdnUrl' in response_meta['info']:
+                        cdn_path_meta = response_meta['info']['cdnUrl']
+                    elif 'url' in response_meta:
+                        cdn_path_meta = response_meta['url']
+                    
+                    if cdn_path_meta:
+                        if cdn_path_meta.startswith("http"):
+                            metadata_cdn_url = cdn_path_meta
+                        else:
+                            metadata_cdn_url = f"{args.cdn_base}{cdn_path_meta}"
+                        
+                        print(f"✓ Metadata CDN URL: {metadata_cdn_url}")
+                    else:
+                        print("✗ No CDN URL found in metadata response")
+                        
+                except json.JSONDecodeError as e:
+                    print(f"✗ Metadata response is NOT valid JSON: {e}")
+                    
+        except Exception as e:
+            print(f"✗ Error uploading metadata: {str(e)}")
+        
+        # Clean up temp file
+        if os.path.exists(metadata_path):
+            os.remove(metadata_path)
+        
+        # STEP 5: Save processed response
+        print("\\n" + "=" * 80)
+        print("5. SAVING RESULTS")
+        print("=" * 80)
+        
+        processed_response = {
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'model_file': args.trained_model,
+            'model_size': model_size,
+            'model_cdn_url': model_cdn_url,
+            'metadata_cdn_url': metadata_cdn_url,
+            'filenames': {
+                'model': filename,
+                'metadata': metadata_filename
+            },
+            'upload_success': model_cdn_url is not None,
+            'metadata_upload_success': metadata_cdn_url is not None,
+            'domain': args.domain,
+            'cdn_base': args.cdn_base
+        }
+        
+        with open(args.upload_response, 'w') as f:
+            json.dump(processed_response, f, indent=2)
+        
+        with open(args.metadata_url, 'w') as f:
+            f.write(metadata_cdn_url if metadata_cdn_url else "")
+        
+        print(f"✓ Processed response saved: {args.upload_response}")
+        print(f"✓ Raw response saved: {args.raw_response}")
+        print(f"✓ CDN URL saved: {args.cdn_url}")
+        print(f"✓ Metadata URL saved: {args.metadata_url}")
+        
+        if model_cdn_url:
+            print(f"✓ Model CDN URL: {model_cdn_url}")
         else:
-            print("⚠ UPLOAD COMPLETE BUT NO CDN URL EXTRACTED")
+            print("✗ No model CDN URL extracted")
+        
+        if metadata_cdn_url:
+            print(f"✓ Metadata CDN URL: {metadata_cdn_url}")
+        else:
+            print("✗ No metadata CDN URL extracted")
+        
+        print("\\n" + "=" * 80)
+        if model_cdn_url and metadata_cdn_url:
+            print(" UPLOAD COMPLETE - BOTH FILES AVAILABLE")
+        elif model_cdn_url:
+            print(" UPLOAD PARTIAL - MODEL ONLY")
+        else:
+            print(" UPLOAD FAILED")
         print("=" * 80)
         
     args:
       - --trained_model
       - {inputPath: trained_model}
+      - --model_metadata
+      - {inputPath: model_metadata}
       - --bearer_token
       - {inputValue: bearer_token}
       - --domain
@@ -425,6 +325,8 @@ implementation:
       - {inputValue: cdn_base}
       - --cdn_url
       - {outputPath: cdn_url}
+      - --metadata_url
+      - {outputPath: metadata_url}
       - --upload_response
       - {outputPath: upload_response}
       - --raw_response
