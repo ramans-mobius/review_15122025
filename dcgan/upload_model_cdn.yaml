@@ -1,4 +1,4 @@
-name: Upload CDN Model As PT File v1
+name: Upload CDN Model As PT File v2
 description: Uploads model as .pt file and shows full response
 inputs:
   - name: trained_model
@@ -249,7 +249,7 @@ implementation:
                     url_patterns = [
                         r'/_[\w\-/]+/[\w\-]+_\$\$_V1_[\w\.\-]+',
                         r'cdn-new\.gov-cloud\.ai[/\w\-\._]+',
-                        r'https?://[^\s"\']+'
+                        r"https?://[^\s\"']+"  # FIXED LINE: Changed from r'https?://[^\s"']+' to r"https?://[^\s\"']+"
                     ]
                     
                     for pattern in url_patterns:
