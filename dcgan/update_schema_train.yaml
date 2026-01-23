@@ -1,5 +1,5 @@
-name: Upload Training Metrics To Schema v5
-description: Uploads DCGAN training metrics to training schema with full data printing
+name: Upload Training Metrics To Schema v3
+description: Uploads DCGAN training metrics to training schema
 inputs:
   # Training outputs from Train DCGAN brick
   - name: training_history
@@ -108,14 +108,10 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD TRAINING METRICS TO SCHEMA v3")
-        print("=" * 80)
-        print("WITH FULL TRAINING DATA PRINTING")
+        print("UPLOAD TRAINING METRICS TO SCHEMA v4")
         print("=" * 80)
         
-        # ============================================================================
         # Create output directories
-        # ============================================================================
         print("\\nCreating output directories...")
         
         output_paths = [
@@ -131,18 +127,11 @@ implementation:
                     os.makedirs(dir_path, exist_ok=True)
                     print(f"  Created: {dir_path}")
         
-        # ============================================================================
-        # Read bearer token - CHANGE: Directly use the token string, not from file
-        # ============================================================================
-        # Since bearer_token is passed as inputValue, it's already a string
+        # Parse bearer token
         bearer_token = args.bearer_token.strip()
-        
         print(f"Bearer token length: {len(bearer_token)} chars")
-        print(f"Bearer token preview: {bearer_token[:50]}...")
         
-        # ============================================================================
-        # Parse and validate inputs
-        # ============================================================================
+        # Parse inputs
         print(f"\\nParsing inputs...")
         
         try:
@@ -169,154 +158,41 @@ implementation:
         print(f"  Block Number: {block_number}")
         print(f"  Block Type: {args.block_type}")
         
-        # ============================================================================
-        # LOAD AND PRINT TRAINING DATA
-        # ============================================================================
+        # Load training data
         print(f"\\n" + "=" * 80)
-        print("LOADING AND PRINTING TRAINING DATA")
+        print("LOADING TRAINING DATA")
         print("=" * 80)
         
         try:
-            # ===========================================
-            # 1. LOAD AND PRINT TRAINING METRICS
-            # ===========================================
-            print(f"\\n1. TRAINING METRICS:")
-            print("-" * 40)
-            
+            # Load training metrics
             with open(args.training_metrics, 'r') as f:
                 training_metrics = json.load(f)
+            print(f"✓ Training metrics loaded")
             
-            print("FULL TRAINING METRICS JSON:")
-            print(json.dumps(training_metrics, indent=2))
-            print("-" * 40)
+            # Load training history
+            with open(args.training_history, 'r') as f:
+                training_history = json.load(f)
+            print(f"✓ Training history loaded")
             
-            # Extract and summarize key metrics
-            print("\\nKEY METRICS EXTRACTED:")
-            print("-" * 40)
-            print(f"✓ final_generator_loss: {training_metrics.get('final_generator_loss', 'NOT FOUND')}")
-            print(f"✓ final_discriminator_loss: {training_metrics.get('final_discriminator_loss', 'NOT FOUND')}")
-            print(f"✓ training_time: {training_metrics.get('training_time', 'NOT FOUND')}")
-            print(f"✓ epochs_completed: {training_metrics.get('epochs_completed', 'NOT FOUND')}")
-            print(f"✓ algorithm: {training_metrics.get('algorithm', 'NOT FOUND')}")
-            print(f"✓ device: {training_metrics.get('device', 'NOT FOUND')}")
+            # Parse master_config as JSON string
+            try:
+                master_config = json.loads(args.master_config)
+                print(f"✓ Master config parsed")
+            except:
+                master_config = {}
+                print(f"✗ Master config is not valid JSON, using empty dict")
             
-            # Check for model parameters
-            if 'model_parameters' in training_metrics:
-                print(f"✓ Model parameters found:")
-                model_params = training_metrics['model_parameters']
-                for key, value in model_params.items():
-                    print(f"    {key}: {value}")
-            
-            # Print all keys for reference
-            print(f"\\nALL KEYS IN TRAINING METRICS:")
-            print("-" * 40)
-            for key in training_metrics.keys():
-                value = training_metrics[key]
-                value_type = type(value).__name__
-                if isinstance(value, (dict, list)):
-                    print(f"  {key}: {value_type} (length: {len(value)})")
-                else:
-                    print(f"  {key}: {value_type} = {value}")
-            
+            # Extract data
             final_g_loss = training_metrics.get('final_generator_loss', 0.0)
             final_d_loss = training_metrics.get('final_discriminator_loss', 0.0)
             total_training_time = training_metrics.get('training_time', 0)
-            
-            print("-" * 40)
-            
-            # ===========================================
-            # 2. LOAD AND PRINT TRAINING HISTORY
-            # ===========================================
-            print(f"\\n2. TRAINING HISTORY:")
-            print("-" * 40)
-            
-            with open(args.training_history, 'r') as f:
-                training_history = json.load(f)
-            
-            print("FULL TRAINING HISTORY JSON:")
-            print(json.dumps(training_history, indent=2))
-            print("-" * 40)
-            
-            # Extract and summarize key history data
-            print("\\nKEY HISTORY DATA EXTRACTED:")
-            print("-" * 40)
-            
-            # Check structure of training history
-            print(f"✓ Training history type: {type(training_history)}")
-            print(f"✓ Training history keys: {list(training_history.keys())}")
-            
-            # Extract algorithm
-            algorithm = training_history.get('algorithm', 'backprop')
-            print(f"✓ Algorithm: {algorithm}")
-            
-            # Extract epochs completed
-            epochs_completed = training_history.get('epochs', 0)
-            print(f"✓ Epochs in history: {epochs_completed}")
+            algorithm = training_history.get('algorithm', training_metrics.get('algorithm', 'backprop'))
             
             # Extract epoch losses
-            epoch_losses = training_history.get('epoch_losses', [])
-            print(f"✓ Epoch losses entries: {len(epoch_losses)}")
-            
-            # Extract generator and discriminator losses
             generator_losses = training_history.get('generator_losses', [])
             discriminator_losses = training_history.get('discriminator_losses', [])
-            print(f"✓ Generator losses entries: {len(generator_losses)}")
-            print(f"✓ Discriminator losses entries: {len(discriminator_losses)}")
+            epoch_losses = training_history.get('epoch_losses', [])
             
-            # Print detailed epoch information
-            if epoch_losses:
-                print(f"\\nSAMPLE EPOCH LOSSES (first 3):")
-                print("-" * 40)
-                for i, epoch_data in enumerate(epoch_losses[:3]):
-                    if isinstance(epoch_data, dict):
-                        print(f"  Epoch {i+1}: {epoch_data}")
-                    else:
-                        print(f"  Epoch {i+1}: value = {epoch_data}")
-            
-            if generator_losses and discriminator_losses:
-                print(f"\\nSAMPLE LOSSES PER EPOCH (first 5):")
-                print("-" * 40)
-                for i in range(min(5, len(generator_losses), len(discriminator_losses))):
-                    print(f"  Epoch {i+1}: G={generator_losses[i]:.4f}, D={discriminator_losses[i]:.4f}")
-            
-            # Print all keys for reference
-            print(f"\\nALL KEYS IN TRAINING HISTORY:")
-            print("-" * 40)
-            for key in training_history.keys():
-                value = training_history[key]
-                value_type = type(value).__name__
-                if isinstance(value, (dict, list)):
-                    print(f"  {key}: {value_type} (length: {len(value)})")
-                else:
-                    print(f"  {key}: {value_type} = {value}")
-            
-            print("-" * 40)
-            
-            # ===========================================
-            # 3. LOAD AND PRINT MASTER CONFIG
-            # ===========================================
-            print(f"\\n3. MASTER CONFIG:")
-            print("-" * 40)
-            
-            with open(args.master_config, 'r') as f:
-                master_config = json.load(f)
-            
-            print("MASTER CONFIG STRUCTURE:")
-            print(f"✓ Config type: {type(master_config)}")
-            print(f"✓ Config keys: {list(master_config.keys())}")
-            
-            # Extract GAN config if available
-            if 'gan' in master_config:
-                gan_config = master_config['gan']
-                print(f"✓ GAN config keys: {list(gan_config.keys())}")
-                if 'training' in gan_config:
-                    training_config = gan_config['training']
-                    print(f"✓ Training config: {training_config}")
-            
-            print("-" * 40)
-            
-            # Set variables for later use
-            algorithm = training_history.get('algorithm', training_metrics.get('algorithm', 'backprop'))
             epochs_completed = max(
                 training_history.get('epochs', 0),
                 training_history.get('epochs_completed', 0),
@@ -326,7 +202,7 @@ implementation:
                 len(epoch_losses)
             )
             
-            print(f"\\nDERIVED VALUES FOR UPLOAD:")
+            print(f"\\nExtracted data:")
             print(f"  Algorithm: {algorithm}")
             print(f"  Epochs to upload: {epochs_completed}")
             print(f"  Final Generator Loss: {final_g_loss:.6f}")
@@ -338,172 +214,142 @@ implementation:
             traceback.print_exc()
             sys.exit(1)
         
-        # ============================================================================
-        # Schema upload function with FULL RESPONSE DISPLAY
-        # ============================================================================
+        # Schema upload function
         def upload_to_schema(schema_entry, epoch_num):
-         
+            # Try multiple endpoint formats
+            endpoints = [
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/create"
+            ]
             
-            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create"
-            
-            try:
-                # Prepare curl command
-                curl_command = [
-                    "curl",
-                    "--location", schema_url,
-                    "--header", f"Authorization: Bearer {bearer_token}",
-                    "--header", "Content-Type: application/json",
-                    "--data", json.dumps(schema_entry),
-                    "--fail",
-                    "--show-error",
-                    "--connect-timeout", "30",
-                    "--max-time", "60"
-                ]
+            for endpoint_idx, schema_url in enumerate(endpoints):
+                print(f"    Trying endpoint {endpoint_idx + 1}: {schema_url}")
                 
-                print(f"    Executing curl for epoch {epoch_num}...")
-                
-                process = subprocess.run(
-                    curl_command,
-                    capture_output=True,
-                    text=True,
-                    check=False
-                )
-                
-                # Display response
-                print(f"    Curl exit code: {process.returncode}")
-                
-                if process.returncode == 0:
-                    print(f"    ✓ Upload successful")
+                try:
+                    curl_command = [
+                        "curl",
+                        "--location", schema_url,
+                        "--header", f"Authorization: Bearer {bearer_token}",
+                        "--header", "Content-Type: application/json",
+                        "--data", json.dumps(schema_entry),
+                        "--fail",
+                        "--show-error",
+                        "--connect-timeout", "30",
+                        "--max-time", "60",
+                        "--silent"
+                    ]
                     
-                    # Try to parse JSON response
-                    try:
-                        response_data = json.loads(process.stdout)
-                        print(f"    Response JSON:")
-                        print(json.dumps(response_data, indent=2))
-                        return True, response_data, None
-                    except json.JSONDecodeError:
-                        print(f"    Response (non-JSON): {process.stdout[:500]}")
-                        return True, {"raw_response": process.stdout[:500]}, None
-                else:
-                    print(f"    ✗ Upload failed (exit code: {process.returncode})")
-                    print(f"    Stderr: {process.stderr[:500]}")
-                    print(f"    Stdout: {process.stdout[:500]}")
+                    process = subprocess.run(
+                        curl_command,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
                     
-                    # Try to parse error
-                    error_data = None
-                    if process.stdout:
+                    print(f"    Curl exit code: {process.returncode}")
+                    
+                    if process.returncode == 0:
+                        print(f"    ✓ Upload successful")
+                        
+                        # Print full response
+                        print(f"    Full response:")
+                        print("-" * 40)
+                        print(process.stdout)
+                        print("-" * 40)
+                        
                         try:
-                            error_data = json.loads(process.stdout)
-                        except:
-                            error_data = {"raw_error": process.stdout[:500]}
-                    
-                    return False, error_data, process.stderr[:500]
-                    
-            except Exception as e:
-                print(f"    ✗ Upload exception: {str(e)}")
-                return False, {"error": str(e)}, None
+                            response_data = json.loads(process.stdout)
+                            return True, response_data, None
+                        except json.JSONDecodeError:
+                            return True, {"raw_response": process.stdout}, None
+                    else:
+                        print(f"    ✗ Upload failed (exit code: {process.returncode})")
+                        print(f"    Stderr: {process.stderr[:200]}")
+                        print(f"    Stdout: {process.stdout[:200]}")
+                        
+                        # Check if it's a 404
+                        if "404" in process.stderr or "404" in process.stdout:
+                            print(f"    Endpoint not found, trying next...")
+                            continue
+                        
+                        return False, {"error": process.stderr[:200]}, process.stderr[:500]
+                        
+                except Exception as e:
+                    print(f"    ✗ Exception: {str(e)}")
+            
+            # All endpoints failed
+            return False, {"error": "All endpoints failed"}, None
         
-        # ============================================================================
-        # Prepare and upload metrics for each epoch
-        # ============================================================================
+        # Prepare and upload metrics
         print(f"\\n" + "=" * 80)
-        print("PREPARING AND UPLOADING METRICS")
+        print("UPLOADING METRICS")
         print("=" * 80)
         
         all_responses = []
         successful_uploads = 0
         failed_uploads = 0
         
-        # Generate unique UID for this upload session
         session_uid = str(uuid.uuid4())
         
-        print(f"\\nUpload session UID: {session_uid}")
+        print(f"Upload session UID: {session_uid}")
         print(f"Total epochs to upload: {epochs_completed}")
-        
-        # Determine which loss data to use
-        use_generator_losses = len(generator_losses) >= epochs_completed
-        use_discriminator_losses = len(discriminator_losses) >= epochs_completed
-        use_epoch_losses = len(epoch_losses) >= epochs_completed
-        
-        print(f"\\nAvailable loss data:")
-        print(f"  Generator losses: {len(generator_losses)} entries")
-        print(f"  Discriminator losses: {len(discriminator_losses)} entries")
-        print(f"  Epoch losses dicts: {len(epoch_losses)} entries")
-        print(f"  Using: {'generator_losses' if use_generator_losses else 'epoch_losses'} for generator loss")
-        print(f"  Using: {'discriminator_losses' if use_discriminator_losses else 'epoch_losses'} for discriminator loss")
         
         for epoch in range(1, epochs_completed + 1):
             print(f"\\n--- Processing Epoch {epoch}/{epochs_completed} ---")
             
-            # Get losses for this epoch from available sources
+            # Get losses for this epoch
             gen_loss = 0.0
             disc_loss = 0.0
             
-            # Try to get from epoch_losses (dictionary format)
-            if use_epoch_losses and epoch <= len(epoch_losses):
+            # Try to get from epoch_losses
+            if epoch <= len(epoch_losses):
                 epoch_data = epoch_losses[epoch - 1]
                 if isinstance(epoch_data, dict):
                     gen_loss = epoch_data.get('generator_loss', 0.0)
                     disc_loss = epoch_data.get('discriminator_loss', 0.0)
-                    print(f"  From epoch_losses dict: G={gen_loss:.4f}, D={disc_loss:.4f}")
                 else:
-                    gen_loss = float(epoch_data) if isinstance(epoch_data, (int, float)) else 0.0
-                    print(f"  From epoch_losses value: loss={gen_loss:.4f}")
+                    gen_loss = float(epoch_data)
             
-            # If not found in epoch_losses, try separate lists
-            if gen_loss == 0.0 and use_generator_losses and epoch <= len(generator_losses):
+            # If not found, try separate lists
+            if gen_loss == 0.0 and epoch <= len(generator_losses):
                 gen_loss = generator_losses[epoch - 1]
-                print(f"  From generator_losses: G={gen_loss:.4f}")
             
-            if disc_loss == 0.0 and use_discriminator_losses and epoch <= len(discriminator_losses):
+            if disc_loss == 0.0 and epoch <= len(discriminator_losses):
                 disc_loss = discriminator_losses[epoch - 1]
-                print(f"  From discriminator_losses: D={disc_loss:.4f}")
             
-            # If still no discriminator loss, use a default
-            if disc_loss == 0.0:
-                disc_loss = gen_loss * 0.8  # Default relationship
-                print(f"  Default discriminator loss: D={disc_loss:.4f} (80% of G)")
-            
-            # Calculate proxy accuracy for GAN
+            # Calculate proxy accuracy
             total_loss = gen_loss + disc_loss
             if total_loss > 0:
                 discriminator_accuracy = max(0.0, min(1.0, 0.5 - (gen_loss - disc_loss) / (2 * total_loss)))
             else:
                 discriminator_accuracy = 0.5
             
-            # Create UID for this specific epoch entry
+            # Create UID
             entry_uid = f"{args.model_id}_{execution_id}_{epoch}_{session_uid[:8]}"
             
-            # Prepare schema entry according to your schema
+            # Prepare schema entry - Ensure correct data types
             schema_entry = {
-                # REQUIRED fields (from schema - uid and projectId are required)
-                "uid": entry_uid,
-                "projectId": args.project_id,
-                
-                # Optional fields (all from your schema)
-                "tenant_id": args.tenant_id,
-                "execution_id": execution_id,
-                "model_id": args.model_id,
-                "epoch": epoch,
-                "loss": float(gen_loss),  # Using generator loss as main loss
-                "accuracy": float(discriminator_accuracy),
-                "training_mode": args.training_mode,
-                "block": block_number,
-                "block_type": args.block_type if args.block_type else "",
-                
-                # GAN-specific losses (set to 0 for DCGAN)
-                "recon_loss": 0.0,  # Reconstruction loss (not applicable for DCGAN)
-                "kl_loss": 0.0,     # KL divergence loss (not applicable for DCGAN)
+                "uid": str(entry_uid),  # string
+                "projectId": str(args.project_id),  # string
+                "tenant_id": str(args.tenant_id),  # string
+                "execution_id": int(execution_id),  # number
+                "model_id": str(args.model_id),  # string
+                "epoch": int(epoch),  # number
+                "loss": float(gen_loss),  # float
+                "accuracy": float(discriminator_accuracy),  # float
+                "training_mode": str(args.training_mode),  # string
+                "block": int(block_number),  # number
+                "block_type": str(args.block_type) if args.block_type else "",  # string
+                "recon_loss": float(0.0),  # float
+                "kl_loss": float(0.0)  # float
             }
             
             print(f"  Schema entry for epoch {epoch}:")
             for key, value in schema_entry.items():
-                if key == 'uid':
-                    print(f"    {key}: {value[:30]}...")
-                else:
-                    print(f"    {key}: {value}")
+                print(f"    {key}: {value} (type: {type(value).__name__})")
             
-            # Upload to schema with FULL response display
+            # Upload to schema
             success, response, error = upload_to_schema(schema_entry, epoch)
             
             all_responses.append({
@@ -525,11 +371,9 @@ implementation:
             if epoch < epochs_completed:
                 time.sleep(0.5)
         
-        # ============================================================================
         # Create summary
-        # ============================================================================
         print(f"\\n" + "=" * 80)
-        print("CREATING UPLOAD SUMMARY")
+        print("CREATING SUMMARY")
         print("=" * 80)
         
         metrics_summary_data = {
@@ -557,34 +401,10 @@ implementation:
                 'failed': failed_uploads,
                 'success_rate': (successful_uploads / epochs_completed * 100) if epochs_completed > 0 else 0,
                 'session_uid': session_uid
-            },
-            'schema_info': {
-                'schema_id': args.schema_id,
-                'tenant_id': args.tenant_id,
-                'required_fields': ['uid', 'projectId'],
-                'optional_fields': ['tenant_id', 'execution_id', 'model_id', 'epoch', 'loss', 'accuracy', 
-                                  'training_mode', 'block', 'block_type', 'recon_loss', 'kl_loss']
-            },
-            'data_sources_used': {
-                'generator_losses_length': len(generator_losses),
-                'discriminator_losses_length': len(discriminator_losses),
-                'epoch_losses_length': len(epoch_losses),
-                'used_generator_losses': use_generator_losses,
-                'used_discriminator_losses': use_discriminator_losses,
-                'used_epoch_losses': use_epoch_losses
             }
         }
         
-        # Add sample data to summary
-        metrics_summary_data['sample_training_data'] = {
-            'first_3_generator_losses': generator_losses[:3] if generator_losses else [],
-            'first_3_discriminator_losses': discriminator_losses[:3] if discriminator_losses else [],
-            'first_3_epoch_losses': epoch_losses[:3] if epoch_losses else []
-        }
-        
-        # ============================================================================
         # Save outputs
-        # ============================================================================
         try:
             # Save upload status
             upload_status_data = {
@@ -606,17 +426,12 @@ implementation:
                 json.dump(upload_status_data, f, indent=2)
             print(f"✓ Upload status saved: {args.upload_status}")
             
-            # Save ALL schema responses
+            # Save schema responses
             detailed_responses = {
                 'session_uid': session_uid,
                 'total_epochs': epochs_completed,
-                'responses': all_responses,
-                'schema_entries_sample': []
+                'responses': all_responses
             }
-            
-            # Include first 3 schema entries as sample
-            for resp in all_responses[:3]:
-                detailed_responses['schema_entries_sample'].append(resp['schema_entry'])
             
             with open(args.schema_response, 'w') as f:
                 json.dump(detailed_responses, f, indent=2)
@@ -631,42 +446,31 @@ implementation:
             print(f"✗ ERROR saving outputs: {e}")
             traceback.print_exc()
         
-        # ============================================================================
-        # FINAL SUMMARY
-        # ============================================================================
+        # Final summary
         print("\\n" + "=" * 80)
-        print("FINAL UPLOAD SUMMARY")
+        print("FINAL SUMMARY")
         print("=" * 80)
         
-        print(f"\\nTraining Data Summary:")
+        print(f"\\nTraining Data:")
         print(f"  Model ID: {args.model_id}")
         print(f"  Execution ID: {execution_id}")
-        print(f"  Epochs in training: {epochs_completed}")
+        print(f"  Epochs: {epochs_completed}")
         print(f"  Algorithm: {algorithm}")
         print(f"  Training Mode: {args.training_mode}")
-        print(f"  Final Generator Loss: {final_g_loss:.6f}")
-        print(f"  Final Discriminator Loss: {final_d_loss:.6f}")
-        print(f"  Total Training Time: {total_training_time:.2f}s")
         
         print(f"\\nUpload Results:")
         print(f"  Schema ID: {args.schema_id}")
         print(f"  Project ID: {args.project_id}")
-        print(f"  Upload Session UID: {session_uid}")
         print(f"  Epochs Attempted: {epochs_completed}")
-        print(f"  Successful Uploads: {successful_uploads}")
-        print(f"  Failed Uploads: {failed_uploads}")
+        print(f"  Successful: {successful_uploads}")
+        print(f"  Failed: {failed_uploads}")
         print(f"  Success Rate: {(successful_uploads/epochs_completed*100):.1f}%" if epochs_completed > 0 else "N/A")
-        
-        print(f"\\nData Sources Used:")
-        print(f"  Generator losses available: {len(generator_losses)}")
-        print(f"  Discriminator losses available: {len(discriminator_losses)}")
-        print(f"  Epoch losses (dict) available: {len(epoch_losses)}")
         
         print("\\n" + "=" * 80)
         if successful_uploads == epochs_completed and epochs_completed > 0:
             print(" ALL TRAINING METRICS UPLOADED SUCCESSFULLY!")
         elif successful_uploads > 0:
-            print(f"⚠ PARTIAL SUCCESS: {successful_uploads}/{epochs_completed} epochs uploaded")
+            print(f" PARTIAL SUCCESS: {successful_uploads}/{epochs_completed} epochs uploaded")
         else:
             print(" NO METRICS WERE UPLOADED SUCCESSFULLY")
             sys.exit(1)
@@ -685,7 +489,7 @@ implementation:
       - --schema_id
       - {inputValue: schema_id}
       - --bearer_token
-      - {inputValue: bearer_token}  # This is CORRECT - bearer_token is passed as a value, not a file path
+      - {inputValue: bearer_token}
       - --model_id
       - {inputValue: model_id}
       - --execution_id
