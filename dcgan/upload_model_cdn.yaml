@@ -1,4 +1,4 @@
-name: Upload Trained DCGAN Model To CDN 
+name: Upload Trained DCGAN Model To CDN v2
 description: Takes trained DCGAN model and uploads to CDN for .pt file access
 inputs:
   - name: trained_model
@@ -6,7 +6,7 @@ inputs:
     description: "Trained DCGAN model from Train brick"
   - name: bearer_token
     type: String
-    description: "Bearer token for authentication"
+    description: "Bearer token content (not file path)"
   - name: domain
     type: String
     description: "API domain"
@@ -41,10 +41,10 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, subprocess, json, os, uuid, pickle, sys, torch, time
+        import argparse, subprocess, json, os, uuid, pickle, sys, torch, time, textwrap
         
         print("=" * 80)
-        print("UPLOAD TRAINED DCGAN MODEL TO CDN v2")
+        print("UPLOAD TRAINED DCGAN MODEL TO CDN v3")
         print("=" * 80)
         
         parser = argparse.ArgumentParser()
@@ -85,10 +85,39 @@ implementation:
         print("✓ All output directories created")
         
         # ============================================================================
-        # Read bearer token
+        # Handle bearer token (it's passed as content, not file path)
         # ============================================================================
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
+        print("\\nProcessing bearer token...")
+        
+        # The bearer token is passed as a string argument, not a file path
+        bearer_token = args.bearer_token.strip()
+        
+        # Check if it looks like a JWT token
+        if bearer_token.startswith('eyJ'):  # JWT tokens start with eyJ
+            print(f"✓ Bearer token is a JWT token")
+            print(f"  Token length: {len(bearer_token)} characters")
+            print(f"  Token preview: {bearer_token[:50]}...")
+        else:
+            # Check if it's a file path
+            if os.path.exists(bearer_token):
+                print(f"✓ Bearer token is a file path, reading from file...")
+                with open(bearer_token, 'r') as f:
+                    bearer_token = f.read().strip()
+                print(f"  Token length: {len(bearer_token)} characters")
+                print(f"  Token preview: {bearer_token[:50]}...")
+            else:
+                print(f"✓ Bearer token passed as content")
+                print(f"  Token length: {len(bearer_token)} characters")
+                print(f"  Token preview: {bearer_token[:50]}...")
+        
+        # Validate token format
+        if not bearer_token:
+            print("✗ ERROR: Bearer token is empty!")
+            sys.exit(1)
+        
+        if len(bearer_token) < 10:
+            print(f"✗ ERROR: Bearer token seems too short: {len(bearer_token)} characters")
+            sys.exit(1)
         
         upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2Fmodels%2F"
         
@@ -155,7 +184,7 @@ implementation:
         # Upload function
         # ============================================================================
         def upload_file_to_cdn(file_path, description, file_tag, file_ext='.pt'):
-           
+            
             file_size = os.path.getsize(file_path)
             size_mb = file_size / (1024 * 1024)
             
@@ -176,10 +205,16 @@ implementation:
                 "--fail",
                 "--show-error",
                 "--connect-timeout", "60",
-                "--max-time", "300"
+                "--max-time", "300",
+                "--retry", "2"
             ]
             
             try:
+                # Debug: print curl command (without full token)
+                debug_cmd = ' '.join(curl_command)
+                debug_cmd = debug_cmd.replace(bearer_token, '***REDACTED***')
+                print(f"    Running: {debug_cmd[:200]}...")
+                
                 process = subprocess.run(
                     curl_command,
                     capture_output=True,
@@ -192,6 +227,7 @@ implementation:
                 
                 if not relative_cdn_url:
                     print(f"    ✗ Error: No cdnUrl in response")
+                    print(f"    Response: {process.stdout[:500]}")
                     return None
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
@@ -208,7 +244,9 @@ implementation:
                 }
                 
             except subprocess.CalledProcessError as e:
-                print(f"    ✗ Upload failed: {e.stderr[:200]}")
+                print(f"    ✗ Upload failed with exit code {e.returncode}")
+                print(f"    Stderr: {e.stderr[:500]}")
+                print(f"    Stdout: {e.stdout[:500]}")
                 return None
             except Exception as e:
                 print(f"    ✗ Error: {str(e)[:200]}")
@@ -373,7 +411,7 @@ implementation:
                 if url and url.startswith('http'):
                     url_count += 1
                     print(f"✓ {name}: URL saved")
-                    print(f"  {url}...")
+                    print(f"  {url[:100]}...")
                 else:
                     print(f"⚠ {name}: Invalid URL")
             else:
@@ -383,7 +421,7 @@ implementation:
         
         if model_result:
             print("\\n" + "=" * 80)
-            print("✅ MODEL UPLOAD COMPLETE")
+            print(" MODEL UPLOAD COMPLETE")
             print("=" * 80)
             print(f"Model URL: {model_result['url']}")
             print(f"Model size: {model_result['size_mb']:.2f} MB")
@@ -403,7 +441,7 @@ implementation:
       - --trained_model
       - {inputPath: trained_model}
       - --bearer_token
-      - {inputValue: bearer_token}
+      - {inputValue: bearer_token}  # Changed from inputPath to inputValue
       - --domain
       - {inputValue: domain}
       - --get_cdn
