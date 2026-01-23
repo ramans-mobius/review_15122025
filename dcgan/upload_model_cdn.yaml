@@ -1,5 +1,5 @@
-name: Upload Model 
-description: Uploads model using EXACT same logic as data upload brick
+name: Upload Model To CDN With Full Response v1
+description: Uploads model and prints/show entire response
 inputs:
   - name: trained_model
     type: Model
@@ -9,15 +9,23 @@ inputs:
     description: "Bearer token"
   - name: domain
     type: String
+    default: "https://ig.gov-cloud.ai"
     description: "API domain"
-  - name: get_cdn
+  - name: cdn_base
     type: String
+    default: "https://cdn-new.gov-cloud.ai"
     description: "CDN base URL"
   
 outputs:
-  - name: model_url
+  - name: cdn_url
     type: String
-    description: "Model CDN URL"
+    description: "CDN URL returned by service"
+  - name: upload_response
+    type: String
+    description: "Full upload response JSON"
+  - name: raw_response
+    type: String
+    description: "Raw response text"
 
 implementation:
   container:
@@ -26,86 +34,308 @@ implementation:
       - sh
       - -ec
       - |
-        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        apt-get update > /dev/null && apt-get install -y curl jq > /dev/null
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
-        import argparse, subprocess, json, os, uuid, sys
+        import argparse, subprocess, json, os, uuid, sys, time, textwrap
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--trained_model', type=str, required=True)
         parser.add_argument('--bearer_token', type=str, required=True)
-        parser.add_argument('--domain', type=str, required=True)
-        parser.add_argument('--get_cdn', type=str, required=True)
-        parser.add_argument('--model_url', type=str, required=True)
+        parser.add_argument('--domain', type=str, default="https://ig.gov-cloud.ai")
+        parser.add_argument('--cdn_base', type=str, default="https://cdn-new.gov-cloud.ai")
+        parser.add_argument('--cdn_url', type=str, required=True)
+        parser.add_argument('--upload_response', type=str, required=True)
+        parser.add_argument('--raw_response', type=str, required=True)
         
         args = parser.parse_args()
         
-        # Create output directory
-        os.makedirs(os.path.dirname(args.model_url), exist_ok=True)
+        # Create output directories
+        os.makedirs(os.path.dirname(args.cdn_url), exist_ok=True)
+        os.makedirs(os.path.dirname(args.upload_response), exist_ok=True)
+        os.makedirs(os.path.dirname(args.raw_response), exist_ok=True)
         
-        # Read bearer token
         bearer_token = args.bearer_token.strip()
         
-        # Use EXACT same upload URL as data brick
-        upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
+        print("=" * 80)
+        print("UPLOAD MODEL TO CDN WITH FULL RESPONSE v1")
+        print("=" * 80)
         
-        # Use EXACT same filename generation as data brick
+        # STEP 1: Verify model file
+        if not os.path.exists(args.trained_model):
+            print(f"✗ ERROR: Model file does not exist: {args.trained_model}")
+            sys.exit(1)
+        
+        model_size = os.path.getsize(args.trained_model)
+        print(f"✓ Model file: {args.trained_model}")
+        print(f"✓ File size: {model_size:,} bytes ({model_size/1024/1024:.2f} MB)")
+        
+        # STEP 2: Prepare upload
+        print("\\n" + "=" * 80)
+        print("2. PREPARING UPLOAD")
+        print("=" * 80)
+        
+        upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePath=pipeline"
+        
+        print(f"Upload URL: {upload_url}")
+        print(f"Domain: {args.domain}")
+        print(f"CDN Base: {args.cdn_base}")
+        
+        timestamp = int(time.time())
         unique_id = str(uuid.uuid4())[:8]
-        timestamp = uuid.uuid4().hex[:6]
-        file_tag = "trained_model"
-        file_ext = '.pt'
-        cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}{file_ext}"
+        filename = f"dcgan_model_{timestamp}_{unique_id}.pt"
         
-        print(f"Uploading model to CDN...")
-        print(f"File: {args.trained_model}")
-        print(f"Target filename: {cdn_filename}")
+        print(f"Generated filename: {filename}")
         
-        # Use EXACT same curl command as data brick
+        # STEP 3: Execute upload with VERBOSE output
+        print("\\n" + "=" * 80)
+        print("3. EXECUTING UPLOAD (VERBOSE)")
+        print("=" * 80)
+        
+        # First, let's get the curl command ready
         curl_command = [
             "curl",
             "--location", upload_url,
             "--header", f"Authorization: Bearer {bearer_token}",
             "--form", f"file=@{args.trained_model}",
-            "--form", f"filename={cdn_filename}",
+            "--form", 'filePathAccess="public"',
+            "--form", f"filename={filename}",
             "--fail",
             "--show-error",
-            "--connect-timeout", "30",
-            "--max-time", "120"
+            "--connect-timeout", "60",
+            "--max-time", "300",
+            "--verbose"  # Added verbose flag
         ]
         
+        # Print the curl command (with token redacted)
+        debug_cmd = ' '.join(curl_command).replace(bearer_token, '***REDACTED***')
+        print("CURL COMMAND:")
+        print("-" * 40)
+        print(debug_cmd)
+        print("-" * 40)
+        
+        # Execute with capture
+        print("\\nEXECUTING CURL...")
         try:
             process = subprocess.run(
                 curl_command,
                 capture_output=True,
                 text=True,
-                check=True
+                check=False
             )
             
-            response_json = json.loads(process.stdout)
-            relative_cdn_url = response_json.get("cdnUrl", "")
+            # Save raw response immediately
+            raw_output = process.stdout + process.stderr
+            with open(args.raw_response, 'w') as f:
+                f.write(raw_output)
             
-            if not relative_cdn_url:
-                print(f"✗ Error: No cdnUrl in response")
+            print("\\n" + "=" * 80)
+            print("4. FULL CURL OUTPUT")
+            print("=" * 80)
+            
+            # Print stderr (verbose info)
+            if process.stderr:
+                print("STDERR (VERBOSE OUTPUT):")
+                print("-" * 40)
+                print(process.stderr)
+                print("-" * 40)
+            
+            # Print stdout (response body)
+            print("\\nSTDOUT (RESPONSE BODY):")
+            print("-" * 40)
+            print(process.stdout)
+            print("-" * 40)
+            
+            print(f"\\nExit code: {process.returncode}")
+            
+            if process.returncode != 0:
+                print("✗ Upload failed!")
                 sys.exit(1)
             
-            full_url = f"{args.get_cdn}{relative_cdn_url}"
-            print(f"✓ Uploaded: {full_url}")
+            # STEP 4: Parse and analyze response
+            print("\\n" + "=" * 80)
+            print("5. PARSING RESPONSE")
+            print("=" * 80)
             
-            # Save URL
-            with open(args.model_url, "w") as f:
-                f.write(full_url)
+            response_data = None
+            cdn_url_result = None
             
-            print(f"✓ URL saved: {args.model_url}")
+            try:
+                response_data = json.loads(process.stdout)
+                print("✓ Response is valid JSON")
+                
+                # Pretty print the JSON
+                print("\\nRESPONSE JSON (PRETTY PRINTED):")
+                print("-" * 40)
+                print(json.dumps(response_data, indent=2))
+                print("-" * 40)
+                
+                # Analyze the response structure
+                print("\\nRESPONSE ANALYSIS:")
+                print("-" * 40)
+                print(f"Response type: {type(response_data)}")
+                print(f"Response keys: {list(response_data.keys())}")
+                
+                # Check for CDN URL in various possible locations
+                cdn_path = None
+                response_paths_checked = []
+                
+                # Try different possible response formats
+                possible_keys = ['cdnUrl', 'url', 'fileUrl', 'cdn_url', 'file_url', 'cdnPath', 'path']
+                
+                for key in possible_keys:
+                    if key in response_data:
+                        cdn_path = response_data[key]
+                        print(f"✓ Found '{key}': {cdn_path}")
+                        response_paths_checked.append(f"{key}: {cdn_path}")
+                        break
+                
+                # If not found in top level, search nested
+                if not cdn_path:
+                    print("\\nSearching nested structures...")
+                    def search_for_url(obj, path=""):
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                current_path = f"{path}.{k}" if path else k
+                                if isinstance(v, str) and ('cdn' in k.lower() or 'url' in k.lower() or 'path' in k.lower()):
+                                    return v, current_path
+                                result = search_for_url(v, current_path)
+                                if result:
+                                    return result
+                        elif isinstance(obj, list):
+                            for i, item in enumerate(obj):
+                                result = search_for_url(item, f"{path}[{i}]")
+                                if result:
+                                    return result
+                        return None, None
+                    
+                    cdn_path, found_path = search_for_url(response_data)
+                    if cdn_path:
+                        print(f"✓ Found URL in nested path '{found_path}': {cdn_path}")
+                        response_paths_checked.append(f"{found_path}: {cdn_path}")
+                
+                if cdn_path:
+                    # Construct full URL if needed
+                    if cdn_path.startswith("http"):
+                        full_url = cdn_path
+                        print(f"✓ URL is already complete: {full_url}")
+                    else:
+                        full_url = f"{args.cdn_base}{cdn_path}"
+                        print(f"✓ Constructed full URL: {full_url}")
+                    
+                    cdn_url_result = full_url
+                    
+                    # Save the URL
+                    with open(args.cdn_url, 'w') as f:
+                        f.write(full_url)
+                    print(f"\\n✓ CDN URL saved to: {args.cdn_url}")
+                    
+                else:
+                    print("\\n✗ No CDN URL found in response!")
+                    print("Full response structure:")
+                    print(json.dumps(response_data, indent=2)[:1000] + "..." if len(json.dumps(response_data, indent=2)) > 1000 else json.dumps(response_data, indent=2))
+                    
+                    # Save empty URL
+                    with open(args.cdn_url, 'w') as f:
+                        f.write("")
+                
+            except json.JSONDecodeError as e:
+                print(f"✗ Response is NOT valid JSON")
+                print(f"Error: {e}")
+                print(f"\\nRaw response text:")
+                print("-" * 40)
+                print(process.stdout)
+                print("-" * 40)
+                
+                # Save empty response
+                response_data = {"error": "Invalid JSON", "raw_response": process.stdout}
+                
+                # Save empty URL
+                with open(args.cdn_url, 'w') as f:
+                    f.write("")
             
-        except subprocess.CalledProcessError as e:
-            print(f"✗ Upload failed: {e.stderr[:200]}")
-            sys.exit(1)
+            # STEP 5: Save processed response
+            print("\\n" + "=" * 80)
+            print("6. SAVING RESULTS")
+            print("=" * 80)
+            
+            processed_response = {
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'upload_success': process.returncode == 0,
+                'curl_exit_code': process.returncode,
+                'model_file': args.trained_model,
+                'model_size': model_size,
+                'upload_url': upload_url,
+                'filename_used': filename,
+                'cdn_url': cdn_url_result,
+                'parsed_response': response_data,
+                'domain': args.domain,
+                'cdn_base': args.cdn_base,
+                'response_paths_checked': response_paths_checked if 'response_paths_checked' in locals() else []
+            }
+            
+            with open(args.upload_response, 'w') as f:
+                json.dump(processed_response, f, indent=2)
+            
+            print(f"✓ Processed response saved to: {args.upload_response}")
+            print(f"✓ Raw response saved to: {args.raw_response}")
+            
+            if cdn_url_result:
+                print(f"✓ CDN URL: {cdn_url_result}")
+            else:
+                print("✗ No CDN URL extracted from response")
+            
+            # STEP 6: Test the URL if we got one
+            if cdn_url_result:
+                print("\\n" + "=" * 80)
+                print("7. TESTING CDN URL")
+                print("=" * 80)
+                
+                test_command = [
+                    "curl",
+                    "--head",
+                    "--location", cdn_url_result,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--connect-timeout", "30",
+                    "--max-time", "60",
+                    "--silent"
+                ]
+                
+                try:
+                    test_process = subprocess.run(
+                        test_command,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    
+                    print("HEAD request output:")
+                    print("-" * 40)
+                    print(test_process.stdout)
+                    if test_process.stderr:
+                        print("Stderr:")
+                        print(test_process.stderr)
+                    print("-" * 40)
+                    print(f"Exit code: {test_process.returncode}")
+                    
+                except Exception as e:
+                    print(f"⚠ Test failed: {str(e)}")
+            
         except Exception as e:
-            print(f"✗ Error: {str(e)[:200]}")
+            print(f"✗ Fatal error during upload: {str(e)}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
+        
+        print("\\n" + "=" * 80)
+        if cdn_url_result:
+            print(" UPLOAD COMPLETE")
+        else:
+            print("⚠ UPLOAD COMPLETE BUT NO CDN URL EXTRACTED")
+        print("=" * 80)
         
     args:
       - --trained_model
@@ -114,7 +344,11 @@ implementation:
       - {inputValue: bearer_token}
       - --domain
       - {inputValue: domain}
-      - --get_cdn
-      - {inputValue: get_cdn}
-      - --model_url
-      - {outputPath: model_url}
+      - --cdn_base
+      - {inputValue: cdn_base}
+      - --cdn_url
+      - {outputPath: cdn_url}
+      - --upload_response
+      - {outputPath: upload_response}
+      - --raw_response
+      - {outputPath: raw_response}
