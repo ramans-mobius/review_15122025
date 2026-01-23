@@ -1,5 +1,5 @@
-name: Upload Evaluation Metrics to Schema v2
-description: Uploads FID, SSIM, PSNR scores and required fields to performance matrix schema
+name: Upload Evaluation Metrics To Schema v3
+description: Uploads FID, SSIM, PSNR scores to performance matrix schema
 inputs:
   # Evaluation outputs from Evaluate DCGAN brick
   - name: evaluation_metrics
@@ -18,7 +18,7 @@ inputs:
     description: "Model identifier"
   - name: execution_id
     type: String
-    description: "Execution ID (will be converted to integer)"
+    description: "Execution ID"
   - name: tenant_id
     type: String
     description: "Tenant ID for schema"
@@ -88,9 +88,7 @@ implementation:
         print("UPLOAD EVALUATION METRICS TO SCHEMA v1")
         print("=" * 80)
         
-        # ============================================================================
         # Create output directories
-        # ============================================================================
         print("\\nCreating output directories...")
         
         output_paths = [
@@ -105,12 +103,9 @@ implementation:
                     os.makedirs(dir_path, exist_ok=True)
                     print(f"  Created: {dir_path}")
         
-        # ============================================================================
-        # Parse inputs - CORRECTED bearer token handling
-        # ============================================================================
-        bearer_token = args.bearer_token.strip()  # Direct use, not from file
+        # Parse inputs
+        bearer_token = args.bearer_token.strip()
         print(f"Bearer token length: {len(bearer_token)} chars")
-        print(f"Bearer token preview: {bearer_token[:50]}...")
         
         try:
             execution_id = int(args.execution_id)
@@ -119,7 +114,6 @@ implementation:
             print(f"ERROR: execution_id must be an integer. Got: {args.execution_id}")
             sys.exit(1)
         
-        # Get current timestamp (number type)
         current_timestamp = int(time.time())
         
         print(f"\\nParameters:")
@@ -132,9 +126,7 @@ implementation:
         print(f"  Project ID: {args.project_id}")
         print(f"  Timestamp: {current_timestamp}")
         
-        # ============================================================================
         # Load evaluation data
-        # ============================================================================
         print(f"\\nLoading evaluation data...")
         
         try:
@@ -142,30 +134,20 @@ implementation:
                 eval_metrics = json.load(f)
             print(f"✓ Loaded evaluation metrics")
             
-            # Show available metrics
-            print(f"\\nAvailable metrics in evaluation_metrics:")
-            for key, value in eval_metrics.items():
-                print(f"  {key}: {value}")
-            
         except Exception as e:
             print(f"ERROR loading evaluation data: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
         
-        # ============================================================================
         # Extract FID, SSIM, PSNR values
-        # ============================================================================
         print(f"\\nExtracting FID, SSIM, PSNR values...")
         
-        # Initialize with defaults
         fid_value = 0.0
         ssim_value = 0.0
         psnr_value = 0.0
         mse_value = 0.0
-        mae_value = 0.0
         
-        # Extract fid (could be 'fid', 'fid_score', etc.)
         fid_keys = ['fid', 'fid_score', 'FID', 'fid_value']
         for key in fid_keys:
             if key in eval_metrics:
@@ -173,7 +155,6 @@ implementation:
                 print(f"✓ Found FID: {key} = {fid_value}")
                 break
         
-        # Extract ssim (could be 'ssim', 'ssim_mean', etc.)
         ssim_keys = ['ssim', 'ssim_mean', 'SSIM', 'ssim_value']
         for key in ssim_keys:
             if key in eval_metrics:
@@ -181,7 +162,6 @@ implementation:
                 print(f"✓ Found SSIM: {key} = {ssim_value}")
                 break
         
-        # Extract psnr (could be 'psnr', 'psnr_mean', etc.)
         psnr_keys = ['psnr', 'psnr_mean', 'PSNR', 'psnr_value']
         for key in psnr_keys:
             if key in eval_metrics:
@@ -189,20 +169,11 @@ implementation:
                 print(f"✓ Found PSNR: {key} = {psnr_value}")
                 break
         
-        # Extract mse if available
         if 'mse' in eval_metrics:
             mse_value = float(eval_metrics['mse'])
             print(f"✓ Found MSE: {mse_value}")
         
-        # Extract mae if available
-        if 'mae' in eval_metrics:
-            mae_value = float(eval_metrics['mae'])
-            print(f"✓ Found MAE: {mae_value}")
-        
-        # Check if we found the metrics
-        if fid_value == 0.0 and ssim_value == 0.0 and psnr_value == 0.0:
-            print(f" Warning: Could not find FID, SSIM, or PSNR in evaluation metrics")
-            print(f"  Available keys: {list(eval_metrics.keys())}")
+        algorithm = eval_metrics.get('algorithm', 'unknown')
         
         print(f"\\nExtracted values:")
         print(f"  FID: {fid_value}")
@@ -210,76 +181,62 @@ implementation:
         print(f"  PSNR: {psnr_value}")
         if mse_value > 0:
             print(f"  MSE: {mse_value}")
-        if mae_value > 0:
-            print(f"  MAE: {mae_value}")
         
-        # ============================================================================
-        # Create schema entry - CORRECTED: Use schema fields directly
-        # ============================================================================
+        # Create schema entry with correct data types
         print(f"\\nCreating schema entry...")
         
-        # REQUIRED FIELDS (must be present) - from your schema
-        required_fields = {
-            'tenant_id': args.tenant_id,
-            'model_id': str(args.model_id),  # Schema expects string
-            'execution_id': execution_id,    # Schema expects number
-            'projectId': args.project_id,    # capital 'I' as per schema
-            'timestamp': current_timestamp   # Schema expects number
+        schema_entry = {
+            'tenant_id': str(args.tenant_id),  # string
+            'model_id': str(args.model_id),  # string
+            'execution_id': int(execution_id),  # number
+            'projectId': str(args.project_id),  # string (capital I)
+            'timestamp': int(current_timestamp),  # number
+            
+            'model_name': str(args.model_name),  # string
+            'model_type': str(args.model_type),  # string
+            
+            # Direct metric mappings
+            'fid': float(fid_value),  # float
+            'ssim': float(ssim_value),  # float
+            'psnr': float(psnr_value),  # float
+            'mse': float(mse_value if mse_value > 0 else 10 ** (-psnr_value / 10) if psnr_value > 0 else 0.0),  # float
+            
+            # Mapped fields
+            'loss': float(fid_value),  # float
+            'accuracy': float(ssim_value),  # float
+            'precision_score': float(psnr_value),  # float
+            'r2_score': float(ssim_value),  # float
+            'rmse_score': float(np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else 0.0),  # float
+            'rmse': str(np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else "0.0"),  # string
+            
+            # Default values for unused fields
+            'roc_auc': int(0),  # integer
+            'confusion_matrix': [],  # array
+            'recall': float(0.0),  # float
+            'f1_score': float(0.0)  # float
         }
-        
-        # OPTIONAL FIELDS - using actual schema field names
-        optional_fields = {
-            'model_name': args.model_name,
-            'model_type': args.model_type,
-            'fid': float(fid_value),          # Direct mapping to schema field
-            'ssim': float(ssim_value),        # Direct mapping to schema field
-            'psnr': float(psnr_value),        # Direct mapping to schema field
-            'mse': float(mse_value if mse_value > 0 else 10 ** (-psnr_value / 10) if psnr_value > 0 else 0.0),
-            'rmse': str(np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else "0.0"),
-            'rmse_score': float(np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else 0.0),
-            'loss': float(fid_value),         # FID can also be considered as loss
-            'accuracy': float(ssim_value),    # SSIM as accuracy proxy
-            'precision_score': float(psnr_value),  # PSNR as precision
-            'r2_score': float(ssim_value),    # SSIM as R² proxy
-            # Default values for fields not applicable to GANs
-            'roc_auc': 0,                     # integer
-            'confusion_matrix': [],           # float_array (empty list)
-            'recall': 0.0,                    # float
-            'f1_score': 0.0                   # float
-        }
-        
-        # Create final schema entry
-        schema_entry = {**required_fields, **optional_fields}
         
         print(f"\\nSchema entry prepared ({len(schema_entry)} fields):")
-        print(f"  Required fields: {len(required_fields)}")
-        print(f"  Optional fields: {len(optional_fields)}")
-        
-        # Print the schema entry for debugging
-        print(f"\\nSchema entry to upload:")
         for key, value in schema_entry.items():
             print(f"  {key}: {value} (type: {type(value).__name__})")
         
-        # ============================================================================
-        # Schema upload function - CORRECTED: Use bearer_token variable
-        # ============================================================================
+        # Schema upload function
         def upload_to_schema(schema_data):
-          
-            # Try both endpoint formats
+            # Try multiple endpoint formats
             endpoints = [
                 f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances"
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/create"
             ]
             
             for endpoint_idx, schema_url in enumerate(endpoints):
                 print(f"\\nTrying endpoint {endpoint_idx + 1}: {schema_url}")
                 
                 try:
-                    # Create curl command
                     curl_command = [
                         "curl",
                         "--location", schema_url,
-                        "--header", f"Authorization: Bearer {bearer_token}",  # Use bearer_token variable
+                        "--header", f"Authorization: Bearer {bearer_token}",
                         "--header", "Content-Type: application/json",
                         "--data", json.dumps(schema_data),
                         "--fail",
@@ -294,7 +251,7 @@ implementation:
                         curl_command,
                         capture_output=True,
                         text=True,
-                        check=False  # Don't raise exception, we'll handle it
+                        check=False
                     )
                     
                     print(f"    Curl exit code: {process.returncode}")
@@ -302,62 +259,41 @@ implementation:
                     if process.returncode == 0:
                         print(f"    ✓ Upload successful")
                         
+                        # Print full response
+                        print(f"    Full response:")
+                        print("-" * 40)
+                        print(process.stdout)
+                        print("-" * 40)
+                        
                         try:
                             response_data = json.loads(process.stdout)
-                            print(f"    Response JSON received")
                             return True, response_data, None
                         except json.JSONDecodeError:
-                            print(f"    Response (non-JSON): {process.stdout[:500]}")
-                            return True, {"raw_response": process.stdout[:500]}, None
+                            return True, {"raw_response": process.stdout}, None
                     else:
                         print(f"    ✗ Upload failed (exit code: {process.returncode})")
                         print(f"    Stderr: {process.stderr[:200]}")
                         print(f"    Stdout: {process.stdout[:200]}")
                         
-                        # Check if it's a 404 error
                         if "404" in process.stderr or "404" in process.stdout:
-                            print(f"    Endpoint not found, trying alternative...")
-                            continue  # Try next endpoint
+                            print(f"    Endpoint not found, trying next...")
+                            continue
                         
-                        # Try to parse error
-                        error_data = None
-                        if process.stdout:
-                            try:
-                                error_data = json.loads(process.stdout)
-                            except:
-                                error_data = {"raw_error": process.stdout[:500]}
-                        
-                        return False, error_data, process.stderr[:500]
+                        return False, {"error": process.stderr[:200]}, process.stderr[:500]
                         
                 except Exception as e:
                     print(f"    ✗ Exception: {str(e)}")
-                    return False, {"error": str(e)}, None
             
-            # If we get here, all endpoints failed
-            return False, {"error": "All endpoints failed (404 errors)"}, None
+            return False, {"error": "All endpoints failed"}, None
         
-        # ============================================================================
         # Upload to schema
-        # ============================================================================
         print(f"\\n" + "=" * 80)
         print("UPLOADING TO SCHEMA")
         print("=" * 80)
         
         success, response, error = upload_to_schema(schema_entry)
         
-        if success:
-            print(f"\\n✓ Upload successful!")
-            if 'id' in response:
-                print(f"  Response ID: {response.get('id')}")
-            print(f"  Response keys: {list(response.keys())}")
-        else:
-            print(f"\\n✗ Upload failed")
-            if error:
-                print(f"  Error: {error}")
-        
-        # ============================================================================
         # Save outputs
-        # ============================================================================
         print(f"\\nSaving outputs...")
         
         try:
@@ -373,17 +309,12 @@ implementation:
                     'fid': fid_value,
                     'ssim': ssim_value,
                     'psnr': psnr_value,
-                    'mse': mse_value,
-                    'mae': mae_value,
-                    'mse_calculated': schema_entry['mse'],
-                    'rmse_calculated': schema_entry['rmse_score']
+                    'mse': mse_value
                 },
                 'schema_fields_populated': len(schema_entry),
-                'required_fields_included': list(required_fields.keys()),
                 'upload_response': response if success else {"error": str(response.get('error', 'Unknown error')), "details": error},
                 'upload_timestamp': int(time.time()),
-                'evaluation_metrics_keys': list(eval_metrics.keys()),
-                'schema_entry_sample': {k: v for i, (k, v) in enumerate(schema_entry.items()) if i < 10}  # First 10 items
+                'schema_entry_sample': {k: v for i, (k, v) in enumerate(schema_entry.items()) if i < 10}
             }
             
             with open(args.upload_status, 'w') as f:
@@ -400,9 +331,7 @@ implementation:
             import traceback
             traceback.print_exc()
         
-        # ============================================================================
         # Final summary
-        # ============================================================================
         print(f"\\n" + "=" * 80)
         if success:
             print(" EVALUATION METRICS UPLOADED SUCCESSFULLY!")
@@ -410,29 +339,18 @@ implementation:
             print(" EVALUATION METRICS UPLOAD FAILED")
         print("=" * 80)
         
-        print(f"\\nUPLOADED METRICS (DIRECT TO SCHEMA FIELDS):")
+        print(f"\\nUPLOADED METRICS:")
         print(f"  fid: {fid_value:.2f}")
         print(f"  ssim: {ssim_value:.4f}")
         print(f"  psnr: {psnr_value:.2f} dB")
-        if mse_value > 0:
-            print(f"  mse: {mse_value:.6f}")
-        else:
-            print(f"  mse (calculated): {schema_entry['mse']:.6f}")
-        print(f"  rmse: {schema_entry['rmse_score']:.6f}")
-        
-        print(f"\\nMAPPED TO OTHER SCHEMA FIELDS:")
-        print(f"  loss: {fid_value:.2f} (FID mapped to loss)")
-        print(f"  accuracy: {ssim_value:.4f} (SSIM mapped to accuracy)")
-        print(f"  precision_score: {psnr_value:.2f} (PSNR mapped to precision)")
-        print(f"  r2_score: {ssim_value:.4f} (SSIM mapped to R²)")
+        print(f"  mse: {schema_entry['mse']:.6f}")
         
         print(f"\\nMODEL INFO:")
         print(f"  Model: {args.model_name} ({args.model_id})")
         print(f"  Type: {args.model_type}")
+        print(f"  Algorithm: {algorithm}")
         print(f"  Execution ID: {execution_id}")
         print(f"  Schema ID: {args.schema_id}")
-        print(f"  Project ID: {args.project_id}")
-        print(f"  Tenant ID: {args.tenant_id}")
         
         print(f"\\nSTATUS: {'SUCCESS' if success else 'FAILED'}")
         print("=" * 80)
@@ -449,7 +367,7 @@ implementation:
       - --schema_id
       - {inputValue: schema_id}
       - --bearer_token
-      - {inputValue: bearer_token}  # This is correct - passes token as value
+      - {inputValue: bearer_token}
       - --model_id
       - {inputValue: model_id}
       - --execution_id
