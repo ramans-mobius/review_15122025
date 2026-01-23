@@ -1,4 +1,4 @@
-name: Upload Training Metrics To Schema v4
+name: Upload Training Metrics To Schema v5
 description: Uploads DCGAN training metrics to training schema with full data printing
 inputs:
   # Training outputs from Train DCGAN brick
@@ -132,10 +132,10 @@ implementation:
                     print(f"  Created: {dir_path}")
         
         # ============================================================================
-        # Read bearer token
+        # Read bearer token - CHANGE: Directly use the token string, not from file
         # ============================================================================
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
+        # Since bearer_token is passed as inputValue, it's already a string
+        bearer_token = args.bearer_token.strip()
         
         print(f"Bearer token length: {len(bearer_token)} chars")
         print(f"Bearer token preview: {bearer_token[:50]}...")
@@ -685,7 +685,7 @@ implementation:
       - --schema_id
       - {inputValue: schema_id}
       - --bearer_token
-      - {inputValue: bearer_token}
+      - {inputValue: bearer_token}  # This is CORRECT - bearer_token is passed as a value, not a file path
       - --model_id
       - {inputValue: model_id}
       - --execution_id
