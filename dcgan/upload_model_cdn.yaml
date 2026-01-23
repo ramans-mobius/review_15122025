@@ -9,7 +9,7 @@ inputs:
     description: "Bearer token"
   - name: domain
     type: String
-    default: "https://ig.mobiusdtaas.ai"
+    default: "https://ig.gov-cloud.ai"
     description: "API domain"
   - name: cdn_base
     type: String
