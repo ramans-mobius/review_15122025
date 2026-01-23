@@ -1,45 +1,39 @@
-name: Upload Trained Model to CDN v9 - CORRECT STRUCTURE
-description: Uploads trained model .pth file to CDN with CORRECT structure matching Data Upload brick
+name: Upload Trained DCGAN Model To CDN 
+description: Takes trained DCGAN model and uploads to CDN for .pt file access
 inputs:
   - name: trained_model
     type: Model
-    description: "Trained model .pth file"
+    description: "Trained DCGAN model from Train brick"
   - name: bearer_token
     type: String
     description: "Bearer token for authentication"
   - name: domain
     type: String
-    description: "CDN upload domain (e.g., https://igs.gov-cloud.ai)"
+    description: "API domain"
   - name: get_cdn
     type: String
-    description: "CDN download prefix (e.g., https://cdn-new.gov-cloud.ai)"
-  - name: model_id
-    type: String
-    description: "Model identifier"
-  - name: execution_id
-    type: String
-    description: "Execution ID"
-  - name: model_name
-    type: String
-    description: "Model name"
-
+    description: "CDN base URL"
+  
 outputs:
-  - name: model_cdn_url
+  - name: trained_model_url
     type: String
-    description: "CDN URL for the uploaded model"
-  - name: upload_status
+    description: "URL to trained model .pt file on CDN"
+  - name: upload_summary_url
     type: String
-    description: "Upload status and details"
-  - name: verification_status
+    description: "URL to upload summary"
+  - name: model_metadata_url
     type: String
-    description: "Verification status after download test"
+    description: "URL to model metadata JSON"
+  - name: upload_complete
+    type: String
+    description: "Upload completion status"
 
 implementation:
   container:
     image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
-      - -c
+      - -ec
       - |
         apt-get update > /dev/null && apt-get install -y curl > /dev/null
         exec "$0" "$@"
@@ -47,14 +41,11 @@ implementation:
       - -u
       - -c
       - |
-        import argparse
-        import json
-        import os
-        import sys
-        import subprocess
-        import uuid
-        import time
-        from datetime import datetime
+        import argparse, subprocess, json, os, uuid, pickle, sys, torch, time
+        
+        print("=" * 80)
+        print("UPLOAD TRAINED DCGAN MODEL TO CDN v2")
+        print("=" * 80)
         
         parser = argparse.ArgumentParser()
         
@@ -63,97 +54,132 @@ implementation:
         parser.add_argument('--bearer_token', type=str, required=True)
         parser.add_argument('--domain', type=str, required=True)
         parser.add_argument('--get_cdn', type=str, required=True)
-        parser.add_argument('--model_id', type=str, required=True)
-        parser.add_argument('--execution_id', type=str, required=True)
-        parser.add_argument('--model_name', type=str, required=True)
         
         # Outputs
-        parser.add_argument('--model_cdn_url', type=str, required=True)
-        parser.add_argument('--upload_status', type=str, required=True)
-        parser.add_argument('--verification_status', type=str, required=True)
+        parser.add_argument('--trained_model_url', type=str, required=True)
+        parser.add_argument('--upload_summary_url', type=str, required=True)
+        parser.add_argument('--model_metadata_url', type=str, required=True)
+        parser.add_argument('--upload_complete', type=str, required=True)
         
         args = parser.parse_args()
-        
-        print("=" * 80)
-        print("UPLOAD TRAINED MODEL TO CDN - CORRECT STRUCTURE")
-        print("=" * 80)
         
         # ============================================================================
         # Create output directories
         # ============================================================================
         print("\\nCreating output directories...")
         
-        for path in [args.model_cdn_url, args.upload_status, args.verification_status]:
+        output_paths = [
+            args.trained_model_url,
+            args.upload_summary_url,
+            args.model_metadata_url,
+            args.upload_complete
+        ]
+        
+        for path in output_paths:
             if path:
                 dir_path = os.path.dirname(path)
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
                     print(f"  Created: {dir_path}")
         
+        print("✓ All output directories created")
+        
         # ============================================================================
-        # Load bearer token
+        # Read bearer token
         # ============================================================================
         with open(args.bearer_token, 'r') as f:
             bearer_token = f.read().strip()
         
-        print(f"Bearer token loaded: {len(bearer_token)} chars")
-        print(f"Upload domain: {args.domain}")
-        print(f"CDN prefix: {args.get_cdn}")
+        upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2Fmodels%2F"
         
         # ============================================================================
-        # Step 1: Upload model to CDN using SAME pattern as Data Upload brick
+        # Verify model file
         # ============================================================================
+        print("\\nVerifying trained model file...")
         
-        def upload_model_to_cdn():
+        if not os.path.exists(args.trained_model):
+            print(f"✗ ERROR: Model file does not exist: {args.trained_model}")
+            sys.exit(1)
         
+        model_size = os.path.getsize(args.trained_model)
+        size_mb = model_size / (1024 * 1024)
+        
+        print(f"Model file: {args.trained_model}")
+        print(f"File size: {model_size:,} bytes ({size_mb:.2f} MB)")
+        
+        # Try to load and inspect the model
+        try:
+            checkpoint = torch.load(args.trained_model, map_location='cpu')
+            print("✓ Model checkpoint loaded successfully")
             
-            if not os.path.exists(args.trained_model):
-                print(f"✗ Model file not found: {args.trained_model}")
-                return None
+            # Extract model info
+            model_info = {
+                'model_source': checkpoint.get('model_source', 'unknown'),
+                'model_type': checkpoint.get('model_type', 'unknown'),
+                'algorithm': checkpoint.get('algorithm', 'unknown'),
+                'epoch': checkpoint.get('epoch', 0),
+                'batch_size': checkpoint.get('batch_size', 0),
+                'latent_dim': checkpoint.get('latent_dim', 100),
+                'image_size': checkpoint.get('image_size', 64),
+                'channels': checkpoint.get('channels', 3),
+                'timestamp': checkpoint.get('timestamp', ''),
+                'has_generator': 'generator_state_dict' in checkpoint,
+                'has_discriminator': 'discriminator_state_dict' in checkpoint
+            }
             
-            file_size = os.path.getsize(args.trained_model)
-            size_kb = file_size / 1024
+            # Count parameters
+            if 'generator_state_dict' in checkpoint:
+                generator_params = sum(p.numel() for p in checkpoint['generator_state_dict'].values())
+                model_info['generator_parameters'] = generator_params
+                print(f"  Generator parameters: {generator_params:,}")
             
-            print(f"\\nUploading trained model...")
-            print(f"  File: {args.trained_model}")
-            print(f"  Size: {size_kb:.1f} KB")
+            if 'discriminator_state_dict' in checkpoint:
+                discriminator_params = sum(p.numel() for p in checkpoint['discriminator_state_dict'].values())
+                model_info['discriminator_parameters'] = discriminator_params
+                print(f"  Discriminator parameters: {discriminator_params:,}")
             
-            # IMPORTANT: Use SAME pattern as Data Upload brick
-            # Data Upload uses: dcgan_{file_tag}_{timestamp}_{unique_id}.ext
+            print(f"  Algorithm: {model_info['algorithm']}")
+            print(f"  Epochs trained: {model_info['epoch']}")
+            print(f"  Latent dimension: {model_info['latent_dim']}")
+            print(f"  Image size: {model_info['image_size']}")
             
-            # Generate timestamp and UUID like Data Upload
-            timestamp = uuid.uuid4().hex[:6]  # 6-char timestamp
-            unique_id = str(uuid.uuid4())[:8]  # 8-char UUID
+        except Exception as e:
+            print(f"⚠ Warning: Could not fully inspect model: {str(e)[:100]}")
+            model_info = {
+                'error': str(e)[:200],
+                'file_size_bytes': model_size,
+                'upload_timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            }
+        
+        # ============================================================================
+        # Upload function
+        # ============================================================================
+        def upload_file_to_cdn(file_path, description, file_tag, file_ext='.pt'):
+           
+            file_size = os.path.getsize(file_path)
+            size_mb = file_size / (1024 * 1024)
             
-            # Create filename like Data Upload
-            # For models, we'll use .pth extension
-            cdn_filename = f"dcgan_model_{timestamp}_{unique_id}.pth"
+            print(f"  Uploading {description} ({size_mb:.2f} MB)...")
             
-            print(f"  Generated filename: {cdn_filename}")
-            print(f"  Pattern matches Data Upload: YES")
+            # Generate unique filename
+            unique_id = str(uuid.uuid4())[:8]
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
             
-            # Use SAME upload URL as Data Upload brick
-            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
-            
-            print(f"  Upload URL: {upload_url}")
+            cdn_filename = f"dcgan_model_{file_tag}_{timestamp}_{unique_id}{file_ext}"
             
             curl_command = [
                 "curl",
                 "--location", upload_url,
                 "--header", f"Authorization: Bearer {bearer_token}",
-                "--form", f"file=@{args.trained_model}",
+                "--form", f"file=@{file_path}",
                 "--form", f"filename={cdn_filename}",
                 "--fail",
                 "--show-error",
-                "--connect-timeout", "30",
-                "--max-time", "300",  # Longer timeout for large models
-                "--silent"  # Less verbose output
+                "--connect-timeout", "60",
+                "--max-time", "300"
             ]
             
             try:
-                print(f"  Executing upload...")
-                start_time = time.time()
-                
                 process = subprocess.run(
                     curl_command,
                     capture_output=True,
@@ -161,320 +187,234 @@ implementation:
                     check=True
                 )
                 
-                upload_time = time.time() - start_time
-                
-                # Parse response
-                try:
-                    response_json = json.loads(process.stdout)
-                except json.JSONDecodeError as e:
-                    print(f"    ✗ Failed to parse JSON response")
-                    print(f"    Raw response: {process.stdout[:500]}")
-                    return None
-                
+                response_json = json.loads(process.stdout)
                 relative_cdn_url = response_json.get("cdnUrl", "")
                 
                 if not relative_cdn_url:
-                    print(f"    ✗ No cdnUrl in response")
-                    print(f"    Response keys: {list(response_json.keys())}")
+                    print(f"    ✗ Error: No cdnUrl in response")
                     return None
                 
-                print(f"    Raw cdnUrl from CDN: {relative_cdn_url}")
-                
-                # Construct full URL - IMPORTANT: Use get_cdn prefix
-                if relative_cdn_url.startswith('http'):
-                    # Already a full URL
-                    full_url = relative_cdn_url
-                else:
-                    # Construct with get_cdn prefix
-                    full_url = f"{args.get_cdn}{relative_cdn_url}"
-                
-                print(f"    ✓ Upload successful in {upload_time:.1f}s")
-                print(f"    Generated CDN URL: {full_url}")
-                
-                # Analyze URL structure
-                if '_ENC(' in full_url:
-                    print(f"    ✓ URL uses _ENC format (matches Data Upload)")
-                    url_structure_match = True
-                else:
-                    print(f"    ⚠ URL does NOT use _ENC format")
-                    url_structure_match = False
+                full_url = f"{args.get_cdn}{relative_cdn_url}"
+                print(f"    ✓ Uploaded: {full_url}")
                 
                 return {
                     'url': full_url,
+                    'size_bytes': file_size,
+                    'size_mb': size_mb,
+                    'description': description,
+                    'file_tag': file_tag,
                     'cdn_filename': cdn_filename,
-                    'size_kb': size_kb,
-                    'upload_time': upload_time,
-                    'relative_url': relative_cdn_url,
-                    'url_structure_match': url_structure_match,
-                    'response': response_json
+                    'timestamp': timestamp
                 }
                 
             except subprocess.CalledProcessError as e:
-                print(f"    ✗ Upload failed with exit code {e.returncode}")
-                print(f"    Error: {e.stderr[:200]}")
+                print(f"    ✗ Upload failed: {e.stderr[:200]}")
                 return None
             except Exception as e:
-                print(f"    ✗ Unexpected error: {str(e)}")
+                print(f"    ✗ Error: {str(e)[:200]}")
                 return None
         
         # ============================================================================
-        # Step 2: Verify upload by downloading the model back
+        # 1. Upload trained model (.pt file)
         # ============================================================================
-        
-        def verify_model_download(model_url):
-          
-            
-            print(f"\\nVerifying upload by downloading model...")
-            
-            if not model_url:
-                print(f"  ✗ No URL to verify")
-                return {'success': False, 'error': 'No URL'}
-            
-            # Create temporary download path
-            temp_download_path = f"/tmp/verify_model_{uuid.uuid4().hex[:8]}.pth"
-            
-            print(f"  Download URL: {model_url[:100]}..." if len(model_url) > 100 else f"  Download URL: {model_url}")
-            print(f"  Temp path: {temp_download_path}")
-            
-            curl_command = [
-                "curl",
-                "--location", model_url,
-                "--header", f"Authorization: Bearer {bearer_token}",
-                "--output", temp_download_path,
-                "--fail",
-                "--show-error",
-                "--connect-timeout", "30",
-                "--max-time", "300",
-                "--silent"
-            ]
-            
-            try:
-                print(f"  Executing download verification...")
-                start_time = time.time()
-                
-                process = subprocess.run(
-                    curl_command,
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                
-                download_time = time.time() - start_time
-                
-                if not os.path.exists(temp_download_path):
-                    print(f"    ✗ Download file not created")
-                    return {'success': False, 'error': 'File not created'}
-                
-                downloaded_size = os.path.getsize(temp_download_path)
-                original_size = os.path.getsize(args.trained_model)
-                
-                print(f"    ✓ Download successful in {download_time:.1f}s")
-                print(f"    Original size: {original_size:,} bytes")
-                print(f"    Downloaded size: {downloaded_size:,} bytes")
-                
-                if downloaded_size == original_size:
-                    print(f"    ✓ Size matches: YES")
-                    
-                    # Quick content verification - compare first 1KB
-                    with open(args.trained_model, 'rb') as f1, open(temp_download_path, 'rb') as f2:
-                        original_start = f1.read(1024)
-                        downloaded_start = f2.read(1024)
-                    
-                    if original_start == downloaded_start:
-                        print(f"    ✓ Content verification: PASS (first 1KB matches)")
-                        content_match = True
-                    else:
-                        print(f"    ⚠ Content verification: FIRST 1KB DIFFERS")
-                        content_match = False
-                    
-                    # Clean up temp file
-                    try:
-                        os.remove(temp_download_path)
-                        print(f"    ✓ Cleaned up temp file")
-                    except:
-                        pass
-                    
-                    return {
-                        'success': True,
-                        'download_time': download_time,
-                        'size_match': True,
-                        'content_match': content_match,
-                        'original_size': original_size,
-                        'downloaded_size': downloaded_size
-                    }
-                else:
-                    print(f"    ✗ Size mismatch: expected {original_size:,}, got {downloaded_size:,}")
-                    return {
-                        'success': False,
-                        'error': f'Size mismatch: {original_size} vs {downloaded_size}',
-                        'original_size': original_size,
-                        'downloaded_size': downloaded_size
-                    }
-                
-            except subprocess.CalledProcessError as e:
-                print(f"    ✗ Download verification failed")
-                print(f"    Error: {e.stderr[:200]}")
-                return {'success': False, 'error': f'Download failed: {e.stderr[:100]}'}
-            except Exception as e:
-                print(f"    ✗ Verification error: {str(e)}")
-                return {'success': False, 'error': str(e)}
-        
-        # ============================================================================
-        # Main execution flow
-        # ============================================================================
-        
-        # Step 1: Upload model
-        upload_result = upload_model_to_cdn()
-        
-        if not upload_result:
-            print(f"\\n✗ Model upload failed!")
-            
-            # Create error status
-            error_status = {
-                'success': False,
-                'error': 'Upload failed',
-                'timestamp': datetime.now().isoformat(),
-                'model_id': args.model_id,
-                'model_name': args.model_name,
-                'execution_id': args.execution_id
-            }
-            
-            with open(args.upload_status, 'w') as f:
-                json.dump(error_status, f, indent=2)
-            
-            # Write empty URL file
-            with open(args.model_cdn_url, 'w') as f:
-                f.write("")
-            
-            # Write verification status
-            with open(args.verification_status, 'w') as f:
-                json.dump({'verified': False, 'error': 'Upload failed'}, f, indent=2)
-            
-            sys.exit(1)
-        
-        # Step 2: Verify download
-        verification_result = verify_model_download(upload_result['url'])
-        
-        # ============================================================================
-        # Save outputs
-        # ============================================================================
-        print(f"\\nSaving outputs...")
-        
-        try:
-            # 1. Save CDN URL
-            with open(args.model_cdn_url, 'w') as f:
-                f.write(upload_result['url'])
-            print(f"✓ Model CDN URL saved: {args.model_cdn_url}")
-            
-            # 2. Create upload status with detailed info
-            upload_status_data = {
-                'success': True,
-                'model_url': upload_result['url'],
-                'cdn_filename': upload_result['cdn_filename'],
-                'model_id': args.model_id,
-                'model_name': args.model_name,
-                'execution_id': args.execution_id,
-                'size_kb': upload_result['size_kb'],
-                'upload_time_seconds': upload_result['upload_time'],
-                'upload_timestamp': datetime.now().isoformat(),
-                'url_structure': {
-                    'full_url': upload_result['url'],
-                    'relative_url': upload_result['relative_url'],
-                    'uses_enc_format': '_ENC(' in upload_result['url'],
-                    'cdn_filename_pattern': 'Matches Data Upload brick',
-                    'expected_download_pattern': 'Can be downloaded with bearer token'
-                },
-                'verification': verification_result,
-                'download_instructions': {
-                    'method': 'curl_with_bearer_token',
-                    'example': f'curl -H "Authorization: Bearer [TOKEN]" -o model.pth "{upload_result["url"]}"'
-                }
-            }
-            
-            with open(args.upload_status, 'w') as f:
-                json.dump(upload_status_data, f, indent=2)
-            print(f"✓ Upload status saved: {args.upload_status}")
-            
-            # 3. Save verification status separately
-            verification_status_data = {
-                'verified': verification_result.get('success', False),
-                'verification_timestamp': datetime.now().isoformat(),
-                'model_url': upload_result['url'],
-                'verification_details': verification_result,
-                'verification_summary': 'Download test completed successfully' if verification_result.get('success') else 'Download test failed',
-                'next_step': 'Use model_cdn_url with bearer token for downloading'
-            }
-            
-            with open(args.verification_status, 'w') as f:
-                json.dump(verification_status_data, f, indent=2)
-            print(f"✓ Verification status saved: {args.verification_status}")
-            
-        except Exception as e:
-            print(f"✗ Error saving outputs: {e}")
-            sys.exit(1)
-        
-        # ============================================================================
-        # Final summary
-        # ============================================================================
-        print(f"\\n" + "=" * 80)
-        print("MODEL UPLOAD COMPLETE")
+        print("\\n" + "=" * 80)
+        print("UPLOADING TRAINED MODEL")
         print("=" * 80)
         
-        print(f"\\nUpload Summary:")
-        print(f"  Model: {args.model_name} (ID: {args.model_id})")
-        print(f"  Execution: {args.execution_id}")
-        print(f"  File Size: {upload_result['size_kb']:.1f} KB")
-        print(f"  Upload Time: {upload_result['upload_time']:.1f}s")
+        model_result = upload_file_to_cdn(
+            args.trained_model, 
+            "Trained DCGAN model", 
+            "trained",
+            ".pt"
+        )
         
-        print(f"\\nURL Details:")
-        print(f"  CDN URL: {upload_result['url'][:100]}..." if len(upload_result['url']) > 100 else f"  CDN URL: {upload_result['url']}")
+        if not model_result:
+            print("✗ CRITICAL: Failed to upload model file!")
+            sys.exit(1)
         
-        if '_ENC(' in upload_result['url']:
-            print(f"  URL Format: _ENC format (matches data uploads)")
+        # Save model URL
+        with open(args.trained_model_url, 'w') as f:
+            f.write(model_result['url'])
+        print(f"✓ Model URL saved: {args.trained_model_url}")
+        
+        # ============================================================================
+        # 2. Create and upload model metadata
+        # ============================================================================
+        print("\\nCreating model metadata...")
+        
+        model_metadata = {
+            'model_info': model_info,
+            'upload_info': {
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'cdn_filename': model_result['cdn_filename'],
+                'file_size_bytes': model_result['size_bytes'],
+                'file_size_mb': model_result['size_mb']
+            },
+            'urls': {
+                'model_url': model_result['url']
+            },
+            'training_info': {
+                'source_model': os.path.basename(args.trained_model),
+                'upload_time': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+        }
+        
+        # Save metadata locally
+        metadata_path = "/tmp/model_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(model_metadata, f, indent=2)
+        
+        # Upload metadata
+        metadata_result = upload_file_to_cdn(
+            metadata_path,
+            "Model metadata",
+            "metadata",
+            ".json"
+        )
+        
+        if metadata_result:
+            with open(args.model_metadata_url, 'w') as f:
+                f.write(metadata_result['url'])
+            print(f"✓ Model metadata URL saved: {args.model_metadata_url}")
+            
+            # Add metadata URL to metadata
+            model_metadata['urls']['metadata_url'] = metadata_result['url']
+            with open(metadata_path, 'w') as f:
+                json.dump(model_metadata, f, indent=2)
         else:
-            print(f"  URL Format: Direct format (differs from data uploads)")
+            print("⚠ Warning: Failed to upload metadata")
         
-        print(f"\\nVerification Results:")
-        if verification_result.get('success'):
-            print(f"  ✓ Download verification: PASSED")
-            print(f"     Size match: {verification_result.get('size_match', 'N/A')}")
-            print(f"     Content match: {verification_result.get('content_match', 'N/A')}")
-            print(f"     Download time: {verification_result.get('download_time', 0):.1f}s")
+        # ============================================================================
+        # 3. Create and upload upload summary
+        # ============================================================================
+        print("\\nCreating upload summary...")
+        
+        upload_summary_data = {
+            'pipeline_stage': 'model_upload',
+            'upload_complete': model_result is not None,
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'files': {
+                'trained_model': {
+                    'uploaded': model_result is not None,
+                    'url': model_result['url'] if model_result else None,
+                    'size_mb': model_result['size_mb'] if model_result else 0,
+                    'cdn_filename': model_result['cdn_filename'] if model_result else None
+                },
+                'model_metadata': {
+                    'uploaded': metadata_result is not None,
+                    'url': metadata_result['url'] if metadata_result else None
+                }
+            },
+            'model_info': model_info,
+            'cdn_info': {
+                'domain': args.domain,
+                'cdn_base': args.get_cdn
+            }
+        }
+        
+        # Save summary locally
+        summary_path = "/tmp/model_upload_summary.json"
+        with open(summary_path, 'w') as f:
+            json.dump(upload_summary_data, f, indent=2)
+        
+        # Upload summary
+        summary_result = upload_file_to_cdn(
+            summary_path,
+            "Model upload summary",
+            "upload_summary",
+            ".json"
+        )
+        
+        if summary_result:
+            with open(args.upload_summary_url, 'w') as f:
+                f.write(summary_result['url'])
+            print(f"✓ Upload summary URL saved: {args.upload_summary_url}")
         else:
-            print(f"  ✗ Download verification: FAILED")
-            print(f"     Error: {verification_result.get('error', 'Unknown error')}")
+            print("⚠ Warning: Failed to upload summary")
         
-        print(f"\\nUsage Instructions:")
-        print(f"  1. Use model_cdn_url output for model storage reference")
-        print(f"  2. Download with: curl -H 'Authorization: Bearer [TOKEN]' -o model.pth '[URL]'")
-        print(f"  3. Check upload_status.json for detailed information")
+        # ============================================================================
+        # 4. Create upload completion status
+        # ============================================================================
+        print("\\nCreating upload completion status...")
         
-        if not verification_result.get('success'):
-            print(f"\\n⚠ WARNING: Download verification failed!")
-            print(f"  The URL may not be accessible for download.")
-            print(f"  Check the verification_status.json for details.")
-
+        completion_status = {
+            'status': 'success' if model_result else 'failed',
+            'message': 'Model uploaded successfully' if model_result else 'Model upload failed',
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'model_url': model_result['url'] if model_result else None,
+            'has_metadata': metadata_result is not None,
+            'has_summary': summary_result is not None
+        }
+        
+        with open(args.upload_complete, 'w') as f:
+            json.dump(completion_status, f, indent=2)
+        
+        print(f"✓ Upload completion status saved: {args.upload_complete}")
+        
+        # ============================================================================
+        # Final verification
+        # ============================================================================
+        print("\\n" + "=" * 80)
+        print("FINAL VERIFICATION")
+        print("=" * 80)
+        
+        # Verify URLs are saved
+        url_files = [
+            (args.trained_model_url, 'trained_model_url'),
+            (args.model_metadata_url, 'model_metadata_url'),
+            (args.upload_summary_url, 'upload_summary_url')
+        ]
+        
+        url_count = 0
+        for url_path, name in url_files:
+            if os.path.exists(url_path):
+                with open(url_path, 'r') as f:
+                    url = f.read().strip()
+                if url and url.startswith('http'):
+                    url_count += 1
+                    print(f"✓ {name}: URL saved")
+                    print(f"  {url}...")
+                else:
+                    print(f"⚠ {name}: Invalid URL")
+            else:
+                print(f"✗ {name}: File not created")
+        
+        print(f"\\nURLs saved: {url_count}/{len(url_files)}")
+        
+        if model_result:
+            print("\\n" + "=" * 80)
+            print("✅ MODEL UPLOAD COMPLETE")
+            print("=" * 80)
+            print(f"Model URL: {model_result['url']}")
+            print(f"Model size: {model_result['size_mb']:.2f} MB")
+            print(f"CDN filename: {model_result['cdn_filename']}")
+            
+            if metadata_result:
+                print(f"Metadata URL: {metadata_result['url']}")
+            
+            if summary_result:
+                print(f"Summary URL: {summary_result['url']}")
+        else:
+            print("\\n✗ MODEL UPLOAD FAILED")
+            sys.exit(1)
+        
     args:
       # Inputs
       - --trained_model
       - {inputPath: trained_model}
       - --bearer_token
-      - {inputPath: bearer_token}
+      - {inputValue: bearer_token}
       - --domain
       - {inputValue: domain}
       - --get_cdn
       - {inputValue: get_cdn}
-      - --model_id
-      - {inputValue: model_id}
-      - --execution_id
-      - {inputValue: execution_id}
-      - --model_name
-      - {inputValue: model_name}
       
       # Outputs
-      - --model_cdn_url
-      - {outputPath: model_cdn_url}
-      - --upload_status
-      - {outputPath: upload_status}
-      - --verification_status
-      - {outputPath: verification_status}
+      - --trained_model_url
+      - {outputPath: trained_model_url}
+      - --upload_summary_url
+      - {outputPath: upload_summary_url}
+      - --model_metadata_url
+      - {outputPath: model_metadata_url}
+      - --upload_complete
+      - {outputPath: upload_complete}
