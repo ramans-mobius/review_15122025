@@ -1,4 +1,4 @@
-name: Upload Training Metrics To Schema v3
+name: Upload Training Metrics To Schema v4
 description: Uploads DCGAN training metrics to training schema with full data printing
 inputs:
   # Training outputs from Train DCGAN brick
@@ -342,7 +342,7 @@ implementation:
         # Schema upload function with FULL RESPONSE DISPLAY
         # ============================================================================
         def upload_to_schema(schema_entry, epoch_num):
-            """Upload to schema and return full response"""
+         
             
             schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create"
             
@@ -664,11 +664,11 @@ implementation:
         
         print("\\n" + "=" * 80)
         if successful_uploads == epochs_completed and epochs_completed > 0:
-            print("✅ ALL TRAINING METRICS UPLOADED SUCCESSFULLY!")
+            print(" ALL TRAINING METRICS UPLOADED SUCCESSFULLY!")
         elif successful_uploads > 0:
             print(f"⚠ PARTIAL SUCCESS: {successful_uploads}/{epochs_completed} epochs uploaded")
         else:
-            print("❌ NO METRICS WERE UPLOADED SUCCESSFULLY")
+            print(" NO METRICS WERE UPLOADED SUCCESSFULLY")
             sys.exit(1)
         print("=" * 80)
 
