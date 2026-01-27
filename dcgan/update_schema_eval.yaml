@@ -1,5 +1,5 @@
-name: Upload Evaluation Metrics To Schema v3
-description: Uploads FID, SSIM, PSNR scores to performance matrix schema
+name: Upload Evaluation Metrics To Schema v4
+description: Uploads FID, SSIM, PSNR scores to performance matrix schema with debug logging
 inputs:
   # Evaluation outputs from Evaluate DCGAN brick
   - name: evaluation_metrics
@@ -62,6 +62,7 @@ implementation:
         import time
         import numpy as np
         from datetime import datetime
+        import traceback
         
         parser = argparse.ArgumentParser()
         
@@ -85,8 +86,108 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD EVALUATION METRICS TO SCHEMA v1")
+        print("UPLOAD EVALUATION METRICS TO SCHEMA v4 - DEBUG VERSION")
         print("=" * 80)
+        
+        # ============================================================================
+        # DEBUG: PRINT ALL INPUTS WITH DETAILED INFORMATION
+        # ============================================================================
+        
+        def print_all_inputs_debug():
+            print("\\n" + "="*80)
+            print("DEBUG: ALL INPUT VALUES AND TYPES")
+            print("="*80)
+            
+            print("\\n1. FILE PATHS:")
+            print("-" * 60)
+            print(f"  evaluation_metrics:")
+            print(f"    Value: '{args.evaluation_metrics}'")
+            print(f"    Exists: {os.path.exists(args.evaluation_metrics)}")
+            if os.path.exists(args.evaluation_metrics):
+                size = os.path.getsize(args.evaluation_metrics)
+                print(f"    Size: {size:,} bytes")
+            
+            print("\\n2. STRING PARAMETERS (RAW VALUES):")
+            print("-" * 60)
+            
+            string_params = [
+                ('schema_id', args.schema_id),
+                ('bearer_token', args.bearer_token),
+                ('model_id', args.model_id),
+                ('execution_id', args.execution_id),
+                ('tenant_id', args.tenant_id),
+                ('project_id', args.project_id),
+                ('model_name', args.model_name),
+                ('model_type', args.model_type)
+            ]
+            
+            for name, value in string_params:
+                print(f"  {name}:")
+                if value is None:
+                    print(f"    Value: None")
+                else:
+                    # Show raw string with special characters
+                    raw_repr = repr(value)
+                    if len(raw_repr) > 100:
+                        print(f"    Raw (repr): {raw_repr[:100]}...")
+                    else:
+                        print(f"    Raw (repr): {raw_repr}")
+                    
+                    print(f"    Length: {len(value)}")
+                    
+                    # Show if it has newlines
+                    if '\\n' in raw_repr:
+                        print(f"    WARNING: Contains newline character!")
+                    
+                    # Show cleaned version
+                    cleaned = value.strip().replace('\\n', '').replace('\\r', '')
+                    if cleaned != value:
+                        print(f"    Cleaned: '{cleaned}'")
+            
+            print("\\n3. OUTPUT PATHS:")
+            print("-" * 60)
+            print(f"  upload_status: '{args.upload_status}'")
+            print(f"  schema_response: '{args.schema_response}'")
+            
+            # Check output directories
+            for path in [args.upload_status, args.schema_response]:
+                if path:
+                    dir_path = os.path.dirname(path)
+                    print(f"  Directory for {os.path.basename(path)}: '{dir_path}'")
+                    print(f"    Exists: {os.path.exists(dir_path) if dir_path else 'N/A'}")
+            
+            print("="*80)
+        
+        # Print all inputs
+        print_all_inputs_debug()
+        
+        # ============================================================================
+        # DOMAIN CLEANING UTILITY
+        # ============================================================================
+        
+        def clean_domain_string(domain_str):
+           
+            if not domain_str:
+                return ""
+            
+            # Remove ALL whitespace (newlines, spaces, tabs)
+            cleaned = ''.join(domain_str.split())
+            
+            # Ensure it starts with https://
+            if not cleaned.startswith(('http://', 'https://')):
+                cleaned = 'https://' + cleaned
+            
+            # Remove trailing slash
+            cleaned = cleaned.rstrip('/')
+            
+            return cleaned
+        
+        # Define base domain
+        BASE_DOMAIN = "https://igs.gov-cloud.ai"
+        
+        # ============================================================================
+        # MAIN CODE
+        # ============================================================================
         
         # Create output directories
         print("\\nCreating output directories...")
@@ -105,148 +206,238 @@ implementation:
         
         # Parse inputs
         bearer_token = args.bearer_token.strip()
-        print(f"Bearer token length: {len(bearer_token)} chars")
+        print(f"\\nBearer token info:")
+        print(f"  Raw length: {len(args.bearer_token)}")
+        print(f"  Stripped length: {len(bearer_token)}")
+        print(f"  Starts with 'ey' (JWT)?: {bearer_token.startswith('ey')}")
+        print(f"  Preview: {bearer_token[:50]}...")
         
         try:
             execution_id = int(args.execution_id)
-            print(f"✓ Execution ID: {execution_id} (type: number)")
-        except ValueError:
-            print(f"ERROR: execution_id must be an integer. Got: {args.execution_id}")
+            print(f"✓ Execution ID: {execution_id} (type: int)")
+        except ValueError as e:
+            print(f"✗ ERROR: execution_id must be an integer. Got: '{args.execution_id}'")
+            print(f"  Error: {e}")
             sys.exit(1)
         
         current_timestamp = int(time.time())
         
-        print(f"\\nParameters:")
-        print(f"  Schema ID: {args.schema_id}")
-        print(f"  Model ID: {args.model_id}")
-        print(f"  Model Name: {args.model_name}")
-        print(f"  Model Type: {args.model_type}")
-        print(f"  Execution ID: {execution_id}")
-        print(f"  Tenant ID: {args.tenant_id}")
-        print(f"  Project ID: {args.project_id}")
+        print(f"\\nParameters Summary:")
+        print(f"  Schema ID: '{args.schema_id}'")
+        print(f"  Model ID: '{args.model_id}'")
+        print(f"  Model Name: '{args.model_name}'")
+        print(f"  Model Type: '{args.model_type}'")
+        print(f"  Execution ID: {execution_id} (int)")
+        print(f"  Tenant ID: '{args.tenant_id}'")
+        print(f"  Project ID: '{args.project_id}'")
         print(f"  Timestamp: {current_timestamp}")
         
         # Load evaluation data
-        print(f"\\nLoading evaluation data...")
+        print(f"\\n" + "=" * 60)
+        print("LOADING EVALUATION DATA")
+        print("=" * 60)
         
         try:
+            print(f"Loading from: {args.evaluation_metrics}")
             with open(args.evaluation_metrics, 'r') as f:
                 eval_metrics = json.load(f)
             print(f"✓ Loaded evaluation metrics")
             
+            # Debug: show all keys in evaluation metrics
+            print(f"\\nEvaluation metrics keys ({len(eval_metrics)}):")
+            for i, key in enumerate(eval_metrics.keys()):
+                if i < 20:  # Show first 20 keys
+                    value = eval_metrics[key]
+                    if isinstance(value, (int, float)):
+                        print(f"  {key}: {value} (type: {type(value).__name__})")
+                    elif isinstance(value, (str, bool)):
+                        print(f"  {key}: '{value}' (type: {type(value).__name__})")
+                    else:
+                        print(f"  {key}: {type(value).__name__}")
+            
         except Exception as e:
-            print(f"ERROR loading evaluation data: {e}")
-            import traceback
+            print(f"✗ ERROR loading evaluation data: {e}")
             traceback.print_exc()
             sys.exit(1)
         
-        # Extract FID, SSIM, PSNR values
-        print(f"\\nExtracting FID, SSIM, PSNR values...")
+        # Extract FID, SSIM, PSNR values with type checking
+        print(f"\\n" + "=" * 60)
+        print("EXTRACTING METRICS")
+        print("=" * 60)
         
         fid_value = 0.0
         ssim_value = 0.0
         psnr_value = 0.0
         mse_value = 0.0
         
-        fid_keys = ['fid', 'fid_score', 'FID', 'fid_value']
+        # FID extraction with type validation
+        fid_keys = ['fid', 'fid_score', 'FID', 'fid_value', 'frechet_inception_distance']
         for key in fid_keys:
             if key in eval_metrics:
-                fid_value = float(eval_metrics[key])
-                print(f"✓ Found FID: {key} = {fid_value}")
-                break
+                try:
+                    fid_value = float(eval_metrics[key])
+                    print(f"✓ Found FID: '{key}' = {fid_value} (type: {type(eval_metrics[key]).__name__})")
+                    break
+                except (ValueError, TypeError) as e:
+                    print(f"✗ ERROR: Could not convert FID '{key}' to float. Value: {eval_metrics[key]}, Type: {type(eval_metrics[key]).__name__}")
         
-        ssim_keys = ['ssim', 'ssim_mean', 'SSIM', 'ssim_value']
+        # SSIM extraction with type validation
+        ssim_keys = ['ssim', 'ssim_mean', 'SSIM', 'ssim_value', 'structural_similarity']
         for key in ssim_keys:
             if key in eval_metrics:
-                ssim_value = float(eval_metrics[key])
-                print(f"✓ Found SSIM: {key} = {ssim_value}")
-                break
+                try:
+                    ssim_value = float(eval_metrics[key])
+                    print(f"✓ Found SSIM: '{key}' = {ssim_value} (type: {type(eval_metrics[key]).__name__})")
+                    break
+                except (ValueError, TypeError) as e:
+                    print(f"✗ ERROR: Could not convert SSIM '{key}' to float. Value: {eval_metrics[key]}, Type: {type(eval_metrics[key]).__name__}")
         
-        psnr_keys = ['psnr', 'psnr_mean', 'PSNR', 'psnr_value']
+        # PSNR extraction with type validation
+        psnr_keys = ['psnr', 'psnr_mean', 'PSNR', 'psnr_value', 'peak_signal_noise_ratio']
         for key in psnr_keys:
             if key in eval_metrics:
-                psnr_value = float(eval_metrics[key])
-                print(f"✓ Found PSNR: {key} = {psnr_value}")
-                break
+                try:
+                    psnr_value = float(eval_metrics[key])
+                    print(f"✓ Found PSNR: '{key}' = {psnr_value} (type: {type(eval_metrics[key]).__name__})")
+                    break
+                except (ValueError, TypeError) as e:
+                    print(f"✗ ERROR: Could not convert PSNR '{key}' to float. Value: {eval_metrics[key]}, Type: {type(eval_metrics[key]).__name__}")
         
-        if 'mse' in eval_metrics:
-            mse_value = float(eval_metrics['mse'])
-            print(f"✓ Found MSE: {mse_value}")
+        # MSE extraction
+        mse_keys = ['mse', 'mean_squared_error', 'MSE']
+        for key in mse_keys:
+            if key in eval_metrics:
+                try:
+                    mse_value = float(eval_metrics[key])
+                    print(f"✓ Found MSE: '{key}' = {mse_value} (type: {type(eval_metrics[key]).__name__})")
+                    break
+                except (ValueError, TypeError) as e:
+                    print(f"✗ ERROR: Could not convert MSE '{key}' to float. Value: {eval_metrics[key]}, Type: {type(eval_metrics[key]).__name__}")
         
         algorithm = eval_metrics.get('algorithm', 'unknown')
         
         print(f"\\nExtracted values:")
-        print(f"  FID: {fid_value}")
-        print(f"  SSIM: {ssim_value}")
-        print(f"  PSNR: {psnr_value}")
+        print(f"  FID: {fid_value:.2f} (type: {type(fid_value).__name__})")
+        print(f"  SSIM: {ssim_value:.4f} (type: {type(ssim_value).__name__})")
+        print(f"  PSNR: {psnr_value:.2f} dB (type: {type(psnr_value).__name__})")
         if mse_value > 0:
-            print(f"  MSE: {mse_value}")
+            print(f"  MSE: {mse_value:.6f} (type: {type(mse_value).__name__})")
         
-        # Create schema entry with correct data types
-        print(f"\\nCreating schema entry...")
+        # Create schema entry with CORRECT data types
+        print(f"\\n" + "=" * 60)
+        print("CREATING SCHEMA ENTRY")
+        print("=" * 60)
+        
+        # Calculate derived values
+        if mse_value <= 0 and psnr_value > 0:
+            mse_value = 10 ** (-psnr_value / 10)
+        
+        rmse_value = np.sqrt(mse_value) if mse_value > 0 else 0.0
         
         schema_entry = {
+            # REQUIRED FIELDS (must match schema exactly)
             'tenant_id': str(args.tenant_id),  # string
             'model_id': str(args.model_id),  # string
-            'execution_id': int(execution_id),  # number
-            'projectId': str(args.project_id),  # string (capital I)
-            'timestamp': int(current_timestamp),  # number
+            'execution_id': int(execution_id),  # integer
+            'projectId': str(args.project_id),  # string (note capital I)
+            'timestamp': int(current_timestamp),  # integer
             
+            # MODEL INFO
             'model_name': str(args.model_name),  # string
             'model_type': str(args.model_type),  # string
             
-            # Direct metric mappings
+            # DIRECT METRICS
             'fid': float(fid_value),  # float
             'ssim': float(ssim_value),  # float
             'psnr': float(psnr_value),  # float
-            'mse': float(mse_value if mse_value > 0 else 10 ** (-psnr_value / 10) if psnr_value > 0 else 0.0),  # float
+            'mse': float(mse_value),  # float
             
-            # Mapped fields
-            'loss': float(fid_value),  # float
-            'accuracy': float(ssim_value),  # float
-            'precision_score': float(psnr_value),  # float
-            'r2_score': float(ssim_value),  # float
-            'rmse_score': float(np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else 0.0),  # float
-            'rmse': str(np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else "0.0"),  # string
+            # MAPPED FIELDS (GAN metrics to generic ML metrics)
+            'loss': float(fid_value),  # float (FID as loss)
+            'accuracy': float(ssim_value),  # float (SSIM as accuracy)
+            'precision_score': float(psnr_value),  # float (PSNR as precision)
+            'r2_score': float(ssim_value),  # float (SSIM as R²)
+            'rmse_score': float(rmse_value),  # float
+            'rmse': str(rmse_value),  # string (schema might expect string)
             
-            # Default values for unused fields
+            # DEFAULT VALUES FOR UNUSED FIELDS
             'roc_auc': int(0),  # integer
-            'confusion_matrix': [],  # array
+            'confusion_matrix': [],  # list
             'recall': float(0.0),  # float
-            'f1_score': float(0.0)  # float
+            'f1_score': float(0.0),  # float
+            
+            # ADDITIONAL FIELDS THAT MIGHT BE EXPECTED
+            'algorithm': str(algorithm),  # string
+            'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # string
+            'created_by': 'DCGAN Pipeline'  # string
         }
         
-        print(f"\\nSchema entry prepared ({len(schema_entry)} fields):")
+        # Print schema entry with detailed type information
+        print(f"\\nSchema entry ({len(schema_entry)} fields):")
+        print("-" * 60)
         for key, value in schema_entry.items():
-            print(f"  {key}: {value} (type: {type(value).__name__})")
+            value_type = type(value).__name__
+            if isinstance(value, str):
+                print(f"  {key}: '{value[:50]}...' (type: {value_type}, length: {len(value)})")
+            elif isinstance(value, (int, float)):
+                print(f"  {key}: {value} (type: {value_type})")
+            elif isinstance(value, list):
+                print(f"  {key}: {value} (type: {value_type}, length: {len(value)})")
+            else:
+                print(f"  {key}: {value} (type: {value_type})")
+        print("-" * 60)
         
-        # Schema upload function
+        # ============================================================================
+        # SCHEMA UPLOAD FUNCTION WITH COMPLETE DEBUGGING
+        # ============================================================================
+        
         def upload_to_schema(schema_data):
+          
+            
+            print(f"\\n" + "=" * 80)
+            print("UPLOADING TO SCHEMA API")
+            print("=" * 80)
+            
             # Try multiple endpoint formats
             endpoints = [
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/create"
+                f"{BASE_DOMAIN}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
+                f"{BASE_DOMAIN}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+                f"{BASE_DOMAIN}/pi-entity-instances-service/schemas/{args.schema_id}/instances/create",
+                f"{BASE_DOMAIN}/pi-entity-instances-service/schemas/{args.schema_id}/instances"
             ]
             
             for endpoint_idx, schema_url in enumerate(endpoints):
-                print(f"\\nTrying endpoint {endpoint_idx + 1}: {schema_url}")
+                print(f"\\nATTEMPT {endpoint_idx + 1}/{len(endpoints)}")
+                print(f"URL: {schema_url}")
+                
+                # Create a temporary file with the schema data for debugging
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                    json.dump(schema_data, tmp, indent=2)
+                    temp_file = tmp.name
                 
                 try:
+                    print(f"\\nCURL COMMAND (token hidden):")
+                    print(f"  curl --location '{schema_url}' \\")
+                    print(f"    --header 'Authorization: Bearer ***' \\")
+                    print(f"    --header 'Content-Type: application/json' \\")
+                    print(f"    --data @{temp_file}")
+                    
+                    # Build curl command
                     curl_command = [
                         "curl",
                         "--location", schema_url,
                         "--header", f"Authorization: Bearer {bearer_token}",
                         "--header", "Content-Type: application/json",
                         "--data", json.dumps(schema_data),
+                        "--verbose",  # Added verbose for debugging
                         "--fail",
                         "--show-error",
                         "--connect-timeout", "30",
-                        "--max-time", "60"
+                        "--max-time", "120"
                     ]
                     
-                    print(f"    Executing curl command...")
-                    
+                    print(f"\\nEXECUTING CURL...")
                     process = subprocess.run(
                         curl_command,
                         capture_output=True,
@@ -254,67 +445,137 @@ implementation:
                         check=False
                     )
                     
-                    print(f"    Curl exit code: {process.returncode}")
+                    print(f"\\nCURL RESULTS:")
+                    print(f"Exit code: {process.returncode}")
+                    
+                    # Parse verbose output
+                    if process.stderr:
+                        print(f"\\nVERBOSE OUTPUT (first 500 chars):")
+                        print("-" * 60)
+                        verbose_lines = process.stderr.split('\\n')
+                        for line in verbose_lines:
+                            if line.startswith('>') or line.startswith('<') or 'HTTP/' in line:
+                                print(f"  {line[:200]}")
+                        print("-" * 60)
+                    
+                    if process.stdout:
+                        print(f"\\nRESPONSE BODY ({len(process.stdout)} chars):")
+                        print("-" * 60)
+                        if len(process.stdout) > 1000:
+                            print(process.stdout[:1000])
+                            print(f"... [{len(process.stdout) - 1000} more characters]")
+                        else:
+                            print(process.stdout)
+                        print("-" * 60)
                     
                     if process.returncode == 0:
-                        print(f"    ✓ Upload successful")
-                        
-                        # Print full response
-                        print(f"    Full response:")
-                        print("-" * 40)
-                        print(process.stdout)
-                        print("-" * 40)
+                        print(f"\\n✓ UPLOAD SUCCESSFUL!")
                         
                         try:
                             response_data = json.loads(process.stdout)
+                            print(f"Response parsed as JSON:")
+                            print(f"  Keys: {list(response_data.keys())}")
                             return True, response_data, None
-                        except json.JSONDecodeError:
+                        except json.JSONDecodeError as e:
+                            print(f"⚠ Response not valid JSON: {e}")
                             return True, {"raw_response": process.stdout}, None
+                            
                     else:
-                        print(f"    ✗ Upload failed (exit code: {process.returncode})")
-                        print(f"    Stderr: {process.stderr[:200]}")
-                        print(f"    Stdout: {process.stdout[:200]}")
+                        print(f"\\n✗ UPLOAD FAILED (exit code: {process.returncode})")
                         
+                        # Check for common error patterns
                         if "404" in process.stderr or "404" in process.stdout:
-                            print(f"    Endpoint not found, trying next...")
-                            continue
+                            print(f"ERROR: Endpoint not found (404)")
+                            print(f"  This means:")
+                            print(f"    1. Schema ID '{args.schema_id}' doesn't exist")
+                            print(f"    2. URL path is incorrect")
+                            print(f"    3. Service is not running at {BASE_DOMAIN}")
+                        elif "401" in process.stderr or "403" in process.stderr:
+                            print(f"ERROR: Authentication failed (401/403)")
+                            print(f"  Bearer token might be invalid or expired")
+                        elif "400" in process.stderr:
+                            print(f"ERROR: Bad Request (400)")
+                            print(f"  Schema validation failed - check field names and data types")
+                            
+                            # Try to parse validation errors
+                            if process.stdout:
+                                try:
+                                    error_json = json.loads(process.stdout)
+                                    if 'errors' in error_json or 'message' in error_json:
+                                        print(f"\\nVALIDATION ERRORS:")
+                                        print(json.dumps(error_json, indent=2))
+                                except:
+                                    pass
                         
-                        return False, {"error": process.stderr[:200]}, process.stderr[:500]
+                        print(f"Trying next endpoint...")
+                        continue
                         
                 except Exception as e:
-                    print(f"    ✗ Exception: {str(e)}")
+                    print(f"✗ Exception during upload: {e}")
+                    traceback.print_exc()
+                finally:
+                    # Clean up temp file
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
             
+            print(f"\\n✗ ALL UPLOAD ATTEMPTS FAILED")
             return False, {"error": "All endpoints failed"}, None
         
-        # Upload to schema
-        print(f"\\n" + "=" * 80)
-        print("UPLOADING TO SCHEMA")
-        print("=" * 80)
+        # ============================================================================
+        # UPLOAD TO SCHEMA
+        # ============================================================================
         
         success, response, error = upload_to_schema(schema_entry)
         
-        # Save outputs
-        print(f"\\nSaving outputs...")
+        # ============================================================================
+        # SAVE OUTPUTS
+        # ============================================================================
+        
+        print(f"\\n" + "=" * 80)
+        print("SAVING OUTPUTS")
+        print("=" * 80)
         
         try:
             # Save upload status
             upload_status_data = {
                 'success': success,
                 'timestamp': current_timestamp,
-                'model_id': args.model_id,
-                'model_name': args.model_name,
-                'execution_id': execution_id,
-                'schema_id': args.schema_id,
-                'metrics_uploaded': {
-                    'fid': fid_value,
-                    'ssim': ssim_value,
-                    'psnr': psnr_value,
-                    'mse': mse_value
+                'upload_time': int(time.time()),
+                'model_info': {
+                    'model_id': args.model_id,
+                    'model_name': args.model_name,
+                    'model_type': args.model_type,
+                    'execution_id': execution_id
                 },
-                'schema_fields_populated': len(schema_entry),
-                'upload_response': response if success else {"error": str(response.get('error', 'Unknown error')), "details": error},
-                'upload_timestamp': int(time.time()),
-                'schema_entry_sample': {k: v for i, (k, v) in enumerate(schema_entry.items()) if i < 10}
+                'schema_info': {
+                    'schema_id': args.schema_id,
+                    'base_domain': BASE_DOMAIN,
+                    'endpoints_tried': [
+                        f"{BASE_DOMAIN}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
+                        f"{BASE_DOMAIN}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+                        f"{BASE_DOMAIN}/pi-entity-instances-service/schemas/{args.schema_id}/instances/create",
+                        f"{BASE_DOMAIN}/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+                    ]
+                },
+                'metrics_uploaded': {
+                    'fid': float(fid_value),
+                    'ssim': float(ssim_value),
+                    'psnr': float(psnr_value),
+                    'mse': float(mse_value),
+                    'rmse': float(rmse_value)
+                },
+                'data_types_check': {
+                    'execution_id_type': 'int',
+                    'timestamp_type': 'int',
+                    'fid_type': 'float',
+                    'ssim_type': 'float',
+                    'psnr_type': 'float',
+                    'mse_type': 'float'
+                },
+                'upload_response': response if success else {"error": "Upload failed", "details": str(response.get('error', 'Unknown'))},
+                'schema_entry_summary': {k: type(v).__name__ for k, v in schema_entry.items()}
             }
             
             with open(args.upload_status, 'w') as f:
@@ -322,41 +583,76 @@ implementation:
             print(f"✓ Upload status saved: {args.upload_status}")
             
             # Save schema response
+            response_to_save = response if success else {
+                "error": "Upload failed",
+                "schema_id": args.schema_id,
+                "model_id": args.model_id,
+                "domain": BASE_DOMAIN,
+                "attempted_endpoints": [
+                    f"{BASE_DOMAIN}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
+                    f"{BASE_DOMAIN}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+                    f"{BASE_DOMAIN}/pi-entity-instances-service/schemas/{args.schema_id}/instances/create",
+                    f"{BASE_DOMAIN}/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+                ],
+                "error_details": str(response.get('error', 'Unknown error')) if isinstance(response, dict) else str(response),
+                "schema_entry_sample": {k: v for i, (k, v) in enumerate(schema_entry.items()) if i < 5}
+            }
+            
             with open(args.schema_response, 'w') as f:
-                json.dump(response if success else {"error": str(response.get('error', 'Unknown error')), "details": error}, f, indent=2)
+                json.dump(response_to_save, f, indent=2)
             print(f"✓ Schema response saved: {args.schema_response}")
             
         except Exception as e:
-            print(f"ERROR saving outputs: {e}")
-            import traceback
+            print(f"✗ ERROR saving outputs: {e}")
             traceback.print_exc()
         
-        # Final summary
+        # ============================================================================
+        # FINAL SUMMARY
+        # ============================================================================
+        
         print(f"\\n" + "=" * 80)
         if success:
-            print(" EVALUATION METRICS UPLOADED SUCCESSFULLY!")
+            print("✓ EVALUATION METRICS UPLOADED SUCCESSFULLY!")
         else:
-            print(" EVALUATION METRICS UPLOAD FAILED")
+            print("✗ EVALUATION METRICS UPLOAD FAILED")
         print("=" * 80)
         
-        print(f"\\nUPLOADED METRICS:")
-        print(f"  fid: {fid_value:.2f}")
-        print(f"  ssim: {ssim_value:.4f}")
-        print(f"  psnr: {psnr_value:.2f} dB")
-        print(f"  mse: {schema_entry['mse']:.6f}")
-        
-        print(f"\\nMODEL INFO:")
+        print(f"\\nUPLOAD SUMMARY:")
         print(f"  Model: {args.model_name} ({args.model_id})")
         print(f"  Type: {args.model_type}")
         print(f"  Algorithm: {algorithm}")
         print(f"  Execution ID: {execution_id}")
         print(f"  Schema ID: {args.schema_id}")
+        print(f"  Domain: {BASE_DOMAIN}")
+        
+        print(f"\\nMETRICS UPLOADED:")
+        print(f"  FID: {fid_value:.2f}")
+        print(f"  SSIM: {ssim_value:.4f}")
+        print(f"  PSNR: {psnr_value:.2f} dB")
+        print(f"  MSE: {mse_value:.6f}")
+        print(f"  RMSE: {rmse_value:.6f}")
+        
+        print(f"\\nDATA TYPES VERIFIED:")
+        print(f"  execution_id: {type(execution_id).__name__} (must be int)")
+        print(f"  timestamp: {type(current_timestamp).__name__} (must be int)")
+        print(f"  fid: {type(fid_value).__name__} (must be float)")
+        print(f"  ssim: {type(ssim_value).__name__} (must be float)")
+        print(f"  psnr: {type(psnr_value).__name__} (must be float)")
         
         print(f"\\nSTATUS: {'SUCCESS' if success else 'FAILED'}")
-        print("=" * 80)
         
         if not success:
-            sys.exit(1)
+            print(f"\\nTROUBLESHOOTING:")
+            print(f"  1. Check if schema ID '{args.schema_id}' is correct")
+            print(f"  2. Verify bearer token is valid")
+            print(f"  3. Check if {BASE_DOMAIN} is accessible")
+            print(f"  4. Verify the schema exists in the database")
+            print(f"  5. Check data types match schema requirements")
+        
+        print("=" * 80)
+        
+        # Exit with appropriate code
+        sys.exit(0 if success else 1)
 
     args:
       # Evaluation outputs
