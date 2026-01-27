@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v7
+name: DCGAN RLAF Loop v8
 description: Triggers the DCGAN RLAF pipeline with proper training and domain handling
 inputs:
   - {name: trained_model, type: Model}
@@ -23,9 +23,8 @@ implementation:
       - sh
       - -c
       - |
-        echo "Installing required packages..."
         apt-get update > /dev/null && apt-get install -y curl > /dev/null
-        pip install requests urllib3 pillow matplotlib > /dev/null
+        pip install requests urllib3 > /dev/null 2>&1
         exec "$0" "$@"
       - python3
       - -u
@@ -47,115 +46,87 @@ implementation:
         import warnings
         warnings.filterwarnings('ignore')
         
-        # ============================================================================
-        # DEBUG: PRINT ALL INPUTS FUNCTION
-        # ============================================================================
+        class PreprocessedDataset:
+            def __init__(self, images, labels, dataset_name, preprocessor_params):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = True
+                self.preprocessor_params = preprocessor_params
+            
+            def __len__(self):
+                return len(self.images)
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': True,
+                    'preprocessor_params': self.preprocessor_params
+                }
         
-        def print_all_inputs(args):
-            print("\\n" + "="*80)
-            print("DEBUG: ALL INPUT VALUES")
-            print("="*80)
+        class RawDatasetWrapper:
+            def __init__(self, images, labels, dataset_name='mnist'):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = False
+                self._num_samples = len(images)
             
-            print("\\n1. FILE PATHS (checking existence):")
-            print("-" * 60)
-            file_args = ['trained_model', 'init_metrics', 'data_path', 'access_token', 'tasks']
-            for arg_name in file_args:
-                arg_value = getattr(args, arg_name, None)
-                exists = os.path.exists(arg_value) if arg_value else False
-                print(f"  {arg_name}:")
-                print(f"    Value: '{arg_value}'")
-                print(f"    Exists: {exists}")
-                if exists and os.path.isfile(arg_value):
-                    size = os.path.getsize(arg_value)
-                    print(f"    Size: {size:,} bytes ({size/1024**2:.2f} MB)")
+            def __len__(self):
+                return self._num_samples
             
-            print("\\n2. STRING PARAMETERS (raw values with whitespace):")
-            print("-" * 60)
-            string_args = ['config', 'domain', 'schema_id', 'model_id', 'dqn_pipeline_id', 
-                          'pipeline_domain', 'dqn_experiment_id']
-            for arg_name in string_args:
-                arg_value = getattr(args, arg_name, None)
-                print(f"  {arg_name}:")
-                if arg_value:
-                    # Show raw string with special characters visible
-                    raw_display = repr(arg_value)
-                    if len(raw_display) > 100:
-                        print(f"    Raw (repr): {raw_display[:100]}...")
-                    else:
-                        print(f"    Raw (repr): {raw_display}")
-                    print(f"    Length: {len(arg_value)}")
-                    
-                    # Show cleaned version
-                    cleaned = arg_value.strip().replace('\\n', '').replace('\\r', '')
-                    if cleaned != arg_value:
-                        print(f"    Cleaned: '{cleaned}'")
-                else:
-                    print(f"    Value: None")
+            def __getitem__(self, idx):
+                return self.images[idx]
             
-            print("\\n3. OUTPUT PATHS:")
-            print("-" * 60)
-            output_args = ['rlaf_output', 'retrained_model']
-            for arg_name in output_args:
-                arg_value = getattr(args, arg_name, None)
-                print(f"  {arg_name}: '{arg_value}'")
-                if arg_value:
-                    dir_path = os.path.dirname(arg_value)
-                    print(f"    Directory: '{dir_path}'")
-                    print(f"    Directory exists: {os.path.exists(dir_path) if dir_path else 'N/A'}")
-            
-            print("="*80)
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed
+                }
         
-        # ============================================================================
-        # DOMAIN CLEANING AND VALIDATION
-        # ============================================================================
+        class SimpleDCGANDataset:
+            def __init__(self, images, normalize=False):
+                self.images = images
+                self.normalize = normalize
+            
+            def __len__(self):
+                return len(self.images)
+            
+            def __getitem__(self, idx):
+                img = self.images[idx]
+                if self.normalize:
+                    return img
+                return img
         
         def clean_domain(domain_str):
-           
             if not domain_str:
                 return ""
-            
-            # Remove all whitespace including newlines
             cleaned = ''.join(domain_str.split())
-            
-            # Ensure it starts with http:// or https://
             if not cleaned.startswith(('http://', 'https://')):
                 cleaned = 'https://' + cleaned
-            
-            # Remove trailing slash
             cleaned = cleaned.rstrip('/')
-            
             return cleaned
         
         def test_domain_connectivity(domain):
-          
             try:
                 session = requests.Session()
-                # Short timeout for quick test
                 response = session.get(f"{domain}/", timeout=5)
-                return response.status_code < 500  # Accept any non-server-error
-            except (requests.exceptions.Timeout, 
-                   requests.exceptions.ConnectionError,
-                   requests.exceptions.RequestException):
-                return False
-            except Exception:
+                return response.status_code < 500
+            except:
                 return False
         
-        # ============================================================================
-        # GAN RETRAINING FUNCTION - USING ACTUAL TRAINING LOGIC
-        # ============================================================================
-        
-        def gan_retraining(action_params, model_path, data_path, tasks_path, output_model_path, 
-                          previous_metrics, dqn_params, base_config):
-        
+        def gan_retraining(action_params, model_path, data_path, tasks_path, output_model_path, previous_metrics, dqn_params, base_config):
+            print(f"Starting GAN retraining with action: {action_params.get('name', 'unknown')}")
             
-            print(f"\\n" + "="*60)
-            print(f"STARTING GAN RETRAINING")
-            print("="*60)
-            print(f"Action: {action_params.get('name', 'unknown')}")
-            print(f"Model input: {model_path}")
-            print(f"Data path: {data_path}")
-            
-            # Check inputs exist
             if not os.path.exists(model_path):
                 print(f"ERROR: Model file doesn't exist: {model_path}")
                 return {"metrics": {}, "model_path": output_model_path}
@@ -164,32 +135,23 @@ implementation:
                 print(f"ERROR: Data file doesn't exist: {data_path}")
                 return {"metrics": {}, "model_path": output_model_path}
             
-            # Import DCGAN modules
             try:
-                from nesy_factory.GANs.dcgan import (
-                    EnhancedDCGANTrainer,
-                    DCGANDataset
-                )
-                print("✓ Imported DCGAN modules")
+                from nesy_factory.GANs.dcgan import EnhancedDCGANTrainer, DCGANDataset
+                print("Imported DCGAN modules")
             except ImportError as e:
                 print(f"ERROR importing nesy_factory: {e}")
-                traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
-            # Load data
             try:
-                print(f"\\nLOADING DATA...")
+                print("Loading data...")
                 with open(data_path, "rb") as f:
                     data_wrapper = pickle.load(f)
                 
-                # Extract images from data wrapper (similar to training brick)
                 if hasattr(data_wrapper, 'images'):
                     images = data_wrapper.images
                 else:
-                    # Try to get images directly
                     images = data_wrapper
                 
-                # Convert to proper tensor format
                 if isinstance(images, torch.Tensor):
                     if images.dim() == 4:
                         images_list = [images[i] for i in range(len(images))]
@@ -203,18 +165,13 @@ implementation:
                         print(f"ERROR: Unexpected tensor shape: {images.shape}")
                         return {"metrics": {}, "model_path": output_model_path}
                 else:
-                    # Convert list to tensor
                     images_list = []
-                    for img in images[:100]:  # Limit for speed
+                    for img in images[:100]:
                         if isinstance(img, torch.Tensor):
                             images_list.append(img)
                         elif isinstance(img, (list, np.ndarray)):
                             images_list.append(torch.tensor(img))
-                    if not images_list:
-                        print(f"ERROR: Could not convert images to tensor")
-                        return {"metrics": {}, "model_path": output_model_path}
                     
-                    # Stack images
                     if len(images_list) > 1:
                         images_tensor = torch.stack(images_list)
                     else:
@@ -228,70 +185,57 @@ implementation:
                         channels = 1
                         image_size = 64
                 
-                print(f"✓ Loaded {len(images_list)} images")
-                print(f"  Image size: {image_size}x{image_size}")
-                print(f"  Channels: {channels}")
+                print(f"Loaded {len(images_list)} images")
+                print(f"Image size: {image_size}x{image_size}")
+                print(f"Channels: {channels}")
                 
             except Exception as e:
                 print(f"ERROR loading data: {e}")
-                traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
-            # Load model
             try:
-                print(f"\\nLOADING MODEL...")
+                print("Loading model...")
                 checkpoint = torch.load(model_path, map_location='cpu')
                 
-                # Extract config
                 if 'config' in checkpoint and checkpoint['config'] is not None:
                     dcgan_config = checkpoint['config']
-                    print(f"✓ Loaded model config")
+                    print(f"Loaded model config")
                 else:
-                    print(f"WARNING: No config in checkpoint, using defaults")
+                    print(f"No config in checkpoint, using defaults")
                     dcgan_config = None
                 
-                # Create trainer
                 trainer = EnhancedDCGANTrainer(dcgan_config) if dcgan_config else EnhancedDCGANTrainer()
                 
-                # Load weights
                 if 'generator_state_dict' in checkpoint:
                     trainer.generator.load_state_dict(checkpoint['generator_state_dict'])
-                    print(f"✓ Loaded generator weights")
+                    print(f"Loaded generator weights")
                 
                 if 'discriminator_state_dict' in checkpoint:
                     trainer.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
-                    print(f"✓ Loaded discriminator weights")
+                    print(f"Loaded discriminator weights")
                 
-                # Get latent dim
                 latent_dim = trainer.generator.latent_dim if hasattr(trainer.generator, 'latent_dim') else 100
                 
-                # Move to device
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 trainer.generator = trainer.generator.to(device)
                 trainer.discriminator = trainer.discriminator.to(device)
                 
-                print(f"✓ Model loaded on {device}")
-                print(f"  Latent dim: {latent_dim}")
-                print(f"  Generator params: {sum(p.numel() for p in trainer.generator.parameters()):,}")
-                print(f"  Discriminator params: {sum(p.numel() for p in trainer.discriminator.parameters()):,}")
+                print(f"Model loaded on {device}")
+                print(f"Latent dim: {latent_dim}")
                 
             except Exception as e:
                 print(f"ERROR loading model: {e}")
-                traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
-            # Update training parameters from action
             try:
-                print(f"\\nUPDATING TRAINING PARAMETERS...")
+                print("Updating training parameters...")
                 
-                # Get action parameters
                 learning_rate_g = action_params.get('learning_rate_g', 0.0002)
                 learning_rate_d = action_params.get('learning_rate_d', 0.0001)
                 batch_size = action_params.get('batch_size', 32)
                 dropout = action_params.get('dropout', 0.3)
-                epochs = action_params.get('epochs', 3)  # Small for RLAF
+                epochs = action_params.get('epochs', 3)
                 
-                # Determine algorithm from action name
                 action_name = action_params.get('name', '').lower()
                 if 'forward' in action_name:
                     algorithm = 'forward_forward'
@@ -306,7 +250,6 @@ implementation:
                 print(f"Epochs: {epochs}")
                 print(f"Dropout: {dropout}")
                 
-                # Update trainer config if possible
                 if hasattr(trainer, 'config'):
                     if hasattr(trainer.config, 'training_algorithm'):
                         trainer.config.training_algorithm = algorithm
@@ -317,7 +260,6 @@ implementation:
                     if hasattr(trainer.config, 'epochs'):
                         trainer.config.epochs = epochs
                 
-                # Update optimizers
                 if hasattr(trainer, 'g_optimizer'):
                     for param_group in trainer.g_optimizer.param_groups:
                         param_group['lr'] = learning_rate_g
@@ -328,11 +270,9 @@ implementation:
                 
             except Exception as e:
                 print(f"WARNING updating parameters: {e}")
-                # Continue with defaults
             
-            # Create dataloader
             try:
-                print(f"\\nCREATING DATALOADER...")
+                print("Creating dataloader...")
                 train_dataset = DCGANDataset(images_list, normalize=False)
                 actual_batch_size = min(batch_size, max(1, len(train_dataset)))
                 dataloader = torch.utils.data.DataLoader(
@@ -342,20 +282,17 @@ implementation:
                     drop_last=True
                 )
                 
-                print(f"✓ Dataloader created")
-                print(f"  Dataset size: {len(train_dataset)}")
-                print(f"  Batch size: {actual_batch_size}")
-                print(f"  Batches per epoch: {len(dataloader)}")
+                print(f"Dataloader created")
+                print(f"Dataset size: {len(train_dataset)}")
+                print(f"Batch size: {actual_batch_size}")
+                print(f"Batches per epoch: {len(dataloader)}")
                 
             except Exception as e:
                 print(f"ERROR creating dataloader: {e}")
-                traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
-            # Training loop
-            print(f"\\n" + "="*60)
-            print(f"TRAINING - {epochs} EPOCHS")
-            print("="*60)
+            print("TRAINING - {epochs} EPOCHS")
+            print("=" * 60)
             
             try:
                 training_history = {
@@ -366,7 +303,7 @@ implementation:
                 }
                 
                 for epoch in range(epochs):
-                    print(f"\\nEPOCH {epoch+1}/{epochs}:")
+                    print(f"EPOCH {epoch+1}/{epochs}:")
                     
                     epoch_g_loss = []
                     epoch_d_loss = []
@@ -374,18 +311,14 @@ implementation:
                     epoch_fake_scores = []
                     
                     for batch_idx, batch_data in enumerate(dataloader):
-                        # Limit batches for speed in RLAF
-                        if batch_idx > 5:  # Small for RLAF
+                        if batch_idx > 5:
                             break
                         
-                        # Get real data
                         real_data = batch_data.to(device)
                         batch_size_real = real_data.size(0)
                         
-                        # Train discriminator
                         trainer.d_optimizer.zero_grad()
                         
-                        # Real data
                         real_output = trainer.discriminator(real_data)
                         if real_output.dim() > 1:
                             real_output = real_output.view(-1)
@@ -393,7 +326,6 @@ implementation:
                         real_labels = torch.ones(batch_size_real, device=device)
                         d_loss_real = nn.functional.binary_cross_entropy_with_logits(real_output, real_labels)
                         
-                        # Fake data
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = trainer.generator(z).detach()
                         fake_output = trainer.discriminator(fake_data)
@@ -407,7 +339,6 @@ implementation:
                         d_loss.backward()
                         trainer.d_optimizer.step()
                         
-                        # Train generator
                         trainer.g_optimizer.zero_grad()
                         
                         z = torch.randn(batch_size_real, latent_dim, device=device)
@@ -420,14 +351,13 @@ implementation:
                         g_loss.backward()
                         trainer.g_optimizer.step()
                         
-                        # Record metrics
                         epoch_g_loss.append(g_loss.item())
                         epoch_d_loss.append(d_loss.item())
                         epoch_real_scores.append(real_output.mean().item())
                         epoch_fake_scores.append(fake_output.mean().item())
                         
                         if batch_idx % 2 == 0:
-                            print(f"  BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
+                            print(f"BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
                     
                     avg_g_loss = np.mean(epoch_g_loss) if epoch_g_loss else 0
                     avg_d_loss = np.mean(epoch_d_loss) if epoch_d_loss else 0
@@ -439,17 +369,13 @@ implementation:
                     training_history['real_scores'].append(avg_real_score)
                     training_history['fake_scores'].append(avg_fake_score)
                     
-                    print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}, "
-                          f"Real={avg_real_score:.3f}, Fake={avg_fake_score:.3f}")
+                    print(f"EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}, Real={avg_real_score:.3f}, Fake={avg_fake_score:.3f}")
                 
-                print(f"\\n✓ Training completed")
+                print(f"Training completed")
                 
             except Exception as e:
                 print(f"ERROR during training: {e}")
-                traceback.print_exc()
-                # Continue to save model anyway
             
-            # Calculate final metrics
             final_metrics = {}
             if training_history['generator_losses']:
                 final_metrics = {
@@ -457,18 +383,16 @@ implementation:
                     'discriminator_loss': training_history['discriminator_losses'][-1] if training_history['discriminator_losses'] else 0.0,
                     'real_score': training_history['real_scores'][-1] if training_history['real_scores'] else 0.5,
                     'fake_score': training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5,
-                    'score_difference': abs((training_history['real_scores'][-1] if training_history['real_scores'] else 0.5) - 
-                                          (training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5))
+                    'score_difference': abs((training_history['real_scores'][-1] if training_history['real_scores'] else 0.5) - (training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5))
                 }
             
-            print(f"\\nFINAL METRICS:")
+            print(f"FINAL METRICS:")
             for key, value in final_metrics.items():
                 print(f"  {key}: {value:.4f}")
             
-            # Calculate improvement score
             improvement_score = 0
             if previous_metrics:
-                print(f"\\nCALCULATING IMPROVEMENT...")
+                print(f"Calculating improvement...")
                 for param in dqn_params:
                     key = param['key']
                     sign = 1 if param['sign'] == '+' else -1
@@ -480,13 +404,12 @@ implementation:
                         if not (np.isnan(current_val) or np.isnan(previous_val)):
                             improvement = (current_val - previous_val) * sign
                             improvement_score += improvement
-                            print(f"  {key}: {previous_val:.4f} → {current_val:.4f} (Δ={improvement:.4f})")
+                            print(f"  {key}: {previous_val:.4f} -> {current_val:.4f} (Δ={improvement:.4f})")
             
-            print(f"  Total improvement score: {improvement_score:.4f}")
+            print(f"Total improvement score: {improvement_score:.4f}")
             
-            # Save retrained model
             try:
-                print(f"\\nSAVING RETRAINED MODEL...")
+                print(f"Saving retrained model...")
                 
                 checkpoint_to_save = {
                     'model_source': 'rlaf_trained',
@@ -510,18 +433,13 @@ implementation:
                 
                 os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
                 torch.save(checkpoint_to_save, output_model_path)
-                print(f"✓ Model saved to: {output_model_path}")
+                print(f"Model saved to: {output_model_path}")
                 
             except Exception as e:
                 print(f"ERROR saving model: {e}")
-                traceback.print_exc()
                 return {"metrics": final_metrics, "model_path": output_model_path}
             
             return {"metrics": final_metrics, "model_path": output_model_path}
-        
-        # ============================================================================
-        # API FUNCTIONS
-        # ============================================================================
         
         def get_retry_session():
             retry_strategy = Retry(
@@ -536,10 +454,10 @@ implementation:
             return session
         
         def get_instance(access_token, domain, schema_id, model_id):
-            print(f"\\nGETTING INSTANCE...")
-            print(f"  Domain: {domain}")
-            print(f"  Schema ID: {schema_id}")
-            print(f"  Model ID: {model_id}")
+            print(f"Getting instance...")
+            print(f"Domain: {domain}")
+            print(f"Schema ID: {schema_id}")
+            print(f"Model ID: {model_id}")
             
             try:
                 http = get_retry_session()
@@ -555,26 +473,22 @@ implementation:
                     "filter": {"model_id": model_id}
                 }
                 
-                print(f"  Request URL: {url}")
+                print(f"Request URL: {url}")
                 response = http.post(url, headers=headers, json=payload, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 
                 if not data['content']:
-                    print(f"  WARNING: No instance found for model_id: {model_id}")
+                    print(f"WARNING: No instance found for model_id: {model_id}")
                     return None
                 
                 instance = data['content'][0]
-                print(f"✓ Instance retrieved")
+                print(f"Instance retrieved")
                 return instance
                 
             except Exception as e:
                 print(f"ERROR getting instance: {e}")
                 return None
-        
-        # ============================================================================
-        # MAIN FUNCTION
-        # ============================================================================
         
         def main():
             parser = argparse.ArgumentParser()
@@ -594,15 +508,10 @@ implementation:
             parser.add_argument('--retrained_model', type=str, required=True)
             args = parser.parse_args()
             
-            # Print all inputs for debugging
-            print_all_inputs(args)
+            print("DCGAN RLAF LOOP v8")
+            print("=" * 80)
             
-            print("\\n" + "="*80)
-            print("DCGAN RLAF LOOP v7 - WITH ACTUAL TRAINING")
-            print("="*80)
-            
-            # Clean domains
-            print("\\nCLEANING DOMAINS...")
+            print("Cleaning domains...")
             original_domain = args.domain
             original_pipeline_domain = args.pipeline_domain
             
@@ -611,11 +520,8 @@ implementation:
             
             print(f"Original domain: '{original_domain}'")
             print(f"Cleaned domain: '{clean_domain_str}'")
-            print(f"Original pipeline domain: '{original_pipeline_domain}'")
-            print(f"Cleaned pipeline domain: '{clean_pipeline_domain}'")
             
-            # Test domain connectivity
-            print("\\nTESTING DOMAIN CONNECTIVITY...")
+            print("Testing domain connectivity...")
             domains_to_test = [
                 clean_domain_str,
                 clean_pipeline_domain,
@@ -628,90 +534,68 @@ implementation:
             for domain in domains_to_test:
                 if not domain:
                     continue
-                print(f"  Testing {domain}...")
+                print(f"Testing {domain}...")
                 if test_domain_connectivity(domain):
                     working_domains.append(domain)
-                    print(f"    ✓ Reachable")
+                    print(f"Reachable")
                 else:
-                    print(f"    ✗ Not reachable")
+                    print(f"Not reachable")
             
             if not working_domains:
-                print("\\n✗ CRITICAL ERROR: No domains are reachable!")
-                print("\\nTROUBLESHOOTING:")
-                print("1. Check network connectivity from container")
-                print("2. Verify domains are correct and running")
-                print("3. Check if there are firewall restrictions")
-                print("4. Try pinging the domains manually")
-                
-                # Still try to create outputs
-                print("\\nCreating minimal outputs to continue pipeline...")
-                create_minimal_outputs(args)
+                print("CRITICAL ERROR: No domains are reachable!")
                 sys.exit(1)
             
-            print(f"\\n✓ Working domains: {working_domains}")
-            selected_domain = working_domains[0]  # Use first working domain
+            print(f"Working domains: {working_domains}")
+            selected_domain = working_domains[0]
             
-            # Load access token
             try:
                 with open(args.access_token, 'r') as f:
                     access_token = f.read().strip()
-                print(f"\\nAccess token loaded ({len(access_token)} chars)")
+                print(f"Access token loaded ({len(access_token)} chars)")
             except Exception as e:
                 print(f"ERROR loading access token: {e}")
-                create_minimal_outputs(args)
                 sys.exit(1)
             
-            # Load initial metrics
             try:
                 with open(args.init_metrics, 'r') as f:
                     current_metrics = json.load(f)
-                print(f"\\nInitial metrics loaded: {list(current_metrics.keys())}")
+                print(f"Initial metrics loaded: {list(current_metrics.keys())}")
             except Exception as e:
                 print(f"ERROR loading metrics: {e}")
                 current_metrics = {}
             
-            # Try to get instance
-            print("\\nATTEMPTING TO GET INSTANCE FROM SCHEMA...")
+            print("Attempting to get instance from schema...")
             instance = None
             for domain in working_domains:
                 instance = get_instance(access_token, domain, args.schema_id, args.model_id)
                 if instance:
-                    print(f"✓ Found instance in domain: {domain}")
+                    print(f"Found instance in domain: {domain}")
                     selected_domain = domain
                     break
             
             if not instance:
-                print("\\nWARNING: Could not find instance in any domain")
-                print("Continuing with local RLAF simulation...")
+                print("WARNING: Could not find instance in any domain")
                 instance = {'rlaf_actions': {'actions': []}, 'rlaf2pierce': []}
             
-            # ============================================================================
-            # RLAF LOOP
-            # ============================================================================
-            
-            print("\\n" + "="*80)
             print("STARTING RLAF LOOP")
-            print("="*80)
+            print("=" * 80)
             
             max_iterations = 2
             all_metrics = []
             iteration_results = []
             
-            # Load base config
             try:
                 base_config = json.loads(args.config)
             except:
                 base_config = {}
             
             for iteration in range(max_iterations):
-                print(f"\\nITERATION {iteration + 1}/{max_iterations}")
+                print(f"ITERATION {iteration + 1}/{max_iterations}")
                 print("-" * 60)
                 
-                # Prepare metrics for DQN (simplified for now)
                 dqn_params = []
                 for key, value in current_metrics.items():
                     if isinstance(value, (int, float)):
-                        # Determine if higher or lower is better
                         if any(term in key.lower() for term in ['loss', 'error', 'mse', 'mae']):
                             sign = "-"
                         else:
@@ -720,13 +604,11 @@ implementation:
                 
                 print(f"Prepared {len(dqn_params)} metrics for DQN")
                 
-                # Try to get RLAF actions from instance
                 rlaf_actions = instance.get('rlaf_actions', {}).get('actions', [])
                 rlaf2pierce = instance.get('rlaf2pierce', [])
                 
                 if not rlaf_actions or not rlaf2pierce:
                     print("No RLAF actions available. Simulating...")
-                    # Simulate an action
                     simulated_action = {
                         "id": 1,
                         "name": "backprop_optimized",
@@ -739,7 +621,6 @@ implementation:
                         }
                     }
                     
-                    # Run retraining with simulated action
                     print("Running retraining with simulated action...")
                     retraining_results = gan_retraining(
                         simulated_action['params'],
@@ -752,7 +633,6 @@ implementation:
                         base_config
                     )
                     
-                    # Update metrics
                     current_metrics = retraining_results["metrics"]
                     all_metrics.append(current_metrics)
                     iteration_results.append({
@@ -761,13 +641,11 @@ implementation:
                         'metrics': current_metrics
                     })
                     
-                    # Update model path for next iteration
                     args.trained_model = retraining_results["model_path"]
                     
-                    print(f"✓ Iteration {iteration + 1} completed")
+                    print(f"Iteration {iteration + 1} completed")
                     continue
                 
-                # Use actual RLAF logic if available
                 latest_rlaf2pierce = rlaf2pierce[-1]
                 action_id = latest_rlaf2pierce.get('action_id', -1)
                 
@@ -779,7 +657,6 @@ implementation:
                 print(f"Action: {action_details.get('name', 'unknown')}")
                 print(f"Params: {action_details.get('params', {})}")
                 
-                # Run retraining
                 retraining_results = gan_retraining(
                     action_details.get('params', {}),
                     args.trained_model,
@@ -791,7 +668,6 @@ implementation:
                     base_config
                 )
                 
-                # Update metrics
                 current_metrics = retraining_results["metrics"]
                 all_metrics.append(current_metrics)
                 iteration_results.append({
@@ -801,18 +677,12 @@ implementation:
                     'improvement': retraining_results.get("improvement_score", 0)
                 })
                 
-                # Update model path for next iteration
                 args.trained_model = retraining_results["model_path"]
                 
-                print(f"✓ Iteration {iteration + 1} completed")
+                print(f"Iteration {iteration + 1} completed")
             
-            # ============================================================================
-            # SAVE FINAL RESULTS
-            # ============================================================================
-            
-            print("\\n" + "="*80)
             print("SAVING RESULTS")
-            print("="*80)
+            print("=" * 80)
             
             try:
                 os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
@@ -841,47 +711,21 @@ implementation:
                 with open(args.rlaf_output, 'w') as f:
                     json.dump(final_results, f, indent=4)
                 
-                print(f"✓ RLAF results saved to: {args.rlaf_output}")
-                print(f"✓ Retrained model saved to: {args.retrained_model}")
+                print(f"RLAF results saved to: {args.rlaf_output}")
+                print(f"Retrained model saved to: {args.retrained_model}")
                 
             except Exception as e:
                 print(f"ERROR saving results: {e}")
-                create_minimal_outputs(args)
             
-            print("\\n" + "="*80)
             print("RLAF LOOP COMPLETED")
-            print("="*80)
+            print("=" * 80)
             print(f"Iterations: {len(iteration_results)}/{max_iterations}")
             if current_metrics:
                 print("Final metrics:")
                 for key, value in current_metrics.items():
                     if isinstance(value, (int, float)):
                         print(f"  {key}: {value:.4f}")
-            print("="*80)
-        
-        def create_minimal_outputs(args):
-            
-            print("Creating minimal outputs...")
-            
-            try:
-                # Create rlaf_output
-                os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
-                with open(args.rlaf_output, 'w') as f:
-                    json.dump({
-                        "error": "RLAF failed due to domain connectivity issues",
-                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                        "note": "Continuing pipeline with original model"
-                    }, f, indent=4)
-                
-                # Copy trained model to retrained_model
-                import shutil
-                os.makedirs(os.path.dirname(args.retrained_model), exist_ok=True)
-                shutil.copy2(args.trained_model, args.retrained_model)
-                
-                print("✓ Minimal outputs created")
-                
-            except Exception as e:
-                print(f"ERROR creating minimal outputs: {e}")
+            print("=" * 80)
         
         if __name__ == '__main__':
             main()
