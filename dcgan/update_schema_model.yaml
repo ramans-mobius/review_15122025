@@ -63,7 +63,7 @@ implementation:
       - sh
       - -c
       - |
-        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        apt-get update > /dev/null && apt-get install -y curl jq > /dev/null
         exec "$0" "$@"
       - python3
       - -u
@@ -78,6 +78,7 @@ implementation:
         import tempfile
         from datetime import datetime
         import traceback
+        import urllib.parse
         
         parser = argparse.ArgumentParser()
         
@@ -106,7 +107,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD MODEL TO SCHEMA COMPLETE v1")
+        print("UPLOAD MODEL TO SCHEMA COMPLETE v2 - DEBUG VERSION")
         print("=" * 80)
         print("Schema fields: model_weights_cdn, model_url (same), model_metadata_cdn")
         print("Hardcoded source: manual")
@@ -119,62 +120,153 @@ implementation:
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
         
-        # Read bearer token
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
+        # ============================================================================
+        # DEBUG: Print all input values
+        # ============================================================================
+        print("\\nDEBUG - INPUT VALUES:")
+        print("-" * 60)
+        print(f"trained_model path: {args.trained_model}")
+        print(f"model_weights_cdn_url: {args.model_weights_cdn_url}")
+        print(f"model_metadata_cdn_url: {args.model_metadata_cdn_url}")
+        print(f"master_config: {args.master_config[:100]}...")
+        print(f"model_info: {args.model_info[:100]}...")
+        print(f"schema_id: {args.schema_id}")
+        print(f"bearer_token length: {len(args.bearer_token)}")
+        print(f"model_id: {args.model_id}")
+        print(f"execution_id: {args.execution_id}")
+        print(f"tenant_id: {args.tenant_id}")
+        print(f"project_id: {args.project_id}")
+        print(f"model_name: {args.model_name}")
+        print(f"architecture_type: {args.architecture_type}")
+        print("-" * 60)
         
-        # Read CDN URLs
+        # Read bearer token (it's already a string, but if it's a file path, read it)
+        if os.path.exists(args.bearer_token) and os.path.isfile(args.bearer_token):
+            with open(args.bearer_token, 'r') as f:
+                bearer_token = f.read().strip()
+            print(f"✓ Bearer token read from file")
+        else:
+            bearer_token = args.bearer_token
+            print(f"✓ Bearer token used as string")
+        
+        # ============================================================================
+        # Read CDN URLs - FIXED
+        # ============================================================================
         print("\\nReading CDN URLs...")
-        with open(args.model_weights_cdn_url, 'r') as f:
-            model_weights_cdn = f.read().strip()
-        print(f"✓ Model weights CDN: {model_weights_cdn[:80]}...")
         
-        with open(args.model_metadata_cdn_url, 'r') as f:
-            model_metadata_cdn = f.read().strip()
-        print(f"✓ Model metadata CDN: {model_metadata_cdn[:80]}...")
+        # Handle CDN URLs - they should be passed as strings, not file paths
+        if args.model_weights_cdn_url.startswith('http'):
+            model_weights_cdn = args.model_weights_cdn_url.strip()
+            print(f"✓ Model weights CDN from string input")
+        elif os.path.exists(args.model_weights_cdn_url) and os.path.isfile(args.model_weights_cdn_url):
+            with open(args.model_weights_cdn_url, 'r') as f:
+                model_weights_cdn = f.read().strip()
+            print(f"✓ Model weights CDN read from file")
+        else:
+            model_weights_cdn = args.model_weights_cdn_url.strip()
+            print(f"✓ Model weights CDN from string (not a file)")
+        
+        if args.model_metadata_cdn_url.startswith('http'):
+            model_metadata_cdn = args.model_metadata_cdn_url.strip()
+            print(f"✓ Model metadata CDN from string input")
+        elif os.path.exists(args.model_metadata_cdn_url) and os.path.isfile(args.model_metadata_cdn_url):
+            with open(args.model_metadata_cdn_url, 'r') as f:
+                model_metadata_cdn = f.read().strip()
+            print(f"✓ Model metadata CDN read from file")
+        else:
+            model_metadata_cdn = args.model_metadata_cdn_url.strip()
+            print(f"✓ Model metadata CDN from string (not a file)")
+        
+        # DEBUG: Show the actual URLs
+        print("\\nDEBUG - ACTUAL CDN URLS:")
+        print("-" * 60)
+        print(f"model_weights_cdn (raw): {model_weights_cdn}")
+        print(f"model_weights_cdn length: {len(model_weights_cdn)}")
+        print(f"model_metadata_cdn (raw): {model_metadata_cdn}")
+        print(f"model_metadata_cdn length: {len(model_metadata_cdn)}")
+        
+        # Check for encoding issues
+        print("\\nURL ENCODING CHECK:")
+        print(f"Contains $$: {'$$' in model_weights_cdn}")
+        print(f"Contains $_: '$_' in model_weights_cdn")
+        print(f"Contains special chars: {[c for c in model_weights_cdn if ord(c) > 127 or c in '$&+,\\:;=?@#']}")
+        
+        # Fix URL encoding if needed
+        if '$_' in model_weights_cdn:
+            print("⚠ Found $_ in URL, this might need encoding")
+            # Try to properly encode the URL
+            parsed = urllib.parse.urlparse(model_weights_cdn)
+            print(f"Parsed scheme: {parsed.scheme}")
+            print(f"Parsed netloc: {parsed.netloc}")
+            print(f"Parsed path: {parsed.path[:100]}...")
+        
+        print("-" * 60)
         
         # Load model to extract metadata
         print("\\nLoading model to extract metadata...")
         try:
-            checkpoint = torch.load(args.trained_model, map_location='cpu')
-            
-            # Extract model metadata
-            latent_dim = checkpoint.get('latent_dim', 100)
-            image_size = checkpoint.get('image_size', 64)
-            channels = checkpoint.get('channels', 3)
-            
-            # Count parameters
-            generator_params = 0
-            discriminator_params = 0
-            
-            if 'generator_state_dict' in checkpoint:
-                generator_params = sum(p.numel() for p in checkpoint['generator_state_dict'].values())
-            
-            if 'discriminator_state_dict' in checkpoint:
-                discriminator_params = sum(p.numel() for p in checkpoint['discriminator_state_dict'].values())
-            
-            total_params = generator_params + discriminator_params
-            
-            print(f"✓ Model loaded:")
-            print(f"  Latent dim: {latent_dim}")
-            print(f"  Image size: {image_size}")
-            print(f"  Total params: {total_params:,}")
-            
+            if os.path.exists(args.trained_model):
+                checkpoint = torch.load(args.trained_model, map_location='cpu', weights_only=False)
+                
+                # Extract model metadata
+                latent_dim = checkpoint.get('latent_dim', 100)
+                image_size = checkpoint.get('image_size', 64)
+                channels = checkpoint.get('channels', 3)
+                
+                # Count parameters
+                generator_params = 0
+                discriminator_params = 0
+                
+                if 'generator_state_dict' in checkpoint:
+                    generator_params = sum(p.numel() for p in checkpoint['generator_state_dict'].values())
+                
+                if 'discriminator_state_dict' in checkpoint:
+                    discriminator_params = sum(p.numel() for p in checkpoint['discriminator_state_dict'].values())
+                
+                total_params = generator_params + discriminator_params
+                
+                print(f"✓ Model loaded:")
+                print(f"  Latent dim: {latent_dim}")
+                print(f"  Image size: {image_size}")
+                print(f"  Channels: {channels}")
+                print(f"  Generator params: {generator_params:,}")
+                print(f"  Discriminator params: {discriminator_params:,}")
+                print(f"  Total params: {total_params:,}")
+                
+            else:
+                print(f"⚠ Model file not found at: {args.trained_model}")
+                latent_dim = 100
+                image_size = 64
+                channels = 3
+                total_params = 0
+                
         except Exception as e:
             print(f"⚠ Could not load model for metadata: {e}")
+            print(f"Error details: {traceback.format_exc()}")
             latent_dim = 100
             image_size = 64
             channels = 3
             total_params = 0
         
         # Load configs
-        master_config = json.loads(args.master_config)
+        try:
+            master_config = json.loads(args.master_config)
+            print(f"✓ Master config loaded: {len(master_config)} keys")
+        except:
+            print(f"⚠ Could not parse master_config as JSON, using empty dict")
+            master_config = {}
         
-        if os.path.exists(args.model_info):
-            with open(args.model_info, 'r') as f:
-                model_info = json.load(f)
-        else:
-            model_info = json.loads(args.model_info)
+        try:
+            if os.path.exists(args.model_info):
+                with open(args.model_info, 'r') as f:
+                    model_info = json.load(f)
+                print(f"✓ Model info loaded from file")
+            else:
+                model_info = json.loads(args.model_info)
+                print(f"✓ Model info parsed from string")
+        except:
+            print(f"⚠ Could not load model_info, using empty dict")
+            model_info = {}
         
         # ============================================================================
         # Prepare COMPLETE schema entry - ONLY required and important fields
@@ -233,31 +325,22 @@ implementation:
             if field not in schema_entry:
                 schema_entry[field] = None
         
-        print("\\nSchema entry prepared:")
+        # DEBUG: Print schema entry with types
+        print("\\nSCHEMA ENTRY WITH DATA TYPES:")
         print("-" * 80)
-        print("REQUIRED FIELDS:")
-        required = ["tenant_id", "model_id", "execution_id", "projectId", "name", "source"]
-        for field in required:
-            value = schema_entry.get(field, "MISSING")
-            status = "✓" if field in schema_entry and schema_entry[field] is not None else "✗"
-            print(f"  {status} {field}: {value}")
-        
-        print("\\nCDN URL FIELDS:")
-        cdn_fields = ["model_weights_cdn", "model_metadata_cdn", "model_url"]
-        for field in cdn_fields:
-            value = schema_entry.get(field, "MISSING")
-            has_value = value and value != "MISSING"
-            status = "✓" if has_value else "✗"
-            preview = f"{value[:50]}..." if has_value and len(value) > 50 else value
-            print(f"  {status} {field}: {preview}")
-        
-        print("\\nOTHER IMPORTANT FIELDS:")
-        other_fields = ["architecture_type", "input_shape", "output_shape", "parameter_count"]
-        for field in other_fields:
-            value = schema_entry.get(field, "MISSING")
-            status = "✓" if field in schema_entry else "✗"
-            print(f"  {status} {field}: {value}")
-        
+        for key, value in schema_entry.items():
+            value_type = type(value).__name__
+            if isinstance(value, str):
+                value_preview = f"'{value[:50]}...'" if len(value) > 50 else f"'{value}'"
+                print(f"  {key}: {value_preview} (type: {value_type}, length: {len(value)})")
+            elif isinstance(value, (int, float, bool)):
+                print(f"  {key}: {value} (type: {value_type})")
+            elif value is None:
+                print(f"  {key}: null (type: None)")
+            elif isinstance(value, dict):
+                print(f"  {key}: dict with keys: {list(value.keys())} (type: {value_type})")
+            else:
+                print(f"  {key}: {value} (type: {value_type})")
         print("-" * 80)
         
         # Save schema entry
@@ -274,23 +357,35 @@ implementation:
         
         schema_create_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create"
         
+        # Prepare curl command with verbose output
         curl_command = [
             "curl",
             "--location", schema_create_url,
             "--header", f"Authorization: Bearer {bearer_token}",
             "--header", "Content-Type: application/json",
             "--data", json.dumps(schema_entry),
+            "--verbose",
             "--fail",
             "--show-error",
             "--connect-timeout", "30",
-            "--max-time", "60"
+            "--max-time", "120"
         ]
         
         print(f"Uploading to schema: {args.schema_id}")
         print(f"URL: {schema_create_url}")
+        print(f"Bearer token preview: {bearer_token[:20]}...")
         print(f"Data size: {len(json.dumps(schema_entry)):,} bytes")
+        print(f"\\nCurl command preview:")
+        print(f"  curl --location '{schema_create_url}'")
+        print(f"    --header 'Authorization: Bearer {bearer_token[:20]}...'")
+        print(f"    --header 'Content-Type: application/json'")
+        print(f"    --data '[{len(json.dumps(schema_entry)):,} bytes of JSON]'")
         
         try:
+            print("\\n" + "-" * 80)
+            print("EXECUTING CURL COMMAND...")
+            print("-" * 80)
+            
             process = subprocess.run(
                 curl_command,
                 capture_output=True,
@@ -298,22 +393,22 @@ implementation:
                 check=True
             )
             
-            print(f"\\n Schema upload successful!")
+            print(f"\\n✓ Schema upload successful!")
             print(f"Exit code: {process.returncode}")
             
             # Parse and display response
             try:
                 schema_response = json.loads(process.stdout)
                 print("\\nFULL RESPONSE JSON:")
-                print("-" * 60)
+                print("-" * 80)
                 print(json.dumps(schema_response, indent=2))
-                print("-" * 60)
+                print("-" * 80)
                 
                 # Extract key information
                 print("\\nEXTRACTED INFORMATION:")
                 print("-" * 40)
                 if 'id' in schema_response:
-                    print(f" Response ID: {schema_response['id']}")
+                    print(f"Response ID: {schema_response['id']}")
                 if 'status' in schema_response:
                     print(f"Status: {schema_response['status']}")
                 if 'message' in schema_response:
@@ -322,13 +417,27 @@ implementation:
                     data = schema_response['data']
                     if isinstance(data, dict):
                         print(f"Data fields: {list(data.keys())}")
+                        # Print all data fields
+                        for key, value in data.items():
+                            if isinstance(value, (str, int, float, bool)):
+                                print(f"  {key}: {value}")
+                            elif value is None:
+                                print(f"  {key}: null")
+                            else:
+                                print(f"  {key}: {type(value).__name__}")
                     else:
                         print(f"Data type: {type(data).__name__}")
+                        print(f"Data value: {data}")
                 
-            except json.JSONDecodeError:
-                print(f"⚠ Response is not valid JSON")
-                print(f"Raw response: {process.stdout[:500]}...")
-                schema_response = {"raw_response": process.stdout}
+            except json.JSONDecodeError as e:
+                print(f"⚠ Response is not valid JSON: {e}")
+                print(f"Raw response (first 1000 chars):")
+                print("-" * 40)
+                print(process.stdout[:1000])
+                if len(process.stdout) > 1000:
+                    print(f"... [{len(process.stdout) - 1000} more characters]")
+                print("-" * 40)
+                schema_response = {"raw_response": process.stdout, "json_error": str(e)}
             
             # Save response
             with open(args.schema_response, 'w') as f:
@@ -340,27 +449,39 @@ implementation:
             upload_success = True
             
         except subprocess.CalledProcessError as e:
-            print(f"\\n Schema upload failed!")
+            print(f"\\n✗ Schema upload failed!")
             print(f"Exit code: {e.returncode}")
+            
+            # Show verbose output from curl
+            print("\\nCURL VERBOSE OUTPUT:")
+            print("-" * 80)
+            print(e.stderr)
+            print("-" * 80)
             
             # Try to parse error
             error_data = None
             if e.stdout:
+                print("\\nRESPONSE BODY:")
+                print("-" * 40)
+                print(e.stdout)
+                print("-" * 40)
                 try:
                     error_data = json.loads(e.stdout)
-                    print(f"Error response (JSON):")
+                    print(f"\\nError response (parsed JSON):")
                     print(json.dumps(error_data, indent=2))
-                except:
-                    print(f"Error response (raw): {e.stdout[:500]}")
-                    error_data = {"raw_error": e.stdout[:500]}
-            
-            print(f"Stderr: {e.stderr[:200] if e.stderr else 'None'}")
+                except json.JSONDecodeError:
+                    print(f"\\nError response (raw, not JSON):")
+                    print(e.stdout[:2000])
+                    error_data = {"raw_error": e.stdout[:2000]}
+            else:
+                print("No response body received")
             
             schema_response = {
                 "error": "Schema upload failed",
                 "curl_exit_code": e.returncode,
-                "stdout": error_data if error_data else e.stdout[:500],
-                "stderr": e.stderr[:200] if e.stderr else None
+                "stdout": error_data if error_data else e.stdout[:2000] if e.stdout else None,
+                "stderr": e.stderr[:2000] if e.stderr else None,
+                "schema_entry_submitted": schema_entry
             }
             
             with open(args.schema_response, 'w') as f:
@@ -369,12 +490,16 @@ implementation:
             upload_success = False
             
         except Exception as e:
-            print(f"\\n Unexpected error: {e}")
+            print(f"\\n✗ Unexpected error: {e}")
+            print("\\nTRACEBACK:")
+            print("-" * 80)
             traceback.print_exc()
+            print("-" * 80)
             
             schema_response = {
                 "error": str(e),
-                "traceback": traceback.format_exc()
+                "traceback": traceback.format_exc(),
+                "schema_entry": schema_entry
             }
             
             with open(args.schema_response, 'w') as f:
@@ -398,19 +523,29 @@ implementation:
             "execution_id": int(args.execution_id),
             "fields_submitted": {
                 "total": len(schema_entry),
-                "required_present": all(field in schema_entry for field in required),
-                "cdn_urls_present": all(field in schema_entry for field in cdn_fields),
+                "required_fields": ["tenant_id", "model_id", "execution_id", "projectId", "name", "source"],
+                "all_required_present": all(field in schema_entry for field in ["tenant_id", "model_id", "execution_id", "projectId", "name", "source"]),
+                "cdn_urls_present": all(field in schema_entry for field in ["model_weights_cdn", "model_metadata_cdn", "model_url"]),
                 "source_field": schema_entry.get("source", "missing")
             },
-            "cdn_urls": {
-                "model_weights_cdn": model_weights_cdn[:100] + "..." if len(model_weights_cdn) > 100 else model_weights_cdn,
-                "model_metadata_cdn": model_metadata_cdn[:100] + "..." if len(model_metadata_cdn) > 100 else model_metadata_cdn,
-                "model_url": "Same as model_weights_cdn"
+            "cdn_urls_debug": {
+                "model_weights_cdn_length": len(model_weights_cdn),
+                "model_weights_cdn_preview": model_weights_cdn[:200] + "..." if len(model_weights_cdn) > 200 else model_weights_cdn,
+                "model_metadata_cdn_length": len(model_metadata_cdn),
+                "model_metadata_cdn_preview": model_metadata_cdn[:200] + "..." if len(model_metadata_cdn) > 200 else model_metadata_cdn,
+                "model_url_same_as_weights": model_weights_cdn == schema_entry.get("model_url", "")
+            },
+            "data_types_check": {
+                "execution_id_type": type(schema_entry.get("execution_id")).__name__,
+                "parameter_count_type": type(schema_entry.get("parameter_count")).__name__,
+                "input_shape_type": type(schema_entry.get("input_shape")).__name__,
+                "output_shape_type": type(schema_entry.get("output_shape")).__name__
             },
             "schema_response_summary": {
                 "has_id": 'id' in schema_response if isinstance(schema_response, dict) else False,
                 "has_status": 'status' in schema_response if isinstance(schema_response, dict) else False,
-                "success": upload_success
+                "success": upload_success,
+                "error_message": schema_response.get('error') if isinstance(schema_response, dict) and 'error' in schema_response else None
             }
         }
         
@@ -424,27 +559,39 @@ implementation:
         # ============================================================================
         print("\\n" + "=" * 80)
         if upload_success:
-            print(" ALL UPLOADS COMPLETED SUCCESSFULLY!")
+            print("✓ ALL UPLOADS COMPLETED SUCCESSFULLY!")
         else:
-            print(" UPLOAD FAILED - CHECK ERROR DETAILS")
+            print("✗ UPLOAD FAILED - CHECK ERROR DETAILS ABOVE")
         print("=" * 80)
         
-        print(f"\\nSummary:")
+        print(f"\\nFinal Summary:")
         print(f"  Model: {args.model_name} ({args.model_id})")
         print(f"  Schema: {args.schema_id}")
-        print(f"  CDN URLs: {len(cdn_fields)} fields included")
+        print(f"  Execution ID: {args.execution_id} (as int: {int(args.execution_id)})")
+        print(f"  CDN URLs included: ✓" if upload_success else "  CDN URLs included: ✗")
         print(f"  Source field: {schema_entry.get('source', 'missing')}")
-        print(f"  Success: {'Yes' if upload_success else 'No'}")
+        print(f"  Overall Success: {'✓ YES' if upload_success else '✗ NO'}")
+        
+        if not upload_success and isinstance(schema_response, dict):
+            print(f"\\nError Details:")
+            if 'error' in schema_response:
+                print(f"  Error: {schema_response['error']}")
+            if 'curl_exit_code' in schema_response:
+                print(f"  Curl Exit Code: {schema_response['curl_exit_code']}")
+        
         print("=" * 80)
+        
+        # Exit with appropriate code
+        sys.exit(0 if upload_success else 1)
 
     args:
-      # Model inputs
+      # Model inputs - NOTE: Using inputValue for URLs since they're strings
       - --trained_model
       - {inputPath: trained_model}
       - --model_weights_cdn_url
-      - {inputValue: model_weights_cdn_url}
+      - {inputValue: model_weights_cdn_url}  # CHANGED from inputPath to inputValue
       - --model_metadata_cdn_url
-      - {inputValue: model_metadata_cdn_url}
+      - {inputValue: model_metadata_cdn_url}  # CHANGED from inputPath to inputValue
       - --master_config
       - {inputValue: master_config}
       - --model_info
@@ -454,7 +601,7 @@ implementation:
       - --schema_id
       - {inputValue: schema_id}
       - --bearer_token
-      - {inputPath: bearer_token}
+      - {inputValue: bearer_token}  # CHANGED from inputPath to inputValue
       - --model_id
       - {inputValue: model_id}
       - --execution_id
