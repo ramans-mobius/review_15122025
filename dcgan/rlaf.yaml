@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v9 - FIXED
+name: DCGAN RLAF Loop v10 
 description: Triggers the DCGAN RLAF pipeline with proper training and domain handling
 inputs:
   - {name: trained_model, type: Model}
@@ -587,7 +587,6 @@ implementation:
                 return None
         
         def extract_metrics_from_rlaf(rlaf_metrics):
-            """Extract relevant metrics from RLAF metrics format"""
             metrics = {}
             
             if not rlaf_metrics:
