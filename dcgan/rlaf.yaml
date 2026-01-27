@@ -1,5 +1,5 @@
-name: DCGAN RLAF Loop v10 
-description: Triggers the DCGAN RLAF pipeline with proper training and domain handling
+name: DCGAN RLAF Loop v11
+description: Triggers the DCGAN RLAF pipeline with proper database interaction
 inputs:
   - {name: trained_model, type: Model}
   - {name: init_metrics, type: Metrics}
@@ -16,6 +16,7 @@ inputs:
 outputs:
   - {name: rlaf_output, type: Dataset}
   - {name: retrained_model, type: Model}
+
 implementation:
   container:
     image: deepak0147/nessy-facotry:0.0.9
@@ -45,53 +46,6 @@ implementation:
         import sys
         import warnings
         warnings.filterwarnings('ignore')
-        
-        class PreprocessedDataset:
-            def __init__(self, images, labels, dataset_name, preprocessor_params):
-                self.images = images
-                self.labels = labels
-                self.dataset_name = dataset_name
-                self.preprocessed = True
-                self.preprocessor_params = preprocessor_params
-            
-            def __len__(self):
-                return len(self.images)
-            
-            def __getitem__(self, idx):
-                return self.images[idx]
-            
-            def get_sample(self, idx):
-                return {
-                    'image': self.images[idx],
-                    'label': self.labels[idx],
-                    'index': idx,
-                    'dataset': self.dataset_name,
-                    'preprocessed': True,
-                    'preprocessor_params': self.preprocessor_params
-                }
-        
-        class RawDatasetWrapper:
-            def __init__(self, images, labels, dataset_name='mnist'):
-                self.images = images
-                self.labels = labels
-                self.dataset_name = dataset_name
-                self.preprocessed = False
-                self._num_samples = len(images)
-            
-            def __len__(self):
-                return self._num_samples
-            
-            def __getitem__(self, idx):
-                return self.images[idx]
-            
-            def get_sample(self, idx):
-                return {
-                    'image': self.images[idx],
-                    'label': self.labels[idx],
-                    'index': idx,
-                    'dataset': self.dataset_name,
-                    'preprocessed': self.preprocessed
-                }
         
         class SimpleDCGANDataset:
             def __init__(self, images, normalize=False):
@@ -124,8 +78,188 @@ implementation:
             except:
                 return False
         
-        def gan_retraining(action_params, model_path, data_path, tasks_path, output_model_path, previous_metrics, dqn_params, base_config):
-            print(f"Starting GAN retraining with action: {action_params.get('name', 'unknown')}")
+        def get_retry_session():
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[500, 502, 503, 504]
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session = requests.Session()
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            return session
+        
+        def get_instance(access_token, domain, schema_id, model_id):
+            print(f"Getting instance...")
+            print(f"Domain: {domain}")
+            print(f"Schema ID: {schema_id}")
+            print(f"Model ID: {model_id}")
+            
+            try:
+                http = get_retry_session()
+                url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
+                
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "dbType": "TIDB",
+                    "ownedOnly": True,
+                    "filter": {"model_id": model_id}
+                }
+                
+                print(f"Request URL: {url}")
+                response = http.post(url, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                
+                if not data['content']:
+                    print(f"WARNING: No instance found for model_id: {model_id}")
+                    return None
+                
+                instance = data['content'][0]
+                print(f"Instance retrieved")
+                return instance
+                
+            except Exception as e:
+                print(f"ERROR getting instance: {e}")
+                return None
+        
+        def update_instance_field(access_token, domain, schema_id, model_id, field, value):
+            print(f"Updating instance field: {field} for model_id: {model_id}")
+            
+            try:
+                http = get_retry_session()
+                url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "dbType": "TIDB",
+                    "conditionalFilter": {
+                        "conditions": [{
+                            "field": "model_id",
+                            "operator": "EQUAL",
+                            "value": model_id
+                        }]
+                    },
+                    "partialUpdateRequests": [{
+                        "patch": [{
+                            "operation": "REPLACE",
+                            "path": f"{field}",
+                            "value": value
+                        }]
+                    }]
+                }
+                
+                print(f"Request URL: {url}")
+                response = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+                response.raise_for_status()
+                print(f"Instance field {field} updated successfully")
+                return True
+                
+            except Exception as e:
+                print(f"ERROR updating instance field: {e}")
+                return False
+        
+        def trigger_pipeline(config, pipeline_domain, dqn_params=None, model_id=None):
+            print(f"Triggering DQN pipeline...")
+            
+            try:
+                http = get_retry_session()
+                url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
+                
+                pipeline_params = {}
+                if dqn_params:
+                    pipeline_params["param_json"] = json.dumps(dqn_params)
+                if model_id:
+                    pipeline_params["model_id"] = model_id
+                
+                payload = json.dumps({
+                    "pipelineType": "ML",
+                    "containerResources": {},
+                    "experimentId": config['experiment_id'],
+                    "enableCaching": True,
+                    "parameters": pipeline_params,
+                    "version": 1
+                })
+                
+                headers = {
+                    'accept': 'application/json',
+                    'Authorization': f"Bearer {config['access_token']}",
+                    'Content-Type': 'application/json'
+                }
+                
+                print(f"Request URL: {url}")
+                response = http.post(url, headers=headers, data=payload, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                print(f"DQN pipeline triggered successfully. Run ID: {result['runId']}")
+                return result['runId']
+                
+            except Exception as e:
+                print(f"ERROR triggering DQN pipeline: {e}")
+                raise
+        
+        def get_pipeline_status(config, pipeline_domain):
+            print(f"Checking pipeline status for run ID: {config['run_id']}")
+            
+            try:
+                http = get_retry_session()
+                url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
+                headers = {
+                    'accept': 'application/json',
+                    'Authorization': f"Bearer {config['access_token']}"
+                }
+                response = http.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                pipeline_status = response.json()
+                latest_state = pipeline_status['run_details']['state_history'][-1]
+                print(f"DQN pipeline status: {latest_state['state']}")
+                return latest_state['state']
+                
+            except Exception as e:
+                print(f"ERROR getting pipeline status: {e}")
+                raise
+        
+        def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, dqn_params, model_id):
+            print("Starting DQN pipeline trigger and wait...")
+            
+            try:
+                run_id = trigger_pipeline(config, pipeline_domain, dqn_params, model_id)
+                config["run_id"] = run_id
+                
+                max_wait_time = 1800
+                start_time = time.time()
+                check_count = 0
+                
+                while time.time() - start_time < max_wait_time:
+                    check_count += 1
+                    print(f"Checking pipeline status (attempt {check_count})")
+                    status = get_pipeline_status(config, pipeline_domain)
+                    
+                    if status == 'SUCCEEDED':
+                        print("DQN pipeline completed successfully")
+                        return True
+                    elif status in ['FAILED', 'ERROR', 'CANCELLED']:
+                        print(f"ERROR: DQN pipeline failed with status: {status}")
+                        raise RuntimeError(f"DQN pipeline failed with status: {status}")
+                    
+                    print(f"Pipeline still running, waiting 30 seconds...")
+                    time.sleep(30)
+                
+                print("ERROR: DQN pipeline timeout")
+                raise RuntimeError("DQN pipeline timeout after 30 minutes")
+                
+            except Exception as e:
+                print(f"ERROR in DQN pipeline execution: {e}")
+                raise
+        
+        def gan_retraining(action_params, model_path, data_path, output_model_path, previous_metrics, dqn_params):
+            print(f"Starting GAN retraining with action: {action_params}")
             
             if not os.path.exists(model_path):
                 print(f"ERROR: Model file doesn't exist: {model_path}")
@@ -142,6 +276,7 @@ implementation:
                 print(f"ERROR importing nesy_factory: {e}")
                 return {"metrics": {}, "model_path": output_model_path}
             
+            # Load data
             try:
                 print("Loading data...")
                 with open(data_path, "rb") as f:
@@ -193,58 +328,15 @@ implementation:
                 print(f"ERROR loading data: {e}")
                 return {"metrics": {}, "model_path": output_model_path}
             
+            # Load model
             try:
                 print("Loading model...")
                 checkpoint = torch.load(model_path, map_location='cpu')
                 
-                # Check if config exists and is proper
-                dcgan_config = None
-                if 'config' in checkpoint and checkpoint['config'] is not None:
-                    config_obj = checkpoint['config']
-                    
-                    if isinstance(config_obj, dict):
-                        # It's a dictionary, need to convert to DCGANConfig
-                        try:
-                            from nesy_factory.GANs.dcgan import DCGANConfig
-                            if hasattr(DCGANConfig, 'from_dict'):
-                                dcgan_config = DCGANConfig.from_dict(config_obj)
-                                print(f"Loaded config from dict")
-                            else:
-                                print(f"DCGANConfig.from_dict not available")
-                                dcgan_config = None
-                        except Exception as e:
-                            print(f"Error converting dict to DCGANConfig: {e}")
-                            dcgan_config = None
-                    elif hasattr(config_obj, '__dataclass_fields__'):
-                        # It's already a DCGANConfig dataclass
-                        dcgan_config = config_obj
-                        print(f"Loaded config as dataclass")
-                    else:
-                        print(f"Unknown config type: {type(config_obj)}")
-                        dcgan_config = None
-                else:
-                    print(f"No config in checkpoint")
+                # Create trainer
+                trainer = EnhancedDCGANTrainer()
                 
-                # Create trainer with or without config
-                if dcgan_config:
-                    trainer = EnhancedDCGANTrainer(dcgan_config)
-                else:
-                    # Create default config
-                    try:
-                        from nesy_factory.GANs.dcgan import DCGANConfig
-                        default_config = DCGANConfig(
-                            image_size=image_size,
-                            channels=channels,
-                            latent_dim=100,
-                            batch_size=32,
-                            epochs=3
-                        )
-                        trainer = EnhancedDCGANTrainer(default_config)
-                    except:
-                        print("Creating trainer with minimal configuration...")
-                        trainer = EnhancedDCGANTrainer()
-                
-                # Load weights
+                # Load weights if available
                 if 'generator_state_dict' in checkpoint:
                     trainer.generator.load_state_dict(checkpoint['generator_state_dict'])
                     print(f"Loaded generator weights")
@@ -254,12 +346,11 @@ implementation:
                     print(f"Loaded discriminator weights")
                 
                 # Get latent dim
+                latent_dim = 100
                 if hasattr(trainer.generator, 'latent_dim'):
                     latent_dim = trainer.generator.latent_dim
                 elif 'latent_dim' in checkpoint:
                     latent_dim = checkpoint['latent_dim']
-                else:
-                    latent_dim = 100
                 
                 # Move to device
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -274,8 +365,9 @@ implementation:
                 traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
+            # Apply action parameters
             try:
-                print("Updating training parameters...")
+                print("Applying action parameters...")
                 
                 learning_rate_g = action_params.get('learning_rate_g', 0.0002)
                 learning_rate_d = action_params.get('learning_rate_d', 0.0001)
@@ -283,72 +375,23 @@ implementation:
                 dropout = action_params.get('dropout', 0.3)
                 epochs = action_params.get('epochs', 3)
                 
-                action_name = action_params.get('name', '').lower()
-                if 'forward' in action_name:
-                    algorithm = 'forward_forward'
-                elif 'cafo' in action_name:
-                    algorithm = 'cafo'
-                else:
-                    algorithm = 'backprop'
+                print(f"Action parameters: LR_G={learning_rate_g}, LR_D={learning_rate_d}, BS={batch_size}, Dropout={dropout}, Epochs={epochs}")
                 
-                print(f"Algorithm: {algorithm}")
-                print(f"Learning rates: G={learning_rate_g}, D={learning_rate_d}")
-                print(f"Batch size: {batch_size}")
-                print(f"Epochs: {epochs}")
-                print(f"Dropout: {dropout}")
-                
-                # Update trainer config
-                if hasattr(trainer, 'config'):
-                    # Update training algorithm using enum
-                    if hasattr(trainer.config, 'training_algorithm'):
-                        try:
-                            # Convert string to TrainingAlgorithm enum
-                            if algorithm == 'forward_forward':
-                                trainer.config.training_algorithm = TrainingAlgorithm.FORWARD_FORWARD
-                            elif algorithm == 'cafo':
-                                trainer.config.training_algorithm = TrainingAlgorithm.CAFO
-                            else:
-                                trainer.config.training_algorithm = TrainingAlgorithm.BACKPROP
-                        except:
-                            print("Could not set training algorithm enum")
-                    
-                    # Update other parameters
-                    if hasattr(trainer.config, 'batch_size'):
-                        trainer.config.batch_size = batch_size
-                    
-                    if hasattr(trainer.config, 'epochs'):
-                        trainer.config.epochs = epochs
-                    
-                    # Update dropout rates
-                    if hasattr(trainer.config, 'generator_dropout'):
-                        trainer.config.generator_dropout = dropout
-                    
-                    if hasattr(trainer.config, 'discriminator_dropout'):
-                        trainer.config.discriminator_dropout = dropout
-                
-                # Update optimizer learning rates
+                # Update optimizers
                 if hasattr(trainer, 'gen_optimizer'):
                     for param_group in trainer.gen_optimizer.param_groups:
                         param_group['lr'] = learning_rate_g
-                    print(f"Updated generator optimizer LR to {learning_rate_g}")
+                    print(f"Updated generator LR to {learning_rate_g}")
                 
                 if hasattr(trainer, 'disc_optimizer'):
                     for param_group in trainer.disc_optimizer.param_groups:
                         param_group['lr'] = learning_rate_d
-                    print(f"Updated discriminator optimizer LR to {learning_rate_d}")
-                
-                # Also update config optimizer settings
-                if hasattr(trainer, 'config'):
-                    if hasattr(trainer.config, 'generator_optimizer'):
-                        trainer.config.generator_optimizer.learning_rate = learning_rate_g
-                    
-                    if hasattr(trainer.config, 'discriminator_optimizer'):
-                        trainer.config.discriminator_optimizer.learning_rate = learning_rate_d
+                    print(f"Updated discriminator LR to {learning_rate_d}")
                 
             except Exception as e:
                 print(f"WARNING updating parameters: {e}")
-                traceback.print_exc()
             
+            # Create dataloader
             try:
                 print("Creating dataloader...")
                 train_dataset = DCGANDataset(images_list, normalize=False)
@@ -360,16 +403,14 @@ implementation:
                     drop_last=True
                 )
                 
-                print(f"Dataloader created")
-                print(f"Dataset size: {len(train_dataset)}")
-                print(f"Batch size: {actual_batch_size}")
-                print(f"Batches per epoch: {len(dataloader)}")
+                print(f"Dataloader created: {len(train_dataset)} samples, batch size {actual_batch_size}")
                 
             except Exception as e:
                 print(f"ERROR creating dataloader: {e}")
                 return {"metrics": {}, "model_path": output_model_path}
             
-            print(f"TRAINING - {epochs} EPOCHS")
+            # Training loop
+            print(f"Starting training for {epochs} epochs...")
             print("=" * 60)
             
             training_history = {
@@ -390,7 +431,6 @@ implementation:
                     
                     for batch_idx, batch_data in enumerate(dataloader):
                         if batch_idx > 5:  # Limit batches for testing
-                            print(f"  Limiting to 6 batches for testing")
                             break
                         
                         real_data = batch_data.to(device)
@@ -440,7 +480,7 @@ implementation:
                         epoch_fake_scores.append(fake_output.mean().item())
                         
                         if batch_idx % 2 == 0:
-                            print(f"  BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
+                            print(f"  Batch {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
                     
                     # Calculate epoch averages
                     avg_g_loss = np.mean(epoch_g_loss) if epoch_g_loss else 0
@@ -453,14 +493,13 @@ implementation:
                     training_history['real_scores'].append(avg_real_score)
                     training_history['fake_scores'].append(avg_fake_score)
                     
-                    print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}, Real={avg_real_score:.3f}, Fake={avg_fake_score:.3f}")
+                    print(f"  Epoch summary: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}, Real={avg_real_score:.3f}, Fake={avg_fake_score:.3f}")
                 
                 print(f"Training completed successfully")
                 
             except Exception as e:
                 print(f"ERROR during training: {e}")
                 traceback.print_exc()
-                # Continue with whatever metrics we have
             
             # Calculate final metrics
             final_metrics = {}
@@ -497,15 +536,13 @@ implementation:
             
             print(f"Total improvement score: {improvement_score:.4f}")
             
+            # Save model
             try:
                 print(f"Saving retrained model...")
                 
-                # Prepare checkpoint
                 checkpoint_to_save = {
                     'model_source': 'rlaf_trained',
                     'model_type': 'dcgan',
-                    'algorithm': algorithm,
-                    'config': trainer.config if hasattr(trainer, 'config') else {},
                     'generator_state_dict': trainer.generator.state_dict(),
                     'discriminator_state_dict': trainer.discriminator.state_dict(),
                     'generator_optimizer_state': trainer.gen_optimizer.state_dict() if hasattr(trainer, 'gen_optimizer') else None,
@@ -531,89 +568,80 @@ implementation:
                 return {"metrics": final_metrics, "model_path": output_model_path}
             
             return {
-                "metrics": final_metrics, 
+                "metrics": final_metrics,
                 "model_path": output_model_path,
-                "improvement_score": improvement_score,
-                "training_history": training_history
+                "improvement_score": improvement_score
             }
         
-        def get_retry_session():
-            retry_strategy = Retry(
-                total=3,
-                backoff_factor=1,
-                status_forcelist=[500, 502, 503, 504]
-            )
-            adapter = HTTPAdapter(max_retries=retry_strategy)
-            session = requests.Session()
-            session.mount("https://", adapter)
-            session.mount("http://", adapter)
-            return session
-        
-        def get_instance(access_token, domain, schema_id, model_id):
-            print(f"Getting instance...")
-            print(f"Domain: {domain}")
-            print(f"Schema ID: {schema_id}")
-            print(f"Model ID: {model_id}")
+        def extract_gan_metrics(metrics_file_path):
+            """Extract GAN metrics from evaluation metrics file"""
+            print(f"Extracting GAN metrics from: {metrics_file_path}")
+            
+            metrics = {
+                'generator_loss': 0.0,
+                'discriminator_loss': 0.0,
+                'real_score': 0.5,
+                'fake_score': 0.5,
+                'score_difference': 0.0,
+                'fid_score': 100.0,
+                'ssim_mean': 0.0,
+                'psnr_mean': 0.0
+            }
             
             try:
-                http = get_retry_session()
-                url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
+                with open(metrics_file_path, 'r') as f:
+                    content = f.read().strip()
                 
-                headers = {
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "dbType": "TIDB",
-                    "ownedOnly": True,
-                    "filter": {"model_id": model_id}
-                }
-                
-                print(f"Request URL: {url}")
-                response = http.post(url, headers=headers, json=payload, timeout=30)
-                response.raise_for_status()
-                data = response.json()
-                
-                if not data['content']:
-                    print(f"WARNING: No instance found for model_id: {model_id}")
-                    return None
-                
-                instance = data['content'][0]
-                print(f"Instance retrieved")
-                return instance
-                
+                # Try to parse as JSON first
+                try:
+                    data = json.loads(content)
+                    
+                    # Extract from RLAF format
+                    if 'primary_metrics' in data:
+                        primary = data['primary_metrics']
+                        metrics['fid_score'] = primary.get('fid_score', 100.0)
+                        metrics['ssim_mean'] = primary.get('ssim_mean', 0.0)
+                        metrics['psnr_mean'] = primary.get('psnr_mean', 0.0)
+                    
+                    if 'composite_scores' in data:
+                        composite = data['composite_scores']
+                        metrics['score_difference'] = 1.0 - composite.get('overall_quality', 0.5)
+                    
+                except json.JSONDecodeError:
+                    # Parse as text file
+                    lines = content.split('\\n')
+                    for line in lines:
+                        line = line.strip()
+                        if ':' in line:
+                            key, value = line.split(':', 1)
+                            key = key.strip().lower()
+                            value = value.strip()
+                            
+                            try:
+                                if 'generator loss' in key or 'g loss' in key:
+                                    metrics['generator_loss'] = float(value)
+                                elif 'discriminator loss' in key or 'd loss' in key:
+                                    metrics['discriminator_loss'] = float(value)
+                                elif 'real score' in key:
+                                    metrics['real_score'] = float(value)
+                                elif 'fake score' in key:
+                                    metrics['fake_score'] = float(value)
+                                elif 'fid' in key:
+                                    metrics['fid_score'] = float(value)
+                                elif 'ssim' in key:
+                                    metrics['ssim_mean'] = float(value)
+                                elif 'psnr' in key:
+                                    metrics['psnr_mean'] = float(value)
+                            except (ValueError, TypeError):
+                                pass
+            
             except Exception as e:
-                print(f"ERROR getting instance: {e}")
-                return None
-        
-        def extract_metrics_from_rlaf(rlaf_metrics):
-            metrics = {}
+                print(f"ERROR extracting metrics: {e}")
             
-            if not rlaf_metrics:
-                return metrics
+            # Calculate score difference
+            metrics['score_difference'] = abs(metrics['real_score'] - metrics['fake_score'])
             
-            # Try to extract from primary_metrics
-            if 'primary_metrics' in rlaf_metrics:
-                primary = rlaf_metrics['primary_metrics']
-                for key, value in primary.items():
-                    if isinstance(value, (int, float)):
-                        metrics[f'primary_{key}'] = value
-            
-            # Try to extract from composite_scores
-            if 'composite_scores' in rlaf_metrics:
-                composite = rlaf_metrics['composite_scores']
-                for key, value in composite.items():
-                    if isinstance(value, (int, float)):
-                        metrics[f'composite_{key}'] = value
-            
-            # Extract from dqn_parameters if available
-            if 'dqn_parameters' in rlaf_metrics:
-                for param in rlaf_metrics['dqn_parameters']:
-                    key = param.get('key', '')
-                    value = param.get('value', 0)
-                    if isinstance(value, (int, float)):
-                        metrics[f'dqn_{key}'] = value
-            
+            print(f"Extracted metrics: {metrics}")
             return metrics
         
         def main():
@@ -634,46 +662,10 @@ implementation:
             parser.add_argument('--retrained_model', type=str, required=True)
             args = parser.parse_args()
             
-            print("DCGAN RLAF LOOP v9 - FIXED")
+            print("DCGAN RLAF LOOP v10 - FIXED LOGIC")
             print("=" * 80)
             
-            print("Cleaning domains...")
-            original_domain = args.domain
-            original_pipeline_domain = args.pipeline_domain
-            
-            clean_domain_str = clean_domain(args.domain)
-            clean_pipeline_domain = clean_domain(args.pipeline_domain)
-            
-            print(f"Original domain: '{original_domain}'")
-            print(f"Cleaned domain: '{clean_domain_str}'")
-            
-            print("Testing domain connectivity...")
-            domains_to_test = [
-                clean_domain_str,
-                clean_pipeline_domain,
-                "https://igs.gov-cloud.ai",
-                "https://ig.gov-cloud.ai",
-                "https://ig.mobiusdtaas.ai"
-            ]
-            
-            working_domains = []
-            for domain in domains_to_test:
-                if not domain:
-                    continue
-                print(f"Testing {domain}...")
-                if test_domain_connectivity(domain):
-                    working_domains.append(domain)
-                    print(f"Reachable")
-                else:
-                    print(f"Not reachable")
-            
-            if not working_domains:
-                print("CRITICAL ERROR: No domains are reachable!")
-                sys.exit(1)
-            
-            print(f"Working domains: {working_domains}")
-            selected_domain = working_domains[0]
-            
+            # Load access token
             try:
                 with open(args.access_token, 'r') as f:
                     access_token = f.read().strip()
@@ -682,150 +674,171 @@ implementation:
                 print(f"ERROR loading access token: {e}")
                 sys.exit(1)
             
-            # Load initial metrics
-            try:
-                with open(args.init_metrics, 'r') as f:
-                    rlaf_metrics_data = json.load(f)
-                
-                # Extract metrics from RLAF format
-                current_metrics = extract_metrics_from_rlaf(rlaf_metrics_data)
-                print(f"Initial metrics extracted: {list(current_metrics.keys())}")
-                
-                # Also get dqn_parameters for improvement calculation
-                dqn_params_from_file = rlaf_metrics_data.get('dqn_parameters', [])
-                
-            except Exception as e:
-                print(f"ERROR loading metrics: {e}")
-                current_metrics = {}
-                dqn_params_from_file = []
+            # Extract initial metrics
+            current_metrics = extract_gan_metrics(args.init_metrics)
+            print(f"Initial metrics: {current_metrics}")
             
-            print("Attempting to get instance from schema...")
-            instance = None
-            for domain in working_domains:
-                instance = get_instance(access_token, domain, args.schema_id, args.model_id)
-                if instance:
-                    print(f"Found instance in domain: {domain}")
-                    selected_domain = domain
-                    break
-            
-            if not instance:
-                print("WARNING: Could not find instance in any domain")
-                instance = {'rlaf_actions': {'actions': []}, 'rlaf2pierce': []}
-            
-            print("STARTING RLAF LOOP")
-            print("=" * 80)
-            
-            max_iterations = 2
-            all_metrics = []
-            iteration_results = []
-            
-            try:
-                base_config = json.loads(args.config)
-            except:
-                base_config = {}
+            # DQN parameters for GAN
+            fixed_dqn_params = [
+                {"key": "generator_loss", "sign": "-", "mul": 1.0},
+                {"key": "discriminator_loss", "sign": "-", "mul": 1.0},
+                {"key": "score_difference", "sign": "-", "mul": 1.0},
+                {"key": "fid_score", "sign": "-", "mul": 1.0},
+                {"key": "ssim_mean", "sign": "+", "mul": 1.0},
+                {"key": "psnr_mean", "sign": "+", "mul": 1.0}
+            ]
             
             # Current model path
             current_model_path = args.trained_model
             
-            for iteration in range(max_iterations):
-                print(f"ITERATION {iteration + 1}/{max_iterations}")
-                print("-" * 60)
+            # Get base instance
+            print(f"Getting base instance...")
+            instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+            if not instance:
+                print("ERROR: Could not get instance")
+                sys.exit(1)
+            
+            # Start RLAF loop (max 2 iterations)
+            iteration_results = []
+            
+            for iteration in range(2):
+                print(f"\\n{'='*80}")
+                print(f"RLAF ITERATION {iteration + 1}/2")
+                print(f"{'='*80}")
                 
-                # Use dqn_parameters from metrics file
-                dqn_params = dqn_params_from_file
-                if not dqn_params:
-                    # Fallback: create from current metrics
-                    dqn_params = []
-                    for key, value in current_metrics.items():
-                        if isinstance(value, (int, float)):
-                            if any(term in key.lower() for term in ['loss', 'error', 'mse', 'mae', 'fid']):
-                                sign = "-"
-                            else:
-                                sign = "+"
-                            dqn_params.append({"key": key, "sign": sign, "value": value})
+                # Prepare metrics for DQN
+                dqn_metrics = {}
+                for param in fixed_dqn_params:
+                    key = param['key']
+                    if key in current_metrics:
+                        dqn_metrics[key] = float(current_metrics[key])
+                    else:
+                        dqn_metrics[key] = 0.0
                 
-                print(f"Prepared {len(dqn_params)} metrics for DQN")
+                print(f"Sending metrics to DQN: {dqn_metrics}")
                 
-                rlaf_actions = instance.get('rlaf_actions', {}).get('actions', [])
-                rlaf2pierce = instance.get('rlaf2pierce', [])
-                
-                if not rlaf_actions or not rlaf2pierce:
-                    print("No RLAF actions available. Simulating...")
-                    simulated_action = {
-                        "id": 1,
-                        "name": "backprop_optimized",
-                        "params": {
-                            "learning_rate_g": 0.0002,
-                            "learning_rate_d": 0.0001,
-                            "batch_size": 32,
-                            "dropout": 0.3,
-                            "epochs": 3
-                        }
+                # Update pierce2rlaf
+                try:
+                    pierce2rlaf_history = instance.get("pierce2rlaf", [])
+                    
+                    # Get previous state
+                    if pierce2rlaf_history:
+                        previous_state = pierce2rlaf_history[-1].get('current_state', {})
+                    else:
+                        previous_state = {key: 0.0 for key in dqn_metrics.keys()}
+                    
+                    # Create new entry
+                    new_pierce2rlaf_entry = {
+                        "action_id": -1,
+                        "previous_state": previous_state,
+                        "current_state": dqn_metrics,
+                        "episode": iteration,
+                        "timestamp": int(time.time())
                     }
                     
-                    print("Running retraining with simulated action...")
-                    retraining_results = gan_retraining(
-                        simulated_action['params'],
-                        current_model_path,
-                        args.data_path,
-                        args.tasks,
-                        args.retrained_model,
-                        current_metrics,
-                        dqn_params,
-                        base_config
+                    pierce2rlaf_history.append(new_pierce2rlaf_entry)
+                    
+                    # Update instance
+                    update_success = update_instance_field(
+                        access_token, args.domain, args.schema_id, args.model_id,
+                        "pierce2rlaf", pierce2rlaf_history
                     )
                     
-                    current_metrics = retraining_results["metrics"]
-                    all_metrics.append(current_metrics)
-                    iteration_results.append({
-                        'iteration': iteration + 1,
-                        'action': simulated_action,
-                        'metrics': current_metrics,
-                        'improvement_score': retraining_results.get("improvement_score", 0)
-                    })
+                    if not update_success:
+                        print("WARNING: Failed to update pierce2rlaf")
+                
+                except Exception as e:
+                    print(f"WARNING: Database update failed: {e}")
+                
+                # Trigger DQN pipeline
+                try:
+                    dqn_config = {
+                        "pipeline_id": args.dqn_pipeline_id,
+                        "experiment_id": args.dqn_experiment_id,
+                        "access_token": access_token
+                    }
                     
+                    print(f"Triggering DQN pipeline...")
+                    dqn_success = trigger_and_wait_for_dqn_pipeline(
+                        dqn_config,
+                        args.pipeline_domain,
+                        fixed_dqn_params,
+                        args.model_id
+                    )
+                    
+                    if not dqn_success:
+                        print("ERROR: DQN pipeline failed")
+                        break
+                    
+                    # Get updated instance with DQN action
+                    print(f"Getting DQN action...")
+                    updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                    
+                    if not updated_instance:
+                        print("ERROR: Could not get updated instance")
+                        break
+                    
+                    # Check rlaf2pierce
+                    if 'rlaf2pierce' not in updated_instance or not updated_instance['rlaf2pierce']:
+                        print("ERROR: No rlaf2pierce data from DQN")
+                        break
+                    
+                    latest_rlaf2pierce = updated_instance['rlaf2pierce'][-1]
+                    
+                    # Check if we should continue
+                    if not latest_rlaf2pierce.get("pierce_or_not", True):
+                        print("DQN says pierce_or_not is False. Stopping loop.")
+                        break
+                    
+                    # Get action details
+                    action_id = latest_rlaf2pierce.get('action_id', -1)
+                    rlaf_actions = updated_instance.get('rlaf_actions', {}).get('actions', [])
+                    
+                    if action_id < 0 or action_id >= len(rlaf_actions):
+                        print(f"ERROR: Invalid action_id {action_id}")
+                        break
+                    
+                    action_details = rlaf_actions[action_id]
+                    action_params = action_details.get('params', {})
+                    
+                    print(f"DQN Action: {action_details.get('name', 'unknown')}")
+                    print(f"Action params: {action_params}")
+                    
+                    # Retrain with DQN action
+                    print(f"Retraining with DQN action...")
+                    retraining_results = gan_retraining(
+                        action_params,
+                        current_model_path,
+                        args.data_path,
+                        args.retrained_model,
+                        current_metrics,
+                        fixed_dqn_params
+                    )
+                    
+                    # Update metrics and model path
+                    current_metrics = retraining_results["metrics"]
                     current_model_path = retraining_results["model_path"]
                     
-                    print(f"Iteration {iteration + 1} completed")
-                    continue
-                
-                latest_rlaf2pierce = rlaf2pierce[-1]
-                action_id = latest_rlaf2pierce.get('action_id', -1)
-                
-                if action_id < 0 or action_id >= len(rlaf_actions):
-                    print(f"Invalid action ID: {action_id}")
+                    # Store iteration results
+                    iteration_results.append({
+                        'iteration': iteration + 1,
+                        'action': action_details.get('name', 'unknown'),
+                        'action_params': action_params,
+                        'metrics': current_metrics,
+                        'improvement_score': retraining_results.get('improvement_score', 0)
+                    })
+                    
+                    print(f"Iteration {iteration + 1} completed successfully")
+                    print(f"New metrics: {current_metrics}")
+                    
+                except Exception as e:
+                    print(f"ERROR in iteration {iteration + 1}: {e}")
+                    traceback.print_exc()
                     break
-                
-                action_details = rlaf_actions[action_id]
-                print(f"Action: {action_details.get('name', 'unknown')}")
-                print(f"Params: {action_details.get('params', {})}")
-                
-                retraining_results = gan_retraining(
-                    action_details.get('params', {}),
-                    current_model_path,
-                    args.data_path,
-                    args.tasks,
-                    args.retrained_model,
-                    current_metrics,
-                    dqn_params,
-                    base_config
-                )
-                
-                current_metrics = retraining_results["metrics"]
-                all_metrics.append(current_metrics)
-                iteration_results.append({
-                    'iteration': iteration + 1,
-                    'action': action_details,
-                    'metrics': current_metrics,
-                    'improvement_score': retraining_results.get("improvement_score", 0)
-                })
-                
-                current_model_path = retraining_results["model_path"]
-                
-                print(f"Iteration {iteration + 1} completed")
             
-            print("SAVING RESULTS")
-            print("=" * 80)
+            # Save final results
+            print(f"\\nSaving final results...")
+            print(f"{'='*80}")
             
             try:
                 os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
@@ -834,14 +847,6 @@ implementation:
                     "iterations_completed": len(iteration_results),
                     "final_metrics": current_metrics,
                     "all_iterations": iteration_results,
-                    "domain_info": {
-                        "original_domain": original_domain,
-                        "original_pipeline_domain": original_pipeline_domain,
-                        "cleaned_domain": clean_domain_str,
-                        "cleaned_pipeline_domain": clean_pipeline_domain,
-                        "working_domains_found": working_domains,
-                        "selected_domain": selected_domain
-                    },
                     "model_info": {
                         "initial_model": args.trained_model,
                         "final_model": args.retrained_model,
@@ -860,15 +865,18 @@ implementation:
             except Exception as e:
                 print(f"ERROR saving results: {e}")
             
-            print("RLAF LOOP COMPLETED")
-            print("=" * 80)
-            print(f"Iterations: {len(iteration_results)}/{max_iterations}")
+            # Final summary
+            print(f"\\nRLAF LOOP COMPLETED")
+            print(f"{'='*80}")
+            print(f"Iterations completed: {len(iteration_results)}/2")
+            
             if current_metrics:
-                print("Final metrics:")
+                print(f"Final metrics:")
                 for key, value in current_metrics.items():
                     if isinstance(value, (int, float)):
                         print(f"  {key}: {value:.4f}")
-            print("=" * 80)
+            
+            print(f"{'='*80}")
         
         if __name__ == '__main__':
             main()
