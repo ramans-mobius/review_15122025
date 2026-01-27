@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v8
+name: DCGAN RLAF Loop v9 - FIXED
 description: Triggers the DCGAN RLAF pipeline with proper training and domain handling
 inputs:
   - {name: trained_model, type: Model}
@@ -136,8 +136,8 @@ implementation:
                 return {"metrics": {}, "model_path": output_model_path}
             
             try:
-                from nesy_factory.GANs.dcgan import EnhancedDCGANTrainer, DCGANDataset
-                print("Imported DCGAN modules")
+                from nesy_factory.GANs.dcgan import EnhancedDCGANTrainer, DCGANDataset, TrainingAlgorithm
+                print("Imported DCGAN modules successfully")
             except ImportError as e:
                 print(f"ERROR importing nesy_factory: {e}")
                 return {"metrics": {}, "model_path": output_model_path}
@@ -197,15 +197,54 @@ implementation:
                 print("Loading model...")
                 checkpoint = torch.load(model_path, map_location='cpu')
                 
+                # Check if config exists and is proper
+                dcgan_config = None
                 if 'config' in checkpoint and checkpoint['config'] is not None:
-                    dcgan_config = checkpoint['config']
-                    print(f"Loaded model config")
+                    config_obj = checkpoint['config']
+                    
+                    if isinstance(config_obj, dict):
+                        # It's a dictionary, need to convert to DCGANConfig
+                        try:
+                            from nesy_factory.GANs.dcgan import DCGANConfig
+                            if hasattr(DCGANConfig, 'from_dict'):
+                                dcgan_config = DCGANConfig.from_dict(config_obj)
+                                print(f"Loaded config from dict")
+                            else:
+                                print(f"DCGANConfig.from_dict not available")
+                                dcgan_config = None
+                        except Exception as e:
+                            print(f"Error converting dict to DCGANConfig: {e}")
+                            dcgan_config = None
+                    elif hasattr(config_obj, '__dataclass_fields__'):
+                        # It's already a DCGANConfig dataclass
+                        dcgan_config = config_obj
+                        print(f"Loaded config as dataclass")
+                    else:
+                        print(f"Unknown config type: {type(config_obj)}")
+                        dcgan_config = None
                 else:
-                    print(f"No config in checkpoint, using defaults")
-                    dcgan_config = None
+                    print(f"No config in checkpoint")
                 
-                trainer = EnhancedDCGANTrainer(dcgan_config) if dcgan_config else EnhancedDCGANTrainer()
+                # Create trainer with or without config
+                if dcgan_config:
+                    trainer = EnhancedDCGANTrainer(dcgan_config)
+                else:
+                    # Create default config
+                    try:
+                        from nesy_factory.GANs.dcgan import DCGANConfig
+                        default_config = DCGANConfig(
+                            image_size=image_size,
+                            channels=channels,
+                            latent_dim=100,
+                            batch_size=32,
+                            epochs=3
+                        )
+                        trainer = EnhancedDCGANTrainer(default_config)
+                    except:
+                        print("Creating trainer with minimal configuration...")
+                        trainer = EnhancedDCGANTrainer()
                 
+                # Load weights
                 if 'generator_state_dict' in checkpoint:
                     trainer.generator.load_state_dict(checkpoint['generator_state_dict'])
                     print(f"Loaded generator weights")
@@ -214,8 +253,15 @@ implementation:
                     trainer.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
                     print(f"Loaded discriminator weights")
                 
-                latent_dim = trainer.generator.latent_dim if hasattr(trainer.generator, 'latent_dim') else 100
+                # Get latent dim
+                if hasattr(trainer.generator, 'latent_dim'):
+                    latent_dim = trainer.generator.latent_dim
+                elif 'latent_dim' in checkpoint:
+                    latent_dim = checkpoint['latent_dim']
+                else:
+                    latent_dim = 100
                 
+                # Move to device
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 trainer.generator = trainer.generator.to(device)
                 trainer.discriminator = trainer.discriminator.to(device)
@@ -225,6 +271,7 @@ implementation:
                 
             except Exception as e:
                 print(f"ERROR loading model: {e}")
+                traceback.print_exc()
                 return {"metrics": {}, "model_path": output_model_path}
             
             try:
@@ -250,26 +297,57 @@ implementation:
                 print(f"Epochs: {epochs}")
                 print(f"Dropout: {dropout}")
                 
+                # Update trainer config
                 if hasattr(trainer, 'config'):
+                    # Update training algorithm using enum
                     if hasattr(trainer.config, 'training_algorithm'):
-                        trainer.config.training_algorithm = algorithm
+                        try:
+                            # Convert string to TrainingAlgorithm enum
+                            if algorithm == 'forward_forward':
+                                trainer.config.training_algorithm = TrainingAlgorithm.FORWARD_FORWARD
+                            elif algorithm == 'cafo':
+                                trainer.config.training_algorithm = TrainingAlgorithm.CAFO
+                            else:
+                                trainer.config.training_algorithm = TrainingAlgorithm.BACKPROP
+                        except:
+                            print("Could not set training algorithm enum")
                     
+                    # Update other parameters
                     if hasattr(trainer.config, 'batch_size'):
                         trainer.config.batch_size = batch_size
                     
                     if hasattr(trainer.config, 'epochs'):
                         trainer.config.epochs = epochs
+                    
+                    # Update dropout rates
+                    if hasattr(trainer.config, 'generator_dropout'):
+                        trainer.config.generator_dropout = dropout
+                    
+                    if hasattr(trainer.config, 'discriminator_dropout'):
+                        trainer.config.discriminator_dropout = dropout
                 
-                if hasattr(trainer, 'g_optimizer'):
-                    for param_group in trainer.g_optimizer.param_groups:
+                # Update optimizer learning rates
+                if hasattr(trainer, 'gen_optimizer'):
+                    for param_group in trainer.gen_optimizer.param_groups:
                         param_group['lr'] = learning_rate_g
+                    print(f"Updated generator optimizer LR to {learning_rate_g}")
                 
-                if hasattr(trainer, 'd_optimizer'):
-                    for param_group in trainer.d_optimizer.param_groups:
+                if hasattr(trainer, 'disc_optimizer'):
+                    for param_group in trainer.disc_optimizer.param_groups:
                         param_group['lr'] = learning_rate_d
+                    print(f"Updated discriminator optimizer LR to {learning_rate_d}")
+                
+                # Also update config optimizer settings
+                if hasattr(trainer, 'config'):
+                    if hasattr(trainer.config, 'generator_optimizer'):
+                        trainer.config.generator_optimizer.learning_rate = learning_rate_g
+                    
+                    if hasattr(trainer.config, 'discriminator_optimizer'):
+                        trainer.config.discriminator_optimizer.learning_rate = learning_rate_d
                 
             except Exception as e:
                 print(f"WARNING updating parameters: {e}")
+                traceback.print_exc()
             
             try:
                 print("Creating dataloader...")
@@ -291,17 +369,17 @@ implementation:
                 print(f"ERROR creating dataloader: {e}")
                 return {"metrics": {}, "model_path": output_model_path}
             
-            print("TRAINING - {epochs} EPOCHS")
+            print(f"TRAINING - {epochs} EPOCHS")
             print("=" * 60)
             
+            training_history = {
+                'generator_losses': [],
+                'discriminator_losses': [],
+                'real_scores': [],
+                'fake_scores': []
+            }
+            
             try:
-                training_history = {
-                    'generator_losses': [],
-                    'discriminator_losses': [],
-                    'real_scores': [],
-                    'fake_scores': []
-                }
-                
                 for epoch in range(epochs):
                     print(f"EPOCH {epoch+1}/{epochs}:")
                     
@@ -311,13 +389,15 @@ implementation:
                     epoch_fake_scores = []
                     
                     for batch_idx, batch_data in enumerate(dataloader):
-                        if batch_idx > 5:
+                        if batch_idx > 5:  # Limit batches for testing
+                            print(f"  Limiting to 6 batches for testing")
                             break
                         
                         real_data = batch_data.to(device)
                         batch_size_real = real_data.size(0)
                         
-                        trainer.d_optimizer.zero_grad()
+                        # Train discriminator
+                        trainer.disc_optimizer.zero_grad()
                         
                         real_output = trainer.discriminator(real_data)
                         if real_output.dim() > 1:
@@ -326,6 +406,7 @@ implementation:
                         real_labels = torch.ones(batch_size_real, device=device)
                         d_loss_real = nn.functional.binary_cross_entropy_with_logits(real_output, real_labels)
                         
+                        # Generate fake data
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = trainer.generator(z).detach()
                         fake_output = trainer.discriminator(fake_data)
@@ -337,9 +418,10 @@ implementation:
                         
                         d_loss = (d_loss_real + d_loss_fake) / 2
                         d_loss.backward()
-                        trainer.d_optimizer.step()
+                        trainer.disc_optimizer.step()
                         
-                        trainer.g_optimizer.zero_grad()
+                        # Train generator
+                        trainer.gen_optimizer.zero_grad()
                         
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = trainer.generator(z)
@@ -349,16 +431,18 @@ implementation:
                         
                         g_loss = nn.functional.binary_cross_entropy_with_logits(fake_output, real_labels)
                         g_loss.backward()
-                        trainer.g_optimizer.step()
+                        trainer.gen_optimizer.step()
                         
+                        # Collect metrics
                         epoch_g_loss.append(g_loss.item())
                         epoch_d_loss.append(d_loss.item())
                         epoch_real_scores.append(real_output.mean().item())
                         epoch_fake_scores.append(fake_output.mean().item())
                         
                         if batch_idx % 2 == 0:
-                            print(f"BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
+                            print(f"  BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
                     
+                    # Calculate epoch averages
                     avg_g_loss = np.mean(epoch_g_loss) if epoch_g_loss else 0
                     avg_d_loss = np.mean(epoch_d_loss) if epoch_d_loss else 0
                     avg_real_score = np.mean(epoch_real_scores) if epoch_real_scores else 0.5
@@ -369,13 +453,16 @@ implementation:
                     training_history['real_scores'].append(avg_real_score)
                     training_history['fake_scores'].append(avg_fake_score)
                     
-                    print(f"EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}, Real={avg_real_score:.3f}, Fake={avg_fake_score:.3f}")
+                    print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}, Real={avg_real_score:.3f}, Fake={avg_fake_score:.3f}")
                 
-                print(f"Training completed")
+                print(f"Training completed successfully")
                 
             except Exception as e:
                 print(f"ERROR during training: {e}")
+                traceback.print_exc()
+                # Continue with whatever metrics we have
             
+            # Calculate final metrics
             final_metrics = {}
             if training_history['generator_losses']:
                 final_metrics = {
@@ -383,19 +470,21 @@ implementation:
                     'discriminator_loss': training_history['discriminator_losses'][-1] if training_history['discriminator_losses'] else 0.0,
                     'real_score': training_history['real_scores'][-1] if training_history['real_scores'] else 0.5,
                     'fake_score': training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5,
-                    'score_difference': abs((training_history['real_scores'][-1] if training_history['real_scores'] else 0.5) - (training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5))
+                    'score_difference': abs((training_history['real_scores'][-1] if training_history['real_scores'] else 0.5) - 
+                                           (training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5))
                 }
             
             print(f"FINAL METRICS:")
             for key, value in final_metrics.items():
                 print(f"  {key}: {value:.4f}")
             
+            # Calculate improvement
             improvement_score = 0
-            if previous_metrics:
+            if previous_metrics and dqn_params:
                 print(f"Calculating improvement...")
                 for param in dqn_params:
-                    key = param['key']
-                    sign = 1 if param['sign'] == '+' else -1
+                    key = param.get('key', '')
+                    sign = 1 if param.get('sign', '+') == '+' else -1
                     
                     if key in final_metrics and key in previous_metrics:
                         current_val = final_metrics[key]
@@ -411,24 +500,26 @@ implementation:
             try:
                 print(f"Saving retrained model...")
                 
+                # Prepare checkpoint
                 checkpoint_to_save = {
                     'model_source': 'rlaf_trained',
                     'model_type': 'dcgan',
                     'algorithm': algorithm,
-                    'config': dcgan_config if 'dcgan_config' in locals() else {},
+                    'config': trainer.config if hasattr(trainer, 'config') else {},
                     'generator_state_dict': trainer.generator.state_dict(),
                     'discriminator_state_dict': trainer.discriminator.state_dict(),
-                    'generator_optimizer_state': trainer.g_optimizer.state_dict() if hasattr(trainer, 'g_optimizer') else None,
-                    'discriminator_optimizer_state': trainer.d_optimizer.state_dict() if hasattr(trainer, 'd_optimizer') else None,
+                    'generator_optimizer_state': trainer.gen_optimizer.state_dict() if hasattr(trainer, 'gen_optimizer') else None,
+                    'discriminator_optimizer_state': trainer.disc_optimizer.state_dict() if hasattr(trainer, 'disc_optimizer') else None,
                     'training_history': training_history,
-                    'epoch': epochs,
+                    'epochs': epochs,
                     'batch_size': batch_size,
                     'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'latent_dim': latent_dim,
                     'image_size': image_size,
                     'channels': channels,
                     'improvement_score': improvement_score,
-                    'action_params': action_params
+                    'action_params': action_params,
+                    'final_metrics': final_metrics
                 }
                 
                 os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
@@ -439,7 +530,12 @@ implementation:
                 print(f"ERROR saving model: {e}")
                 return {"metrics": final_metrics, "model_path": output_model_path}
             
-            return {"metrics": final_metrics, "model_path": output_model_path}
+            return {
+                "metrics": final_metrics, 
+                "model_path": output_model_path,
+                "improvement_score": improvement_score,
+                "training_history": training_history
+            }
         
         def get_retry_session():
             retry_strategy = Retry(
@@ -490,6 +586,37 @@ implementation:
                 print(f"ERROR getting instance: {e}")
                 return None
         
+        def extract_metrics_from_rlaf(rlaf_metrics):
+            """Extract relevant metrics from RLAF metrics format"""
+            metrics = {}
+            
+            if not rlaf_metrics:
+                return metrics
+            
+            # Try to extract from primary_metrics
+            if 'primary_metrics' in rlaf_metrics:
+                primary = rlaf_metrics['primary_metrics']
+                for key, value in primary.items():
+                    if isinstance(value, (int, float)):
+                        metrics[f'primary_{key}'] = value
+            
+            # Try to extract from composite_scores
+            if 'composite_scores' in rlaf_metrics:
+                composite = rlaf_metrics['composite_scores']
+                for key, value in composite.items():
+                    if isinstance(value, (int, float)):
+                        metrics[f'composite_{key}'] = value
+            
+            # Extract from dqn_parameters if available
+            if 'dqn_parameters' in rlaf_metrics:
+                for param in rlaf_metrics['dqn_parameters']:
+                    key = param.get('key', '')
+                    value = param.get('value', 0)
+                    if isinstance(value, (int, float)):
+                        metrics[f'dqn_{key}'] = value
+            
+            return metrics
+        
         def main():
             parser = argparse.ArgumentParser()
             parser.add_argument('--trained_model', type=str, required=True)
@@ -508,7 +635,7 @@ implementation:
             parser.add_argument('--retrained_model', type=str, required=True)
             args = parser.parse_args()
             
-            print("DCGAN RLAF LOOP v8")
+            print("DCGAN RLAF LOOP v9 - FIXED")
             print("=" * 80)
             
             print("Cleaning domains...")
@@ -556,13 +683,22 @@ implementation:
                 print(f"ERROR loading access token: {e}")
                 sys.exit(1)
             
+            # Load initial metrics
             try:
                 with open(args.init_metrics, 'r') as f:
-                    current_metrics = json.load(f)
-                print(f"Initial metrics loaded: {list(current_metrics.keys())}")
+                    rlaf_metrics_data = json.load(f)
+                
+                # Extract metrics from RLAF format
+                current_metrics = extract_metrics_from_rlaf(rlaf_metrics_data)
+                print(f"Initial metrics extracted: {list(current_metrics.keys())}")
+                
+                # Also get dqn_parameters for improvement calculation
+                dqn_params_from_file = rlaf_metrics_data.get('dqn_parameters', [])
+                
             except Exception as e:
                 print(f"ERROR loading metrics: {e}")
                 current_metrics = {}
+                dqn_params_from_file = []
             
             print("Attempting to get instance from schema...")
             instance = None
@@ -589,18 +725,25 @@ implementation:
             except:
                 base_config = {}
             
+            # Current model path
+            current_model_path = args.trained_model
+            
             for iteration in range(max_iterations):
                 print(f"ITERATION {iteration + 1}/{max_iterations}")
                 print("-" * 60)
                 
-                dqn_params = []
-                for key, value in current_metrics.items():
-                    if isinstance(value, (int, float)):
-                        if any(term in key.lower() for term in ['loss', 'error', 'mse', 'mae']):
-                            sign = "-"
-                        else:
-                            sign = "+"
-                        dqn_params.append({"key": key, "sign": sign, "mul": 1.0})
+                # Use dqn_parameters from metrics file
+                dqn_params = dqn_params_from_file
+                if not dqn_params:
+                    # Fallback: create from current metrics
+                    dqn_params = []
+                    for key, value in current_metrics.items():
+                        if isinstance(value, (int, float)):
+                            if any(term in key.lower() for term in ['loss', 'error', 'mse', 'mae', 'fid']):
+                                sign = "-"
+                            else:
+                                sign = "+"
+                            dqn_params.append({"key": key, "sign": sign, "value": value})
                 
                 print(f"Prepared {len(dqn_params)} metrics for DQN")
                 
@@ -624,7 +767,7 @@ implementation:
                     print("Running retraining with simulated action...")
                     retraining_results = gan_retraining(
                         simulated_action['params'],
-                        args.trained_model,
+                        current_model_path,
                         args.data_path,
                         args.tasks,
                         args.retrained_model,
@@ -638,10 +781,11 @@ implementation:
                     iteration_results.append({
                         'iteration': iteration + 1,
                         'action': simulated_action,
-                        'metrics': current_metrics
+                        'metrics': current_metrics,
+                        'improvement_score': retraining_results.get("improvement_score", 0)
                     })
                     
-                    args.trained_model = retraining_results["model_path"]
+                    current_model_path = retraining_results["model_path"]
                     
                     print(f"Iteration {iteration + 1} completed")
                     continue
@@ -659,7 +803,7 @@ implementation:
                 
                 retraining_results = gan_retraining(
                     action_details.get('params', {}),
-                    args.trained_model,
+                    current_model_path,
                     args.data_path,
                     args.tasks,
                     args.retrained_model,
@@ -674,10 +818,10 @@ implementation:
                     'iteration': iteration + 1,
                     'action': action_details,
                     'metrics': current_metrics,
-                    'improvement': retraining_results.get("improvement_score", 0)
+                    'improvement_score': retraining_results.get("improvement_score", 0)
                 })
                 
-                args.trained_model = retraining_results["model_path"]
+                current_model_path = retraining_results["model_path"]
                 
                 print(f"Iteration {iteration + 1} completed")
             
