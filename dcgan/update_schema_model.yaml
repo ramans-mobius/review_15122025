@@ -1,4 +1,4 @@
-name: Upload Model To Schema Complete v2
+name: Upload Model To Schema Complete v5
 description: Uploads model to schema with complete required fields only
 inputs:
   # Model inputs
@@ -128,8 +128,8 @@ implementation:
         print(f"trained_model path: {args.trained_model}")
         print(f"model_weights_cdn_url: {args.model_weights_cdn_url}")
         print(f"model_metadata_cdn_url: {args.model_metadata_cdn_url}")
-        print(f"master_config: {args.master_config[:100]}...")
-        print(f"model_info: {args.model_info[:100]}...")
+        print(f"master_config: {args.master_config}...")
+        print(f"model_info: {args.model_info}...")
         print(f"schema_id: {args.schema_id}")
         print(f"bearer_token length: {len(args.bearer_token)}")
         print(f"model_id: {args.model_id}")
@@ -198,7 +198,7 @@ implementation:
             parsed = urllib.parse.urlparse(model_weights_cdn)
             print(f"Parsed scheme: {parsed.scheme}")
             print(f"Parsed netloc: {parsed.netloc}")
-            print(f"Parsed path: {parsed.path[:100]}...")
+            print(f"Parsed path: {parsed.path}...")
         
         print("-" * 60)
         
@@ -530,9 +530,9 @@ implementation:
             },
             "cdn_urls_debug": {
                 "model_weights_cdn_length": len(model_weights_cdn),
-                "model_weights_cdn_preview": model_weights_cdn[:200] + "..." if len(model_weights_cdn) > 200 else model_weights_cdn,
+                "model_weights_cdn_preview": model_weights_cdn + "..." if len(model_weights_cdn) > 200 else model_weights_cdn,
                 "model_metadata_cdn_length": len(model_metadata_cdn),
-                "model_metadata_cdn_preview": model_metadata_cdn[:200] + "..." if len(model_metadata_cdn) > 200 else model_metadata_cdn,
+                "model_metadata_cdn_preview": model_metadata_cdn + "..." if len(model_metadata_cdn) > 200 else model_metadata_cdn,
                 "model_url_same_as_weights": model_weights_cdn == schema_entry.get("model_url", "")
             },
             "data_types_check": {
