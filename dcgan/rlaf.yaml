@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v11
+name: DCGAN RLAF Loop v12
 description: Triggers the DCGAN RLAF pipeline with proper database interaction
 inputs:
   - {name: trained_model, type: Model}
@@ -574,7 +574,7 @@ implementation:
             }
         
         def extract_gan_metrics(metrics_file_path):
-            """Extract GAN metrics from evaluation metrics file"""
+          
             print(f"Extracting GAN metrics from: {metrics_file_path}")
             
             metrics = {
