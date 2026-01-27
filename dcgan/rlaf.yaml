@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v14
+name: DCGAN RLAF Loop v15
 description: Triggers the DQN RLAF pipeline in a loop to optimize DCGAN model hyperparameters for continual learning tasks
 inputs:
   - name: trained_model
@@ -1160,7 +1160,7 @@ implementation:
             
             # Run RLAF loop for 2 iterations
             for i in range(2):
-                print(f"\n{'='*60}")
+                print(f"\\n{'='*60}")
                 print(f"RLAF ITERATION {i+1}/2")
                 print(f"{'='*60}")
                 
@@ -1310,7 +1310,7 @@ implementation:
             
             print(f"DEBUG: Final results saved to: {args.rlaf_output}")
            
-            print("\n" + "=" * 80)
+            print("\\n" + "=" * 80)
             print("DCGAN RLAF LOOP COMPLETED SUCCESSFULLY")
             print("=" * 80)
             print(f"Total iterations completed: {i + 1}")
@@ -1321,7 +1321,7 @@ implementation:
                 if not np.isnan(metric_value):
                     print(f"  {metric_name}: {metric_value:.4f}")
             
-            print("\n" + "=" * 80)
+            print("\\n" + "=" * 80)
             print("LOGS:")
             print("-" * 80)
             
@@ -1333,12 +1333,12 @@ implementation:
                 output_size = os.path.getsize(args.rlaf_output)
                 print(f"RLAF output size: {output_size:,} bytes")
             
-            print(f"\nOutput files:")
+            print(f"\\nOutput files:")
             print(f"  ✓ RLAF Output: {args.rlaf_output}")
             print(f"  ✓ Retrained Model: {args.retrained_model}")
             
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"\nDevice used: {device}")
+            print(f"\\nDevice used: {device}")
             if torch.cuda.is_available():
                 print(f"CUDA Device: {torch.cuda.get_device_name(0)}")
                 print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
@@ -1347,10 +1347,10 @@ implementation:
         if __name__ == '__main__':
             try:
                 main()
-                print("\n✓ DCGAN RLAF Loop completed successfully")
+                print("\\n✓ DCGAN RLAF Loop completed successfully")
                 sys.exit(0)
             except Exception as e:
-                print(f"\n✗ DCGAN RLAF Loop failed with error: {e}")
+                print(f"\\n✗ DCGAN RLAF Loop failed with error: {e}")
                 traceback.print_exc()
                 sys.exit(1)
     args:
