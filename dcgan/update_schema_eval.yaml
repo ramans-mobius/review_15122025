@@ -1,5 +1,5 @@
-name: Upload Evaluation Metrics To Schema v6
-description: Uploads FID, SSIM, PSNR scores to performance matrix schema
+name: Upload Evaluation Metrics To Schema v8
+description: Uploads FID, SSIM, PSNR scores to performance matrix schema with enhanced debugging
 inputs:
   - name: evaluation_metrics
     type: String
@@ -25,6 +25,8 @@ outputs:
     type: String
   - name: schema_response
     type: String
+  - name: diagnostic_log
+    type: String
 implementation:
   container:
     image: deepak0147/nessy-facotry:0.0.9
@@ -32,7 +34,7 @@ implementation:
       - sh
       - -c
       - |
-        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        apt-get update > /dev/null && apt-get install -y curl jq > /dev/null
         exec "$0" "$@"
       - python3
       - -u
@@ -60,92 +62,224 @@ implementation:
         parser.add_argument('--model_type', type=str, default='DCGAN')
         parser.add_argument('--upload_status', type=str, required=True)
         parser.add_argument('--schema_response', type=str, required=True)
+        parser.add_argument('--diagnostic_log', type=str, required=True)
         args = parser.parse_args()
         
-        print("=" * 80)
-        print("UPLOAD EVALUATION METRICS TO SCHEMA v5")
-        print("=" * 80)
+        print("=" * 100)
+        print("UPLOAD EVALUATION METRICS TO SCHEMA v6 - ENHANCED DEBUGGING")
+        print("=" * 100)
         
-        for path in [args.upload_status, args.schema_response]:
+        for path in [args.upload_status, args.schema_response, args.diagnostic_log]:
             if path:
                 dir_path = os.path.dirname(path)
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
         
+        # Initialize diagnostic log
+        diagnostic_log = []
+        
+        def log_diagnostic(level, message, data=None):
+            timestamp = datetime.now().isoformat()
+            entry = {
+                'timestamp': timestamp,
+                'level': level,
+                'message': message,
+                'data': data
+            }
+            diagnostic_log.append(entry)
+            print(f"[{level.upper()}] {message}")
+            if data:
+                print(f"  Data: {json.dumps(data)[:200]}...")
+        
         bearer_token = args.bearer_token.strip()
-        print(f"Bearer token length: {len(bearer_token)} chars")
+        log_diagnostic('info', f'Bearer token length: {len(bearer_token)} chars')
         
         try:
             execution_id = int(args.execution_id)
-            print(f"Execution ID: {execution_id} (type: number)")
+            log_diagnostic('info', f'Execution ID: {execution_id} (type: number)')
         except ValueError:
-            print(f"ERROR: execution_id must be an integer. Got: {args.execution_id}")
+            log_diagnostic('error', f'Execution_id must be an integer. Got: {args.execution_id}')
             sys.exit(1)
         
         current_timestamp = int(time.time())
         
-        print(f"Parameters:")
-        print(f"  Schema ID: {args.schema_id}")
-        print(f"  Model ID: {args.model_id}")
-        print(f"  Model Name: {args.model_name}")
-        print(f"  Model Type: {args.model_type}")
-        print(f"  Execution ID: {execution_id}")
-        print(f"  Tenant ID: {args.tenant_id}")
-        print(f"  Project ID: {args.project_id}")
-        print(f"  Timestamp: {current_timestamp}")
+        log_diagnostic('info', 'Parameters loaded:')
+        log_diagnostic('debug', f'Schema ID: {args.schema_id}')
+        log_diagnostic('debug', f'Model ID: {args.model_id}')
+        log_diagnostic('debug', f'Model Name: {args.model_name}')
+        log_diagnostic('debug', f'Execution ID: {execution_id}')
+        
+        print("\\n" + "="*100)
+        print("DIAGNOSTIC TEST: SCHEMA VALIDATION")
+        print("="*100)
+        
+        def validate_schema_access(schema_id, bearer_token):
+         
+            base_url = "https://igs.gov-cloud.ai/pi-entity-instances-service"
+            test_urls = [
+                f"{base_url}/v3.0/schemas/{schema_id}",
+                f"{base_url}/schemas/{schema_id}",
+                f"{base_url}/v3.0/schemas/{schema_id}/definition",
+                f"{base_url}/schemas/{schema_id}/definition"
+            ]
+            
+            for idx, test_url in enumerate(test_urls):
+                log_diagnostic('debug', f'Testing schema URL {idx+1}: {test_url}')
+                
+                try:
+                    curl_command = [
+                        "curl",
+                        "--location", test_url,
+                        "--header", f"Authorization: Bearer {bearer_token}",
+                        "--header", "Content-Type: application/json",
+                        "--fail",
+                        "--show-error",
+                        "--connect-timeout", "30",
+                        "--max-time", "60",
+                        "--silent",
+                        "--include"
+                    ]
+                    
+                    process = subprocess.run(
+                        curl_command,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    
+                    # Parse HTTP response
+                    headers_end = process.stdout.find('\\r\\n\\r\\n')
+                    if headers_end == -1:
+                        headers_end = process.stdout.find('\\n\\n')
+                    
+                    if headers_end > 0:
+                        headers_text = process.stdout[:headers_end]
+                        body_text = process.stdout[headers_end:].strip()
+                        
+                        # Check HTTP status
+                        for line in headers_text.split('\\n'):
+                            if line.startswith('HTTP/'):
+                                if '200' in line or '201' in line:
+                                    log_diagnostic('success', f' Schema accessible at: {test_url}')
+                                    return True, test_url, body_text[:500]
+                                elif '401' in line:
+                                    log_diagnostic('error', f' Authentication failed (401)')
+                                    return False, test_url, 'Authentication failed'
+                                elif '403' in line:
+                                    log_diagnostic('error', f' Permission denied (403)')
+                                    return False, test_url, 'Permission denied'
+                                elif '404' in line:
+                                    log_diagnostic('warning', f'  Schema not found (404) at this URL')
+                                    continue
+                    
+                    if process.returncode != 0:
+                        log_diagnostic('error', f'Curl failed with exit code: {process.returncode}')
+                        if process.stderr:
+                            log_diagnostic('error', f'Error: {process.stderr[:200]}')
+                            
+                except Exception as e:
+                    log_diagnostic('error', f'Exception testing schema: {str(e)}')
+            
+            return False, None, f"Schema {schema_id} not found at any endpoint"
+        
+        # Validate schema access
+        schema_accessible, schema_url, schema_info = validate_schema_access(args.schema_id, bearer_token)
+        
+        if not schema_accessible:
+            log_diagnostic('critical', f' Schema {args.schema_id} is not accessible')
+            print(f"\\n TROUBLESHOOTING REQUIRED:")
+            print(f"   Schema ID: {args.schema_id}")
+            print(f"   Please verify:")
+            print(f"   1. Schema ID is correct")
+            print(f"   2. You have permission to access this schema")
+            print(f"   3. The schema service is running")
+            print(f"   4. Your bearer token is valid")
+            
+            diagnostic_summary = {
+                'timestamp': datetime.now().isoformat(),
+                'schema_id': args.schema_id,
+                'schema_accessible': False,
+                'test_urls': [
+                    f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}",
+                    f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}"
+                ],
+                'diagnostic_log': diagnostic_log
+            }
+            
+            with open(args.diagnostic_log, 'w') as f:
+                json.dump(diagnostic_summary, f, indent=2)
+            
+            sys.exit(1)
+        
+        log_diagnostic('success', f' Schema validation passed, proceeding with metrics upload')
+        
+        print("\\n" + "="*100)
+        print("LOADING EVALUATION METRICS")
+        print("="*100)
         
         try:
             with open(args.evaluation_metrics, 'r') as f:
                 eval_metrics = json.load(f)
-            print(f"Loaded evaluation metrics")
+            log_diagnostic('success', f' Evaluation metrics loaded successfully')
+            log_diagnostic('debug', f'Metrics keys: {list(eval_metrics.keys())}')
             
         except Exception as e:
-            print(f"ERROR loading evaluation data: {e}")
+            log_diagnostic('error', f'ERROR loading evaluation data: {e}')
             traceback.print_exc()
             sys.exit(1)
         
-        print(f"Extracting FID, SSIM, PSNR values...")
+        print("\\n" + "="*100)
+        print("EXTRACTING METRIC VALUES")
+        print("="*100)
         
         fid_value = 0.0
         ssim_value = 0.0
         psnr_value = 0.0
         mse_value = 0.0
         
+        # Extract FID
         fid_keys = ['fid', 'fid_score', 'FID', 'fid_value']
         for key in fid_keys:
             if key in eval_metrics:
                 fid_value = float(eval_metrics[key])
-                print(f"Found FID: {key} = {fid_value}")
+                log_diagnostic('info', f'Found FID: {key} = {fid_value}')
                 break
         
+        # Extract SSIM
         ssim_keys = ['ssim', 'ssim_mean', 'SSIM', 'ssim_value']
         for key in ssim_keys:
             if key in eval_metrics:
                 ssim_value = float(eval_metrics[key])
-                print(f"Found SSIM: {key} = {ssim_value}")
+                log_diagnostic('info', f'Found SSIM: {key} = {ssim_value}')
                 break
         
+        # Extract PSNR
         psnr_keys = ['psnr', 'psnr_mean', 'PSNR', 'psnr_value']
         for key in psnr_keys:
             if key in eval_metrics:
                 psnr_value = float(eval_metrics[key])
-                print(f"Found PSNR: {key} = {psnr_value}")
+                log_diagnostic('info', f'Found PSNR: {key} = {psnr_value}')
                 break
         
         if 'mse' in eval_metrics:
             mse_value = float(eval_metrics['mse'])
-            print(f"Found MSE: {mse_value}")
+            log_diagnostic('info', f'Found MSE: {mse_value}')
         
         algorithm = eval_metrics.get('algorithm', 'unknown')
         
-        print(f"Extracted values:")
-        print(f"  FID: {fid_value}")
-        print(f"  SSIM: {ssim_value}")
-        print(f"  PSNR: {psnr_value}")
+        log_diagnostic('info', 'Extracted metric values:')
+        log_diagnostic('debug', f'FID: {fid_value:.2f}')
+        log_diagnostic('debug', f'SSIM: {ssim_value:.4f}')
+        log_diagnostic('debug', f'PSNR: {psnr_value:.2f} dB')
         if mse_value > 0:
-            print(f"  MSE: {mse_value}")
+            log_diagnostic('debug', f'MSE: {mse_value:.6f}')
         
-        print(f"Creating schema entry...")
+        print("\\n" + "="*100)
+        print("PREPARING SCHEMA ENTRY")
+        print("="*100)
+        
+        # Calculate derived metrics
+        rmse_value = np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else 0.0
         
         schema_entry = {
             'tenant_id': str(args.tenant_id),
@@ -163,44 +297,59 @@ implementation:
             'accuracy': float(ssim_value),
             'precision_score': float(psnr_value),
             'r2_score': float(ssim_value),
-            'rmse_score': float(np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else 0.0),
-            'rmse': str(np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else "0.0"),
+            'rmse_score': float(rmse_value),
+            'rmse': str(rmse_value),
             'roc_auc': int(0),
             'confusion_matrix': [],
             'recall': float(0.0),
             'f1_score': float(0.0)
         }
         
-        print(f"Schema entry prepared ({len(schema_entry)} fields):")
-        for key, value in schema_entry.items():
-            print(f"  {key}: {value} (type: {type(value).__name__})")
+        log_diagnostic('info', f'Schema entry prepared with {len(schema_entry)} fields')
+        log_diagnostic('debug', 'Key metric fields:')
+        log_diagnostic('debug', f'  fid: {schema_entry["fid"]:.2f}')
+        log_diagnostic('debug', f'  ssim: {schema_entry["ssim"]:.4f}')
+        log_diagnostic('debug', f'  psnr: {schema_entry["psnr"]:.2f}')
+        log_diagnostic('debug', f'  rmse: {schema_entry["rmse"]}')
         
-        def upload_to_schema(schema_data):
+        print("\\n" + "="*100)
+        print("UPLOADING TO SCHEMA")
+        print("="*100)
+        
+        def upload_to_schema_with_diagnostics(schema_data, schema_id, bearer_token):
+            """Upload with comprehensive diagnostics"""
             endpoints = [
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/create"
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/create",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{schema_id}/instances/create",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{schema_id}/instances"
             ]
             
-            for endpoint_idx, schema_url in enumerate(endpoints):
-                clean_url = schema_url.replace('\\n', '').replace('\\r', '')
-                print(f"Trying endpoint {endpoint_idx + 1}: {clean_url}")
+            for endpoint_idx, endpoint in enumerate(endpoints):
+                clean_url = endpoint.replace('\\n', '').replace('\\r', '')
+                log_diagnostic('info', f'Trying endpoint {endpoint_idx + 1}: {clean_url}')
                 
                 try:
+                    # Create temporary file for request data
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                        json.dump(schema_data, tmp, indent=2)
+                        tmp_path = tmp.name
+                    
+                    # Use curl with verbose output
                     curl_command = [
                         "curl",
                         "--location", clean_url,
                         "--header", f"Authorization: Bearer {bearer_token}",
                         "--header", "Content-Type: application/json",
                         "--data", json.dumps(schema_data),
-                        "--fail",
-                        "--show-error",
+                        "--verbose",
                         "--connect-timeout", "30",
-                        "--max-time", "60"
+                        "--max-time", "90",
+                        "--include"
                     ]
                     
-                    print(f"Executing curl command...")
-                    
+                    log_diagnostic('debug', 'Executing curl command...')
                     process = subprocess.run(
                         curl_command,
                         capture_output=True,
@@ -208,43 +357,81 @@ implementation:
                         check=False
                     )
                     
-                    print(f"Curl exit code: {process.returncode}")
+                    # Clean up temp file
+                    os.unlink(tmp_path)
+                    
+                    # Analyze verbose output
+                    log_diagnostic('debug', f'Curl exit code: {process.returncode}')
+                    
+                    # Check for specific errors in verbose output
+                    if "HTTP/1.1 401" in process.stderr or "HTTP/2 401" in process.stderr:
+                        log_diagnostic('error', f' Authentication failed (401)')
+                        return False, {"error": "Authentication failed (401)", "endpoint": clean_url}, clean_url
+                    elif "HTTP/1.1 403" in process.stderr or "HTTP/2 403" in process.stderr:
+                        log_diagnostic('error', f' Permission denied (403)')
+                        return False, {"error": "Permission denied (403)", "endpoint": clean_url}, clean_url
+                    elif "HTTP/1.1 404" in process.stderr or "HTTP/2 404" in process.stderr:
+                        log_diagnostic('warning', f'  Endpoint not found (404)')
+                        continue  # Try next endpoint
+                    elif "HTTP/1.1 400" in process.stderr or "HTTP/2 400" in process.stderr:
+                        log_diagnostic('error', f' Bad request (400)')
+                        # Extract error message
+                        error_msg = ""
+                        for line in process.stderr.split('\\n'):
+                            if '<' in line and '>' in line:  # HTML error
+                                error_msg = line[line.find('>')+1:line.rfind('<')].strip()
+                                break
+                        if not error_msg:
+                            error_msg = process.stderr[:200]
+                        return False, {"error": f"Bad request (400): {error_msg}", "endpoint": clean_url}, clean_url
                     
                     if process.returncode == 0:
-                        print(f"Upload successful")
+                        log_diagnostic('success', f' Upload successful to: {clean_url}')
                         
-                        print(f"Full response:")
-                        print("-" * 40)
-                        print(process.stdout)
-                        print("-" * 40)
-                        
+                        # Parse response
                         try:
-                            response_data = json.loads(process.stdout)
-                            return True, response_data, None
+                            # Extract JSON from response
+                            output_lines = process.stdout.split('\\n')
+                            json_start = None
+                            for i, line in enumerate(output_lines):
+                                if line.strip() and (line.strip().startswith('{') or line.strip().startswith('[')):
+                                    json_start = i
+                                    break
+                            
+                            if json_start is not None:
+                                response_json = '\\n'.join(output_lines[json_start:])
+                                response_data = json.loads(response_json)
+                            else:
+                                response_data = {"raw_response": process.stdout[:500]}
+                                
                         except json.JSONDecodeError:
-                            return True, {"raw_response": process.stdout}, None
+                            response_data = {"raw_response": process.stdout[:500]}
+                        
+                        return True, response_data, clean_url
                     else:
-                        print(f"Upload failed (exit code: {process.returncode})")
-                        print(f"Stderr: {process.stderr[:200]}")
-                        print(f"Stdout: {process.stdout[:200]}")
+                        log_diagnostic('error', f' Upload failed with exit code: {process.returncode}')
+                        log_diagnostic('debug', f'Stderr: {process.stderr[:500]}')
+                        log_diagnostic('debug', f'Stdout: {process.stdout[:500]}')
                         
-                        if "404" in process.stderr or "404" in process.stdout:
-                            print(f"Endpoint not found, trying next...")
-                            continue
-                        
-                        return False, {"error": process.stderr[:200]}, process.stderr[:500]
+                        return False, {
+                            "error": f"Upload failed with exit code {process.returncode}",
+                            "stderr": process.stderr[:500],
+                            "stdout": process.stdout[:500],
+                            "endpoint": clean_url
+                        }, clean_url
                         
                 except Exception as e:
-                    print(f"Exception: {str(e)}")
+                    log_diagnostic('error', f'Exception during upload: {str(e)}')
+                    traceback.print_exc()
+                    return False, {"error": str(e), "endpoint": clean_url}, clean_url
             
-            return False, {"error": "All endpoints failed"}, None
+            return False, {"error": "All endpoints failed", "endpoint": "None"}, None
         
-        print("UPLOADING TO SCHEMA")
-        print("=" * 80)
+        success, response, used_endpoint = upload_to_schema_with_diagnostics(schema_entry, args.schema_id, bearer_token)
         
-        success, response, error = upload_to_schema(schema_entry)
-        
-        print(f"Saving outputs...")
+        print("\\n" + "="*100)
+        print("SAVING OUTPUTS")
+        print("="*100)
         
         try:
             upload_status_data = {
@@ -254,52 +441,106 @@ implementation:
                 'model_name': args.model_name,
                 'execution_id': execution_id,
                 'schema_id': args.schema_id,
+                'used_endpoint': used_endpoint,
                 'metrics_uploaded': {
                     'fid': fid_value,
                     'ssim': ssim_value,
                     'psnr': psnr_value,
-                    'mse': mse_value
+                    'mse': mse_value,
+                    'rmse': rmse_value
                 },
                 'schema_fields_populated': len(schema_entry),
-                'upload_response': response if success else {"error": str(response.get('error', 'Unknown error')), "details": error},
-                'upload_timestamp': int(time.time()),
-                'schema_entry_sample': {k: v for i, (k, v) in enumerate(schema_entry.items()) if i < 10}
+                'schema_validation': {
+                    'schema_accessible': schema_accessible,
+                    'schema_url': schema_url
+                },
+                'upload_response': response,
+                'upload_timestamp': int(time.time())
             }
             
             with open(args.upload_status, 'w') as f:
                 json.dump(upload_status_data, f, indent=2)
-            print(f"Upload status saved: {args.upload_status}")
+            log_diagnostic('info', f'Upload status saved: {args.upload_status}')
             
             with open(args.schema_response, 'w') as f:
-                json.dump(response if success else {"error": str(response.get('error', 'Unknown error')), "details": error}, f, indent=2)
-            print(f"Schema response saved: {args.schema_response}")
+                json.dump(response, f, indent=2)
+            log_diagnostic('info', f'Schema response saved: {args.schema_response}')
             
         except Exception as e:
-            print(f"ERROR saving outputs: {e}")
+            log_diagnostic('error', f'ERROR saving outputs: {e}')
             traceback.print_exc()
         
-        print("=" * 80)
-        if success:
-            print("EVALUATION METRICS UPLOADED SUCCESSFULLY!")
-        else:
-            print("EVALUATION METRICS UPLOAD FAILED")
-        print("=" * 80)
+        # Save diagnostic log
+        diagnostic_summary = {
+            'timestamp': datetime.now().isoformat(),
+            'schema_id': args.schema_id,
+            'model_id': args.model_id,
+            'schema_accessible': schema_accessible,
+            'upload_success': success,
+            'used_endpoint': used_endpoint,
+            'extracted_metrics': {
+                'fid': fid_value,
+                'ssim': ssim_value,
+                'psnr': psnr_value,
+                'mse': mse_value
+            },
+            'diagnostic_entries': diagnostic_log,
+            'troubleshooting_tips': []
+        }
         
-        print(f"UPLOADED METRICS:")
-        print(f"  fid: {fid_value:.2f}")
-        print(f"  ssim: {ssim_value:.4f}")
-        print(f"  psnr: {psnr_value:.2f} dB")
-        print(f"  mse: {schema_entry['mse']:.6f}")
+        if not success:
+            diagnostic_summary['troubleshooting_tips'] = [
+                f"1. Verify schema {args.schema_id} exists",
+                f"2. Check if you have POST permissions on the schema",
+                f"3. Verify endpoint {used_endpoint} is correct",
+                f"4. Check if schema accepts the field structure",
+                f"5. Verify bearer token permissions"
+            ]
         
-        print(f"MODEL INFO:")
-        print(f"  Model: {args.model_name} ({args.model_id})")
-        print(f"  Type: {args.model_type}")
-        print(f"  Algorithm: {algorithm}")
-        print(f"  Execution ID: {execution_id}")
+        with open(args.diagnostic_log, 'w') as f:
+            json.dump(diagnostic_summary, f, indent=2)
+        
+        print("\\n" + "="*100)
+        print("FINAL SUMMARY")
+        print("="*100)
+        
+        print(f"\\n EVALUATION METRICS:")
+        print(f"  FID: {fid_value:.2f}")
+        print(f"  SSIM: {ssim_value:.4f}")
+        print(f"  PSNR: {psnr_value:.2f} dB")
+        print(f"  RMSE: {rmse_value:.4f}")
+        
+        print(f"\\n SCHEMA INFO:")
         print(f"  Schema ID: {args.schema_id}")
+        print(f"  Schema Access: {' Accessible' if schema_accessible else ' Not accessible'}")
+        print(f"  Used Endpoint: {used_endpoint}")
         
-        print(f"STATUS: {'SUCCESS' if success else 'FAILED'}")
-        print("=" * 80)
+        print(f"\\n UPLOAD STATUS:")
+        print(f"  Success: {' YES' if success else ' NO'}")
+        print(f"  Fields Uploaded: {len(schema_entry)}")
+        print(f"  Model: {args.model_name} (ID: {args.model_id})")
+        print(f"  Execution ID: {execution_id}")
+        
+        if not success:
+            print(f"\\n UPLOAD FAILED:")
+            if isinstance(response, dict):
+                print(f"  Error: {response.get('error', 'Unknown error')}")
+                if 'endpoint' in response:
+                    print(f"  Failed Endpoint: {response['endpoint']}")
+            else:
+                print(f"  Response: {response}")
+            
+            print(f"\\n TROUBLESHOOTING REQUIRED:")
+            print(f"  1. Verify schema ID: {args.schema_id}")
+            print(f"  2. Check schema at: https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}")
+            print(f"  3. Verify bearer token permissions")
+            print(f"  4. Check if endpoint accepts POST requests")
+            print(f"  5. Review detailed diagnostics in output file")
+        else:
+            print(f"\\n EVALUATION METRICS UPLOADED SUCCESSFULLY!")
+            print(f"   Endpoint: {used_endpoint}")
+        
+        print("="*100)
         
         if not success:
             sys.exit(1)
@@ -326,3 +567,5 @@ implementation:
       - {outputPath: upload_status}
       - --schema_response
       - {outputPath: schema_response}
+      - --diagnostic_log
+      - {outputPath: diagnostic_log}
