@@ -1,4 +1,4 @@
-name: Upload Model To Schema Complete v6
+name: Upload Model To Schema Complete v7
 description: Uploads model to schema with complete required fields only
 inputs:
   - name: trained_model
@@ -90,12 +90,11 @@ implementation:
             bearer_token = f.read().strip()
         
         print("Reading CDN URLs...")
-        with open(args.model_weights_cdn_url, 'r') as f:
-            model_weights_cdn = f.read().strip()
+        # FIX: Directly use the string values instead of trying to open them as files
+        model_weights_cdn = args.model_weights_cdn_url.strip()
         print(f"Model weights CDN: {model_weights_cdn[:80]}...")
         
-        with open(args.model_metadata_cdn_url, 'r') as f:
-            model_metadata_cdn = f.read().strip()
+        model_metadata_cdn = args.model_metadata_cdn_url.strip()
         print(f"Model metadata CDN: {model_metadata_cdn[:80]}...")
         
         print("Loading model to extract metadata...")
