@@ -1,5 +1,5 @@
-name: Upload Model To Schema Complete v7
-description: Uploads model to schema with complete required fields only
+name: Upload Model To Schema Complete v8
+description: Uploads model to schema with complete required fields only with enhanced debugging
 inputs:
   - name: trained_model
     type: Model
@@ -35,6 +35,8 @@ outputs:
     type: String
   - name: upload_status
     type: String
+  - name: diagnostic_log
+    type: String
 implementation:
   container:
     image: deepak0147/nessy-facotry:0.0.9
@@ -42,7 +44,7 @@ implementation:
       - sh
       - -c
       - |
-        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        apt-get update > /dev/null && apt-get install -y curl jq > /dev/null
         exec "$0" "$@"
       - python3
       - -u
@@ -55,6 +57,7 @@ implementation:
         import sys
         import subprocess
         import traceback
+        import time
         from datetime import datetime
         
         parser = argparse.ArgumentParser()
@@ -74,30 +77,232 @@ implementation:
         parser.add_argument('--schema_response', type=str, required=True)
         parser.add_argument('--schema_entry', type=str, required=True)
         parser.add_argument('--upload_status', type=str, required=True)
+        parser.add_argument('--diagnostic_log', type=str, required=True)
         args = parser.parse_args()
         
-        print("=" * 80)
-        print("UPLOAD MODEL TO SCHEMA COMPLETE v3")
-        print("=" * 80)
+        print("=" * 100)
+        print("UPLOAD MODEL TO SCHEMA COMPLETE v7 - ENHANCED DEBUGGING")
+        print("=" * 100)
         
-        for path in [args.schema_response, args.schema_entry, args.upload_status]:
+        for path in [args.schema_response, args.schema_entry, args.upload_status, args.diagnostic_log]:
             if path:
                 dir_path = os.path.dirname(path)
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
         
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
+        # Initialize diagnostic log
+        diagnostic_log = []
         
-        print("Reading CDN URLs...")
-        # FIX: Directly use the string values instead of trying to open them as files
+        def log_diagnostic(level, message, data=None):
+            timestamp = datetime.now().isoformat()
+            entry = {
+                'timestamp': timestamp,
+                'level': level,
+                'message': message,
+                'data': data
+            }
+            diagnostic_log.append(entry)
+            print(f"[{level.upper()}] {message}")
+            if data:
+                print(f"  Data: {json.dumps(data)[:200]}...")
+        
+        try:
+            with open(args.bearer_token, 'r') as f:
+                bearer_token = f.read().strip()
+            log_diagnostic('info', f'Bearer token loaded, length: {len(bearer_token)} chars')
+        except:
+            bearer_token = args.bearer_token.strip()
+            log_diagnostic('info', f'Bearer token from arg, length: {len(bearer_token)} chars')
+        
+        print("\\n" + "="*100)
+        print("DIAGNOSTIC TEST 1: CHECK SCHEMA EXISTENCE")
+        print("="*100)
+        
+        def test_schema_existence(schema_id):
+         
+            base_url = "https://igs.gov-cloud.ai/pi-entity-instances-service"
+            test_urls = [
+                f"{base_url}/v3.0/schemas/{schema_id}",
+                f"{base_url}/schemas/{schema_id}",
+                f"{base_url}/v3.0/schemas/{schema_id}/definition",
+                f"{base_url}/schemas/{schema_id}/definition"
+            ]
+            
+            for idx, test_url in enumerate(test_urls):
+                log_diagnostic('debug', f'Testing schema URL {idx+1}: {test_url}')
+                
+                try:
+                    curl_command = [
+                        "curl",
+                        "--location", test_url,
+                        "--header", f"Authorization: Bearer {bearer_token}",
+                        "--header", "Content-Type: application/json",
+                        "--fail",
+                        "--show-error",
+                        "--connect-timeout", "30",
+                        "--max-time", "60",
+                        "--silent",
+                        "--include"
+                    ]
+                    
+                    process = subprocess.run(
+                        curl_command,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    
+                    log_diagnostic('debug', f'Curl exit code: {process.returncode}')
+                    
+                    # Parse HTTP headers
+                    headers_end = process.stdout.find('\\r\\n\\r\\n')
+                    if headers_end == -1:
+                        headers_end = process.stdout.find('\\n\\n')
+                    
+                    if headers_end > 0:
+                        headers_text = process.stdout[:headers_end]
+                        body_text = process.stdout[headers_end:].strip()
+                        
+                        # Extract HTTP status
+                        for line in headers_text.split('\\n'):
+                            if line.startswith('HTTP/'):
+                                http_status = line.strip()
+                                log_diagnostic('debug', f'HTTP Status: {http_status}')
+                                
+                                if '200' in http_status or '201' in http_status:
+                                    log_diagnostic('success', f' Schema exists and is accessible at: {test_url}')
+                                    return True, test_url, body_text[:500]
+                                elif '401' in http_status:
+                                    log_diagnostic('error', f' Authentication failed (401)')
+                                    return False, test_url, 'Authentication failed'
+                                elif '403' in http_status:
+                                    log_diagnostic('error', f' Permission denied (403)')
+                                    return False, test_url, 'Permission denied'
+                                elif '404' in http_status:
+                                    log_diagnostic('warning', f'  Schema not found (404) at this URL')
+                                    continue  # Try next URL
+                    
+                    if process.stderr:
+                        log_diagnostic('error', f'Curl stderr: {process.stderr[:200]}')
+                        
+                except Exception as e:
+                    log_diagnostic('error', f'Exception testing schema: {str(e)}')
+            
+            return False, None, f"Schema {schema_id} not found at any endpoint"
+        
+        # Test schema existence
+        schema_exists, schema_url, schema_response = test_schema_existence(args.schema_id)
+        
+        if not schema_exists:
+            log_diagnostic('critical', f' Schema {args.schema_id} does not exist or is not accessible')
+            print(f"\\n TROUBLESHOOTING REQUIRED:")
+            print(f"   Schema ID: {args.schema_id}")
+            print(f"   Please verify:")
+            print(f"   1. Schema ID is correct")
+            print(f"   2. You have permission to access this schema")
+            print(f"   3. The schema service is running at https://igs.gov-cloud.ai")
+            print(f"   4. Your bearer token is valid and not expired")
+            
+            # Save diagnostic info and exit
+            diagnostic_summary = {
+                'timestamp': datetime.now().isoformat(),
+                'schema_id': args.schema_id,
+                'schema_exists': False,
+                'schema_test_urls': [
+                    f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}",
+                    f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}"
+                ],
+                'bearer_token_valid': 'Unknown',
+                'diagnostic_log': diagnostic_log
+            }
+            
+            with open(args.diagnostic_log, 'w') as f:
+                json.dump(diagnostic_summary, f, indent=2)
+            
+            sys.exit(1)
+        
+        log_diagnostic('success', f' Schema validation passed, proceeding with upload')
+        
+        print("\\n" + "="*100)
+        print("DIAGNOSTIC TEST 2: GET SCHEMA DEFINITION")
+        print("="*100)
+        
+        def get_schema_definition(schema_id):
+           
+            definition_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/definition"
+            
+            log_diagnostic('debug', f'Fetching schema definition from: {definition_url}')
+            
+            try:
+                curl_command = [
+                    "curl",
+                    "--location", definition_url,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", "Content-Type: application/json",
+                    "--fail",
+                    "--show-error",
+                    "--connect-timeout", "30",
+                    "--max-time", "60",
+                    "--silent"
+                ]
+                
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                
+                if process.returncode == 0:
+                    try:
+                        schema_def = json.loads(process.stdout)
+                        log_diagnostic('success', f' Schema definition retrieved')
+                        log_diagnostic('info', f'Schema Name: {schema_def.get("name", "N/A")}')
+                        log_diagnostic('info', f'Schema Type: {schema_def.get("type", "N/A")}')
+                        
+                        # Log required fields
+                        if 'required' in schema_def:
+                            log_diagnostic('info', f'Required fields: {schema_def["required"]}')
+                        
+                        # Log properties
+                        if 'properties' in schema_def:
+                            log_diagnostic('info', f'Schema has {len(schema_def["properties"])} properties defined')
+                        
+                        return schema_def
+                    except json.JSONDecodeError:
+                        log_diagnostic('warning', f'  Could not parse schema definition as JSON')
+                        return None
+                else:
+                    log_diagnostic('warning', f'  Could not fetch schema definition: {process.stderr[:200]}')
+                    return None
+                    
+            except Exception as e:
+                log_diagnostic('error', f'Exception getting schema definition: {str(e)}')
+                return None
+        
+        schema_definition = get_schema_definition(args.schema_id)
+        
+        print("\\n" + "="*100)
+        print("PREPARING MODEL DATA")
+        print("="*100)
+        
+        log_diagnostic('info', 'Reading CDN URLs...')
+        
+        # Process CDN URLs
         model_weights_cdn = args.model_weights_cdn_url.strip()
-        print(f"Model weights CDN: {model_weights_cdn[:80]}...")
-        
         model_metadata_cdn = args.model_metadata_cdn_url.strip()
-        print(f"Model metadata CDN: {model_metadata_cdn[:80]}...")
         
-        print("Loading model to extract metadata...")
+        # Show full URLs for debugging
+        log_diagnostic('debug', f'Model weights CDN (full): {model_weights_cdn}')
+        log_diagnostic('debug', f'Model metadata CDN (full): {model_metadata_cdn}')
+        
+        # Check if URLs look valid
+        if not model_weights_cdn.startswith('http'):
+            log_diagnostic('warning', f'  Model weights CDN does not start with http: {model_weights_cdn[:100]}')
+        if not model_metadata_cdn.startswith('http'):
+            log_diagnostic('warning', f'  Model metadata CDN does not start with http: {model_metadata_cdn[:100]}')
+        
+        log_diagnostic('info', 'Loading model to extract metadata...')
         try:
             checkpoint = torch.load(args.trained_model, map_location='cpu')
             latent_dim = checkpoint.get('latent_dim', 100)
@@ -115,13 +320,13 @@ implementation:
             
             total_params = generator_params + discriminator_params
             
-            print(f"Model loaded:")
-            print(f"  Latent dim: {latent_dim}")
-            print(f"  Image size: {image_size}")
-            print(f"  Total params: {total_params:,}")
+            log_diagnostic('success', f' Model loaded successfully')
+            log_diagnostic('info', f'  Latent dim: {latent_dim}')
+            log_diagnostic('info', f'  Image size: {image_size}')
+            log_diagnostic('info', f'  Total params: {total_params:,}')
             
         except Exception as e:
-            print(f"Could not load model for metadata: {e}")
+            log_diagnostic('error', f'Could not load model for metadata: {e}')
             latent_dim = 100
             image_size = 64
             channels = 3
@@ -135,8 +340,9 @@ implementation:
         else:
             model_info = json.loads(args.model_info)
         
+        print("\\n" + "="*100)
         print("PREPARING SCHEMA ENTRY")
-        print("=" * 80)
+        print("="*100)
         
         input_shape = f"[{latent_dim}]"
         output_shape = f"[{channels}, {image_size}, {image_size}]"
@@ -171,144 +377,173 @@ implementation:
             if field not in schema_entry:
                 schema_entry[field] = None
         
-        print("Schema entry prepared:")
-        print("-" * 80)
-        required = ["tenant_id", "model_id", "execution_id", "projectId", "name", "source"]
-        for field in required:
-            value = schema_entry.get(field, "MISSING")
-            status = "✓" if field in schema_entry and schema_entry[field] is not None else "✗"
-            print(f"  {status} {field}: {value}")
+        # Validate against schema definition if available
+        if schema_definition:
+            log_diagnostic('info', 'Validating schema entry against definition...')
+            
+            required_fields = schema_definition.get('required', [])
+            schema_properties = schema_definition.get('properties', {})
+            
+            missing_required = [field for field in required_fields if field not in schema_entry]
+            if missing_required:
+                log_diagnostic('error', f' Missing required fields: {missing_required}')
+            
+            extra_fields = [field for field in schema_entry.keys() if field not in schema_properties]
+            if extra_fields:
+                log_diagnostic('warning', f' Extra fields not in schema: {extra_fields}')
+            
+            log_diagnostic('info', f'Schema expects {len(required_fields)} required fields, {len(schema_properties)} total properties')
         
-        cdn_fields = ["model_weights_cdn", "model_metadata_cdn", "model_url"]
-        for field in cdn_fields:
-            value = schema_entry.get(field, "MISSING")
-            has_value = value and value != "MISSING"
-            status = "✓" if has_value else "✗"
-            preview = f"{value[:50]}..." if has_value and len(value) > 50 else value
-            print(f"  {status} {field}: {preview}")
-        
-        other_fields = ["architecture_type", "input_shape", "output_shape", "parameter_count"]
-        for field in other_fields:
-            value = schema_entry.get(field, "MISSING")
-            status = "✓" if field in schema_entry else "✗"
-            print(f"  {status} {field}: {value}")
-        print("-" * 80)
+        log_diagnostic('info', 'Schema entry prepared with fields:')
+        for key, value in schema_entry.items():
+            if isinstance(value, str) and len(value) > 100:
+                preview = f"{value[:100]}..."
+            else:
+                preview = value
+            log_diagnostic('debug', f'  {key}: {preview}')
         
         with open(args.schema_entry, 'w') as f:
             json.dump(schema_entry, f, indent=2)
-        print(f"Schema entry saved to: {args.schema_entry}")
+        log_diagnostic('info', f'Schema entry saved to: {args.schema_entry}')
         
+        print("\\n" + "="*100)
         print("UPLOADING TO SCHEMA DATABASE")
-        print("=" * 80)
+        print("="*100)
         
-        clean_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create".replace('\\n', '').replace('\\r', '')
-        
-        curl_command = [
-            "curl",
-            "--location", clean_url,
-            "--header", f"Authorization: Bearer {bearer_token}",
-            "--header", "Content-Type: application/json",
-            "--data", json.dumps(schema_entry),
-            "--fail",
-            "--show-error",
-            "--connect-timeout", "30",
-            "--max-time", "60"
-        ]
-        
-        print(f"Uploading to schema: {args.schema_id}")
-        print(f"URL: {clean_url}")
-        print(f"Data size: {len(json.dumps(schema_entry)):,} bytes")
-        
-        try:
-            process = subprocess.run(
-                curl_command,
-                capture_output=True,
-                text=True,
-                check=True
-            )
+        def upload_with_retry(schema_data, max_retries=3):
+         
+            endpoints = [
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/create",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+            ]
             
-            print(f"Schema upload successful!")
-            print(f"Exit code: {process.returncode}")
-            
-            try:
-                schema_response = json.loads(process.stdout)
-                print("FULL RESPONSE JSON:")
-                print("-" * 60)
-                print(json.dumps(schema_response, indent=2))
-                print("-" * 60)
+            for attempt in range(max_retries):
+                log_diagnostic('info', f'Upload attempt {attempt + 1}/{max_retries}')
                 
-                print("EXTRACTED INFORMATION:")
-                print("-" * 40)
-                if 'id' in schema_response:
-                    print(f"Response ID: {schema_response['id']}")
-                if 'status' in schema_response:
-                    print(f"Status: {schema_response['status']}")
-                if 'message' in schema_response:
-                    print(f"Message: {schema_response['message']}")
-                if 'data' in schema_response:
-                    data = schema_response['data']
-                    if isinstance(data, dict):
-                        print(f"Data fields: {list(data.keys())}")
-                    else:
-                        print(f"Data type: {type(data).__name__}")
+                for endpoint_idx, endpoint in enumerate(endpoints):
+                    clean_url = endpoint.replace('\\n', '').replace('\\r', '')
+                    log_diagnostic('debug', f'Trying endpoint {endpoint_idx + 1}: {clean_url}')
+                    
+                    try:
+                        # Create a temporary file for the request data
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                            json.dump(schema_data, tmp, indent=2)
+                            tmp_path = tmp.name
+                        
+                        # Use curl with verbose output for detailed diagnostics
+                        curl_command = [
+                            "curl",
+                            "--location", clean_url,
+                            "--header", f"Authorization: Bearer {bearer_token}",
+                            "--header", "Content-Type: application/json",
+                            "--data", json.dumps(schema_data),
+                            "--verbose",
+                            "--connect-timeout", "30",
+                            "--max-time", "90",
+                            "--include"
+                        ]
+                        
+                        log_diagnostic('debug', f'Executing curl command...')
+                        process = subprocess.run(
+                            curl_command,
+                            capture_output=True,
+                            text=True,
+                            check=False
+                        )
+                        
+                        # Clean up temp file
+                        os.unlink(tmp_path)
+                        
+                        # Parse verbose output
+                        log_diagnostic('debug', f'Curl exit code: {process.returncode}')
+                        
+                        # Extract HTTP response from verbose output
+                        if process.returncode == 0:
+                            # Success case
+                            log_diagnostic('success', f' Upload successful to: {clean_url}')
+                            
+                            # Parse response
+                            try:
+                                # Find JSON in output (after headers)
+                                output_lines = process.stdout.split('\\n')
+                                json_start = None
+                                for i, line in enumerate(output_lines):
+                                    if line.strip() and (line.strip().startswith('{') or line.strip().startswith('[')):
+                                        json_start = i
+                                        break
+                                
+                                if json_start is not None:
+                                    response_json = '\\n'.join(output_lines[json_start:])
+                                    response_data = json.loads(response_json)
+                                else:
+                                    response_data = {"raw_response": process.stdout}
+                                    
+                            except json.JSONDecodeError:
+                                response_data = {"raw_response": process.stdout[:500]}
+                            
+                            return True, response_data, clean_url
+                        else:
+                            # Error case - analyze verbose output
+                            error_output = process.stderr
+                            stdout_output = process.stdout
+                            
+                            log_diagnostic('debug', f'Verbose error output (first 1000 chars):')
+                            print(error_output[:1000])
+                            
+                            # Check for specific HTTP errors
+                            if "HTTP/1.1 401" in error_output or "HTTP/2 401" in error_output:
+                                log_diagnostic('error', f' Authentication failed (401) at {clean_url}')
+                                return False, {"error": "Authentication failed (401)"}, clean_url
+                            elif "HTTP/1.1 403" in error_output or "HTTP/2 403" in error_output:
+                                log_diagnostic('error', f' Permission denied (403) at {clean_url}')
+                                return False, {"error": "Permission denied (403)"}, clean_url
+                            elif "HTTP/1.1 404" in error_output or "HTTP/2 404" in error_output:
+                                log_diagnostic('warning', f'  Endpoint not found (404) at {clean_url}')
+                                continue  # Try next endpoint
+                            elif "HTTP/1.1 400" in error_output or "HTTP/2 400" in error_output:
+                                log_diagnostic('error', f' Bad request (400) at {clean_url}')
+                                # Try to extract error details
+                                error_details = ""
+                                for line in error_output.split('\\n'):
+                                    if 'error' in line.lower() or 'message' in line.lower():
+                                        error_details = line[:200]
+                                        break
+                                return False, {"error": f"Bad request (400): {error_details}"}, clean_url
+                            else:
+                                log_diagnostic('warning', f'  Upload failed to {clean_url}, exit code: {process.returncode}')
+                                log_diagnostic('debug', f'Stderr: {process.stderr[:500]}')
+                                log_diagnostic('debug', f'Stdout: {process.stdout[:500]}')
+                                
+                    except Exception as e:
+                        log_diagnostic('error', f'Exception during upload: {str(e)}')
+                        traceback.print_exc()
                 
-            except json.JSONDecodeError:
-                print(f"Response is not valid JSON")
-                print(f"Raw response: {process.stdout[:500]}...")
-                schema_response = {"raw_response": process.stdout}
+                # Wait before retry
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    log_diagnostic('info', f'Waiting {wait_time} seconds before next retry...')
+                    time.sleep(wait_time)
             
-            with open(args.schema_response, 'w') as f:
-                if isinstance(schema_response, dict):
-                    json.dump(schema_response, f, indent=2)
-                else:
-                    f.write(str(schema_response))
-            
-            upload_success = True
-            
-        except subprocess.CalledProcessError as e:
-            print(f"Schema upload failed!")
-            print(f"Exit code: {e.returncode}")
-            
-            error_data = None
-            if e.stdout:
-                try:
-                    error_data = json.loads(e.stdout)
-                    print(f"Error response (JSON):")
-                    print(json.dumps(error_data, indent=2))
-                except:
-                    print(f"Error response (raw): {e.stdout[:500]}")
-                    error_data = {"raw_error": e.stdout[:500]}
-            
-            print(f"Stderr: {e.stderr[:200] if e.stderr else 'None'}")
-            
-            schema_response = {
-                "error": "Schema upload failed",
-                "curl_exit_code": e.returncode,
-                "stdout": error_data if error_data else e.stdout[:500],
-                "stderr": e.stderr[:200] if e.stderr else None
-            }
-            
-            with open(args.schema_response, 'w') as f:
-                json.dump(schema_response, f, indent=2)
-            
-            upload_success = False
-            
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            traceback.print_exc()
-            
-            schema_response = {
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }
-            
-            with open(args.schema_response, 'w') as f:
-                json.dump(schema_response, f, indent=2)
-            
-            upload_success = False
+            return False, {"error": "All upload attempts failed"}, None
         
+        log_diagnostic('info', f'Uploading to schema: {args.schema_id}')
+        log_diagnostic('info', f'Data size: {len(json.dumps(schema_entry)):,} bytes')
+        
+        upload_success, schema_response, used_endpoint = upload_with_retry(schema_entry)
+        
+        # Save response
+        with open(args.schema_response, 'w') as f:
+            if isinstance(schema_response, dict):
+                json.dump(schema_response, f, indent=2)
+            else:
+                f.write(str(schema_response))
+        
+        print("\\n" + "="*100)
         print("UPLOAD STATUS SUMMARY")
-        print("=" * 80)
+        print("="*100)
         
         upload_status_data = {
             "timestamp": datetime.now().isoformat(),
@@ -317,43 +552,84 @@ implementation:
             "model_id": args.model_id,
             "model_name": args.model_name,
             "execution_id": int(args.execution_id),
+            "used_endpoint": used_endpoint,
             "fields_submitted": {
                 "total": len(schema_entry),
-                "required_present": all(field in schema_entry for field in required),
-                "cdn_urls_present": all(field in schema_entry for field in cdn_fields),
+                "required_fields": list(schema_entry.keys()),
+                "cdn_urls_present": all(field in schema_entry for field in ["model_weights_cdn", "model_metadata_cdn", "model_url"]),
                 "source_field": schema_entry.get("source", "missing")
             },
             "cdn_urls": {
-                "model_weights_cdn": model_weights_cdn[:100] + "..." if len(model_weights_cdn) > 100 else model_weights_cdn,
-                "model_metadata_cdn": model_metadata_cdn[:100] + "..." if len(model_metadata_cdn) > 100 else model_metadata_cdn,
-                "model_url": "Same as model_weights_cdn"
+                "model_weights_cdn": model_weights_cdn[:200] + "..." if len(model_weights_cdn) > 200 else model_weights_cdn,
+                "model_metadata_cdn": model_metadata_cdn[:200] + "..." if len(model_metadata_cdn) > 200 else model_metadata_cdn
             },
-            "schema_response_summary": {
-                "has_id": 'id' in schema_response if isinstance(schema_response, dict) else False,
-                "has_status": 'status' in schema_response if isinstance(schema_response, dict) else False,
-                "success": upload_success
-            }
+            "schema_validation": {
+                "schema_exists": schema_exists,
+                "definition_retrieved": schema_definition is not None,
+                "schema_name": schema_definition.get("name", "Unknown") if schema_definition else "Unknown"
+            },
+            "schema_response": schema_response if isinstance(schema_response, dict) else {"raw": str(schema_response)[:500]}
         }
         
         with open(args.upload_status, 'w') as f:
             json.dump(upload_status_data, f, indent=2)
         
-        print(f"Upload status saved")
+        # Save diagnostic log
+        diagnostic_summary = {
+            'timestamp': datetime.now().isoformat(),
+            'schema_id': args.schema_id,
+            'model_id': args.model_id,
+            'schema_exists': schema_exists,
+            'upload_success': upload_success,
+            'used_endpoint': used_endpoint,
+            'diagnostic_entries': diagnostic_log,
+            'troubleshooting_tips': []
+        }
         
-        print("=" * 80)
+        if not upload_success:
+            diagnostic_summary['troubleshooting_tips'] = [
+                "1. Verify the schema ID is correct",
+                "2. Check if you have POST permissions on the schema",
+                "3. Verify the schema accepts the fields you're sending",
+                "4. Check network connectivity to the schema service",
+                "5. Verify bearer token is valid and has required permissions"
+            ]
+        
+        with open(args.diagnostic_log, 'w') as f:
+            json.dump(diagnostic_summary, f, indent=2)
+        
+        print("\\n" + "="*100)
         if upload_success:
-            print("ALL UPLOADS COMPLETED SUCCESSFULLY!")
+            print(" MODEL UPLOADED TO SCHEMA SUCCESSFULLY!")
+            print(f"   Endpoint: {used_endpoint}")
         else:
-            print("UPLOAD FAILED - CHECK ERROR DETAILS")
-        print("=" * 80)
+            print(" MODEL UPLOAD FAILED")
+            print(f"   Schema ID: {args.schema_id}")
+            print(f"   Last tried endpoint: {used_endpoint}")
+            print(f"   Error: {schema_response.get('error', 'Unknown error') if isinstance(schema_response, dict) else 'Unknown error'}")
+        print("="*100)
         
-        print(f"Summary:")
-        print(f"  Model: {args.model_name} ({args.model_id})")
+        print(f"\\n SUMMARY:")
+        print(f"  Model: {args.model_name} (ID: {args.model_id})")
         print(f"  Schema: {args.schema_id}")
-        print(f"  CDN URLs: {len(cdn_fields)} fields included")
-        print(f"  Source field: {schema_entry.get('source', 'missing')}")
-        print(f"  Success: {'Yes' if upload_success else 'No'}")
-        print("=" * 80)
+        print(f"  Schema Exists: {' Yes' if schema_exists else ' No'}")
+        print(f"  CDN URLs: {2} files")
+        print(f"  Total Fields: {len(schema_entry)}")
+        print(f"  Upload Status: {' Success' if upload_success else ' Failed'}")
+        
+        if not upload_success:
+            print(f"\\n TROUBLESHOOTING REQUIRED:")
+            print(f"  1. Check schema existence at:")
+            print(f"     - https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}")
+            print(f"     - https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}")
+            print(f"  2. Verify bearer token permissions")
+            print(f"  3. Check if schema accepts POST to /instances/create")
+            print(f"  4. Review detailed diagnostics in: {args.diagnostic_log}")
+        
+        print("="*100)
+        
+        if not upload_success:
+            sys.exit(1)
     args:
       - --trained_model
       - {inputPath: trained_model}
@@ -387,3 +663,5 @@ implementation:
       - {outputPath: schema_entry}
       - --upload_status
       - {outputPath: upload_status}
+      - --diagnostic_log
+      - {outputPath: diagnostic_log}
