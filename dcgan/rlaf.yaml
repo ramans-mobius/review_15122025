@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v15
+name: DCGAN RLAF Loop v16
 description: Triggers the DQN RLAF pipeline in a loop to optimize DCGAN model hyperparameters for continual learning tasks
 inputs:
   - name: trained_model
@@ -67,7 +67,7 @@ implementation:
         warnings.filterwarnings('ignore')
       
         print("=" * 80)
-        print("DCGAN RLAF LOOP v13")
+        print("DCGAN RLAF LOOP v15 (with 17-feature DQN support)")
         print("=" * 80)
         
         try:
@@ -916,7 +916,64 @@ implementation:
                 print(f"ERROR: Error in DQN pipeline execution: {e}")
                 raise
         
-   
+        def prepare_dqn_state(metrics, num_features=17):
+        
+            print(f"DEBUG: Preparing DQN state vector with {num_features} features")
+            
+            # Core DCGAN metrics (first 4 features)
+            core_metrics = {
+                'fid_score': metrics.get('fid_score', 100.0),
+                'ssim_mean': metrics.get('ssim_mean', 0.0),
+                'psnr_mean': metrics.get('psnr_mean', 0.0),
+                'diversity_score': metrics.get('diversity_score', 0.0)
+            }
+            
+            # Additional metrics that might be present
+            additional_metrics = {
+                'mae': metrics.get('mae', 0.0),
+                'mse': metrics.get('mse', 0.0),
+                'real_score': metrics.get('real_score', 0.0),
+                'fake_score': metrics.get('fake_score', 0.0),
+                'score_difference': metrics.get('score_difference', 0.0),
+                'ssim_std': metrics.get('ssim_std', 0.0),
+                'psnr_std': metrics.get('psnr_std', 0.0),
+                'real_mean': metrics.get('real_stats', {}).get('mean', 0.0),
+                'real_std': metrics.get('real_stats', {}).get('std', 0.0),
+                'fake_mean': metrics.get('fake_stats', {}).get('mean', 0.0),
+                'fake_std': metrics.get('fake_stats', {}).get('std', 0.0)
+            }
+            
+            # Combine all available metrics
+            combined_metrics = {}
+            combined_metrics.update(core_metrics)
+            combined_metrics.update(additional_metrics)
+            
+            # Pad with zeros to reach num_features
+            feature_count = 0
+            padded_state = {}
+            
+            # Add core metrics first
+            for key in list(combined_metrics.keys()):
+                if feature_count < num_features:
+                    value = combined_metrics[key]
+                    # Handle NaN values
+                    if np.isnan(value):
+                        value = 0.0
+                    padded_state[key] = float(value)
+                    feature_count += 1
+                else:
+                    break
+            
+            # Pad remaining features with zeros
+            while feature_count < num_features:
+                padded_state[f'feature_{feature_count}'] = 0.0
+                feature_count += 1
+            
+            print(f"DEBUG: State vector prepared with {len(padded_state)} features")
+            print(f"DEBUG: First 4 features: {list(padded_state.items())[:4]}")
+            
+            return padded_state
+        
         def dcgan_retraining(action, model_path, data_path, config_str, tasks_path, 
                            output_model_path, previous_metrics, dqn_params):
             print("DEBUG: Starting DCGAN retraining function")
@@ -1017,11 +1074,11 @@ implementation:
             average_eval_metrics = results['naive']['average_eval_metrics']
             print(f"DEBUG: Training completed. Average metrics: {average_eval_metrics}")
             
-            # Calculate improvement score
+            # Calculate improvement score based only on the first 4 features
             improvement_score = 0
             print("DEBUG: Calculating improvement score...")
             
-            for param in dqn_params:
+            for param in dqn_params[:4]:  # Only use first 4 DCGAN parameters
                 key = param['key']
                 sign = 1 if param['sign'] == '+' else -1
                 
@@ -1099,7 +1156,7 @@ implementation:
             args = parser.parse_args()
             
             print("=" * 80)
-            print("DCGAN RLAF LOOP v13 - STARTING")
+            print("DCGAN RLAF LOOP v15 (with 17-feature DQN support) - STARTING")
             print("=" * 80)
             
             # Read access token
@@ -1119,7 +1176,7 @@ implementation:
                     # RLAF metrics format
                     primary = metrics_data['primary_metrics']
                     current_metrics = {
-                        'fid_score': primary.get('fid_score', 0.0),
+                        'fid_score': primary.get('fid_score', 100.0),
                         'ssim_mean': primary.get('ssim_mean', 0.0),
                         'psnr_mean': primary.get('psnr_mean', 0.0),
                         'diversity_score': primary.get('diversity_score', 0.0)
@@ -1128,7 +1185,7 @@ implementation:
                     # Evaluation summary format
                     key_metrics = metrics_data['key_metrics']
                     current_metrics = {
-                        'fid_score': key_metrics.get('fid_score', 0.0),
+                        'fid_score': key_metrics.get('fid_score', 100.0),
                         'ssim_mean': key_metrics.get('ssim_mean', 0.0),
                         'psnr_mean': key_metrics.get('psnr_mean', 0.0),
                         'diversity_score': key_metrics.get('diversity_score', 0.0)
@@ -1146,9 +1203,9 @@ implementation:
                     'diversity_score': 0.0
                 }
             
-            print(f"DEBUG: Initial metrics: {current_metrics}")
+            print(f"DEBUG: Initial metrics (core): {current_metrics}")
             
-            # DQN parameters for DCGAN
+            # DQN parameters for DCGAN (only first 4 are used for improvement calculation)
             dcgan_dqn_params = [
                 {"key": "fid_score", "sign": "-", "mul": 0.3},
                 {"key": "ssim_mean", "sign": "+", "mul": 0.3},
@@ -1164,30 +1221,10 @@ implementation:
                 print(f"RLAF ITERATION {i+1}/2")
                 print(f"{'='*60}")
                 
-                # Prepare metrics for DQN
-                cleaned_metrics = {}
-                for param in dcgan_dqn_params:
-                    key = param['key']
-                    if key in current_metrics:
-                        value = current_metrics[key]
-                        # Handle NaN
-                        if np.isnan(value):
-                            value = 0.0
-                        cleaned_metrics[key] = float(value)
-                    else:
-                        # Default values
-                        if key == "fid_score":
-                            cleaned_metrics[key] = 100.0
-                        elif key == "ssim_mean":
-                            cleaned_metrics[key] = 0.0
-                        elif key == "psnr_mean":
-                            cleaned_metrics[key] = 0.0
-                        elif key == "diversity_score":
-                            cleaned_metrics[key] = 0.0
-                        else:
-                            cleaned_metrics[key] = 0.0
-                
-                print(f"DEBUG: Metrics for DQN: {cleaned_metrics}")
+                # Prepare 17-feature state for DQN with padding
+                print("DEBUG: Preparing 17-feature state vector for DQN...")
+                cleaned_metrics = prepare_dqn_state(current_metrics, num_features=17)
+                print(f"DEBUG: DQN state prepared: {len(cleaned_metrics)} features")
                 
                 try:
                     # Get current instance
@@ -1214,7 +1251,7 @@ implementation:
                     update_instance_field(access_token, args.domain, args.schema_id, args.model_id,
                                         "pierce2rlaf", pierce2rlaf_history)
                     
-                    print(f"DEBUG: Updated pierce2rlaf history")
+                    print(f"DEBUG: Updated pierce2rlaf history with 17 features")
                     
                 except Exception as e:
                     print(f"ERROR: Database update failed: {str(e)}")
@@ -1228,7 +1265,7 @@ implementation:
                         "access_token": access_token
                     }
                     
-                    print(f"DEBUG: Triggering DQN pipeline...")
+                    print(f"DEBUG: Triggering DQN pipeline with 17-feature state...")
                     dqn_success = trigger_and_wait_for_dqn_pipeline(
                         dqn_config, 
                         args.pipeline_domain, 
@@ -1271,6 +1308,14 @@ implementation:
                 # Apply retraining with DQN action
                 print(f"DEBUG: Starting DCGAN retraining with action: {action_to_use}")
                 
+                # Extract only the first 4 features for improvement calculation
+                core_previous_state = {
+                    'fid_score': cleaned_metrics.get('fid_score', 100.0),
+                    'ssim_mean': cleaned_metrics.get('ssim_mean', 0.0),
+                    'psnr_mean': cleaned_metrics.get('psnr_mean', 0.0),
+                    'diversity_score': cleaned_metrics.get('diversity_score', 0.0)
+                }
+                
                 retraining_results = dcgan_retraining(
                     action_to_use, 
                     args.trained_model, 
@@ -1278,13 +1323,21 @@ implementation:
                     args.config, 
                     args.tasks,
                     args.retrained_model, 
-                    previous_state, 
+                    core_previous_state,  # Only pass core 4 features
                     dcgan_dqn_params
                 )
                 
-                # Update current metrics
-                current_metrics = retraining_results["metrics"]
-                print(f"DEBUG: Retraining completed. New metrics: {current_metrics}")
+                # Update current metrics (keep only core 4 for next iteration)
+                retraining_metrics = retraining_results["metrics"]
+                current_metrics = {
+                    'fid_score': retraining_metrics.get('fid_score', 100.0),
+                    'ssim_mean': retraining_metrics.get('ssim_mean', 0.0),
+                    'psnr_mean': retraining_metrics.get('psnr_mean', 0.0),
+                    'diversity_score': retraining_metrics.get('diversity_score', 0.0)
+                }
+                
+                print(f"DEBUG: Retraining completed. New core metrics: {current_metrics}")
+                print(f"DEBUG: Improvement score: {retraining_results['improvement_score']:.4f}")
                 
                 # Update trained_model path for next iteration
                 args.trained_model = args.retrained_model
@@ -1301,7 +1354,9 @@ implementation:
                 "rlaf_config": {
                     "dqn_pipeline_id": args.dqn_pipeline_id,
                     "schema_id": args.schema_id,
-                    "model_id": args.model_id
+                    "model_id": args.model_id,
+                    "feature_count": 17,  # Indicate we're using padded features
+                    "core_features": 4    # Actual DCGAN features
                 }
             }
             
@@ -1315,7 +1370,7 @@ implementation:
             print("=" * 80)
             print(f"Total iterations completed: {i + 1}")
             print(f"Final model saved to: {args.retrained_model}")
-            print(f"Final metrics:")
+            print(f"Final core metrics (4 features):")
             
             for metric_name, metric_value in current_metrics.items():
                 if not np.isnan(metric_value):
@@ -1344,6 +1399,7 @@ implementation:
                 print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
             
             print("=" * 80)
+        
         if __name__ == '__main__':
             try:
                 main()
