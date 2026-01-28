@@ -1,5 +1,5 @@
-name: Upload Training Metrics To Schema v14
-description: Uploads DCGAN training metrics to training schema with proper algorithm and block type handling
+name: Upload Training Metrics To Schema v15
+description: Uploads DCGAN training metrics to training schema - gets all info from training history
 inputs:
   - name: training_history
     type: String
@@ -19,15 +19,6 @@ inputs:
     type: String
   - name: project_id
     type: String
-  - name: training_mode
-    type: String
-    default: "standard"
-  - name: block_number
-    type: String
-    default: "0"
-  - name: block_type
-    type: String
-    default: ""
 outputs:
   - name: upload_status
     type: String
@@ -68,16 +59,13 @@ implementation:
         parser.add_argument('--execution_id', type=str, required=True)
         parser.add_argument('--tenant_id', type=str, required=True)
         parser.add_argument('--project_id', type=str, required=True)
-        parser.add_argument('--training_mode', type=str, default='standard')
-        parser.add_argument('--block_number', type=str, default='0')
-        parser.add_argument('--block_type', type=str, default='')
         parser.add_argument('--upload_status', type=str, required=True)
         parser.add_argument('--schema_response', type=str, required=True)
         parser.add_argument('--metrics_summary', type=str, required=True)
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD TRAINING METRICS TO SCHEMA v6")
+        print("UPLOAD TRAINING METRICS TO SCHEMA v7")
         print("=" * 80)
         
         for path in [args.upload_status, args.schema_response, args.metrics_summary]:
@@ -96,24 +84,15 @@ implementation:
             print(f"ERROR: execution_id must be an integer. Got: {args.execution_id}")
             sys.exit(1)
         
-        try:
-            block_number = int(args.block_number) if args.block_number.strip() else 0
-            print(f"Block Number: {block_number}")
-        except ValueError:
-            print(f"ERROR: block_number must be an integer. Got: {args.block_number}")
-            sys.exit(1)
-        
         print(f"Parameters:")
         print(f"  Schema ID: {args.schema_id}")
         print(f"  Model ID: {args.model_id}")
         print(f"  Execution ID: {execution_id}")
         print(f"  Tenant ID: {args.tenant_id}")
         print(f"  Project ID: {args.project_id}")
-        print(f"  Input Training Mode: {args.training_mode}")
-        print(f"  Input Block Type: {args.block_type}")
         
         print("\\n" + "="*80)
-        print("DEBUG: READING TRAINING HISTORY FILE")
+        print("READING TRAINING HISTORY FILE")
         print("="*80)
         
         try:
@@ -128,35 +107,45 @@ implementation:
                 training_history = json.load(f)
             print(f"Training history loaded successfully")
             
-            print(f"\\nDEBUG: Training History Structure:")
-            print(f"Type: {type(training_history)}")
+            print(f"\\nTraining History Structure:")
             print(f"Keys: {list(training_history.keys())}")
             
-            for key, value in training_history.items():
-                print(f"\\n  {key}:")
-                print(f"    Type: {type(value)}")
-                if isinstance(value, (list, dict)):
-                    print(f"    Length/Size: {len(value)}")
-                if key == 'epoch_losses' and isinstance(value, list) and value:
-                    print(f"    Sample epoch_losses[0]: {value[0]}")
-                if key == 'generator_losses' and isinstance(value, list) and value:
-                    print(f"    generator_losses[:5]: {value[:5] if len(value) > 5 else value}")
-                if key == 'discriminator_losses' and isinstance(value, list) and value:
-                    print(f"    discriminator_losses[:5]: {value[:5] if len(value) > 5 else value}")
-                if key == 'block_training_results' and value:
-                    print(f"    Block training results keys: {list(value.keys())}")
+            # Extract all information from training history
+            algorithm = training_history.get('algorithm', 'backprop')
+            epochs = training_history.get('epochs', 0)
+            batch_size = training_history.get('batch_size', 0)
+            training_time = training_history.get('training_time', 0.0)
+            num_samples = training_history.get('num_samples', 0)
+            generator_losses = training_history.get('generator_losses', [])
+            discriminator_losses = training_history.get('discriminator_losses', [])
+            epoch_losses = training_history.get('epoch_losses', [])
+            block_training_results = training_history.get('block_training_results', {})
+            
+            print(f"\\nExtracted Information:")
+            print(f"  Algorithm: {algorithm}")
+            print(f"  Epochs: {epochs}")
+            print(f"  Batch Size: {batch_size}")
+            print(f"  Training Time: {training_time:.2f}s")
+            print(f"  Number of Samples: {num_samples}")
+            print(f"  Generator Losses: {len(generator_losses)} entries")
+            print(f"  Discriminator Losses: {len(discriminator_losses)} entries")
+            print(f"  Block Training Results: {len(block_training_results) > 0}")
+            
+            if block_training_results:
+                print(f"  Block Training Keys: {list(block_training_results.keys())}")
             
             print("\\n" + "="*80)
-            print("DEBUG: READING TRAINING METRICS FILE")
+            print("READING TRAINING METRICS FILE")
             print("="*80)
             
             with open(args.training_metrics, 'r') as f:
                 training_metrics = json.load(f)
             print(f"Training metrics loaded")
             
-            print(f"\\nDEBUG: Training Metrics:")
+            print(f"\\nTraining Metrics:")
             for key, value in training_metrics.items():
-                print(f"  {key}: {value} (type: {type(value).__name__})")
+                if isinstance(value, (int, float, str, bool)):
+                    print(f"  {key}: {value}")
             
             try:
                 master_config = json.loads(args.master_config)
@@ -165,23 +154,8 @@ implementation:
                 master_config = {}
                 print(f"Master config is not valid JSON, using empty dict")
             
-            algorithm = training_history.get('algorithm', training_metrics.get('algorithm', 'backprop'))
-            
-            generator_losses = training_history.get('generator_losses', [])
-            discriminator_losses = training_history.get('discriminator_losses', [])
-            epoch_losses = training_history.get('epoch_losses', [])
-            
-            print(f"\\nDEBUG: Loss Arrays:")
-            print(f"  generator_losses length: {len(generator_losses)}")
-            print(f"  discriminator_losses length: {len(discriminator_losses)}")
-            print(f"  epoch_losses length: {len(epoch_losses)}")
-            
-            epochs_completed = 0
-            
-            if 'epochs' in training_history:
-                epochs_completed = int(training_history['epochs'])
-                print(f"Method 1: Using 'epochs' from training_history: {epochs_completed}")
-            
+            # Determine epochs completed
+            epochs_completed = epochs
             if epochs_completed == 0:
                 max_from_arrays = max(
                     len(generator_losses),
@@ -190,17 +164,17 @@ implementation:
                 )
                 if max_from_arrays > 0:
                     epochs_completed = max_from_arrays
-                    print(f"Method 2: Using max length from loss arrays: {epochs_completed}")
+                    print(f"Using max length from loss arrays: {epochs_completed}")
             
             if epochs_completed == 0 and 'epochs_completed' in training_metrics:
                 epochs_completed = int(training_metrics['epochs_completed'])
-                print(f"Method 3: Using 'epochs_completed' from training_metrics: {epochs_completed}")
+                print(f"Using 'epochs_completed' from training_metrics: {epochs_completed}")
             
             if epochs_completed == 0:
                 epochs_completed = 2
-                print(f"Method 4: Defaulting to: {epochs_completed}")
+                print(f"Defaulting to: {epochs_completed}")
             
-            print(f"\\nDEBUG: Final Determination:")
+            print(f"\\nFinal Determination:")
             print(f"  Algorithm: {algorithm}")
             print(f"  Epochs to upload: {epochs_completed}")
             
@@ -220,13 +194,8 @@ implementation:
             print(f"  Final Generator Loss: {final_g_loss:.6f}")
             print(f"  Final Discriminator Loss: {final_d_loss:.6f}")
             
-            block_training_results = training_history.get('block_training_results', {})
-            if block_training_results:
-                print(f"\\nDEBUG: Block Training Results Found:")
-                print(f"  Keys: {list(block_training_results.keys())}")
-                
             print("\\n" + "="*80)
-            print("DEBUG: PREPARING DATA FOR UPLOAD")
+            print("PREPARING DATA FOR UPLOAD")
             print("="*80)
             
         except Exception as e:
@@ -291,87 +260,87 @@ implementation:
         all_epoch_data = []
         block_training_data = []
         
-        # Determine actual training_mode (algorithm) and block_type
-        actual_training_mode = algorithm  # Use algorithm from training history
-        actual_block_type = ""
+        # Determine training_mode from algorithm
+        training_mode = algorithm  # backprop, cafo, or forward_forward
         
-        # If block_training_results exist and we have specific block info
-        if block_training_results:
-            if 'generator_blocks' in block_training_results:
-                # Handle generator blocks
-                for block_data in block_training_results.get('generator_blocks', []):
-                    block_idx = block_data.get('block_idx', 0)
-                    block_losses = block_data.get('epoch_losses', [])
-                    
-                    for epoch_idx, block_loss in enumerate(block_losses):
-                        entry_uid = f"{args.model_id}_{execution_id}_gen{block_idx}_ep{epoch_idx+1}_{session_uid[:8]}"
-                        
-                        block_schema_entry = {
-                            "uid": str(entry_uid),
-                            "projectId": str(args.project_id),
-                            "tenant_id": str(args.tenant_id),
-                            "block_type": f"{algorithm}_gen",
-                            "accuracy": 0.0,
-                            "epoch": epoch_idx + 1,
-                            "model_id": str(args.model_id),
-                            "training_mode": actual_training_mode,
-                            "recon_loss": 0.0,
-                            "execution_id": int(execution_id),
-                            "loss": float(block_loss),
-                            "kl_loss": 0.0,
-                            "block": int(block_idx)
-                        }
-                        
-                        block_training_data.append(block_schema_entry)
-                        print(f"Added generator block {block_idx}, epoch {epoch_idx+1}")
-            
-            if 'discriminator_blocks' in block_training_results:
-                # Handle discriminator blocks
-                for block_data in block_training_results.get('discriminator_blocks', []):
-                    block_idx = block_data.get('block_idx', 0)
-                    block_losses = block_data.get('epoch_losses', [])
-                    
-                    for epoch_idx, block_loss in enumerate(block_losses):
-                        entry_uid = f"{args.model_id}_{execution_id}_disc{block_idx}_ep{epoch_idx+1}_{session_uid[:8]}"
-                        
-                        block_schema_entry = {
-                            "uid": str(entry_uid),
-                            "projectId": str(args.project_id),
-                            "tenant_id": str(args.tenant_id),
-                            "block_type": f"{algorithm}_disc",
-                            "accuracy": 0.0,
-                            "epoch": epoch_idx + 1,
-                            "model_id": str(args.model_id),
-                            "training_mode": actual_training_mode,
-                            "recon_loss": 0.0,
-                            "execution_id": int(execution_id),
-                            "loss": float(block_loss),
-                            "kl_loss": 0.0,
-                            "block": int(block_idx)
-                        }
-                        
-                        block_training_data.append(block_schema_entry)
-                        print(f"Added discriminator block {block_idx}, epoch {epoch_idx+1}")
-        
-        # If no specific block type provided and no block training, use algorithm
-        if not args.block_type and not block_training_data:
-            if algorithm == 'cafo':
-                actual_block_type = 'cafo'
-            elif algorithm == 'forward_forward':
-                actual_block_type = 'ff'
-            else:
-                actual_block_type = ''  # Empty for backprop
+        # Determine block_type from algorithm
+        if algorithm == 'backprop':
+            block_type = ""  # Empty for backprop
+        elif algorithm == 'cafo':
+            block_type = "cafo"
+        elif algorithm == 'forward_forward':
+            block_type = "ff"
         else:
-            actual_block_type = args.block_type
+            block_type = ""
+        
+        # Process block training results if they exist
+        if block_training_results:
+            print(f"Processing block training results...")
+            
+            # Handle generator blocks
+            for block_data in block_training_results.get('generator_blocks', []):
+                block_idx = block_data.get('block_idx', 0)
+                block_losses = block_data.get('epoch_losses', [])
+                
+                for epoch_idx, block_loss in enumerate(block_losses):
+                    entry_uid = f"{args.model_id}_{execution_id}_gen{block_idx}_ep{epoch_idx+1}_{session_uid[:8]}"
+                    
+                    block_schema_entry = {
+                        "uid": str(entry_uid),
+                        "projectId": str(args.project_id),
+                        "tenant_id": str(args.tenant_id),
+                        "block_type": f"{algorithm}_gen",
+                        "accuracy": 0.0,
+                        "epoch": epoch_idx + 1,
+                        "model_id": str(args.model_id),
+                        "training_mode": training_mode,
+                        "recon_loss": 0.0,
+                        "execution_id": int(execution_id),
+                        "loss": float(block_loss),
+                        "kl_loss": 0.0,
+                        "block": int(block_idx)
+                    }
+                    
+                    block_training_data.append(block_schema_entry)
+            
+            # Handle discriminator blocks
+            for block_data in block_training_results.get('discriminator_blocks', []):
+                block_idx = block_data.get('block_idx', 0)
+                block_losses = block_data.get('epoch_losses', [])
+                
+                for epoch_idx, block_loss in enumerate(block_losses):
+                    entry_uid = f"{args.model_id}_{execution_id}_disc{block_idx}_ep{epoch_idx+1}_{session_uid[:8]}"
+                    
+                    block_schema_entry = {
+                        "uid": str(entry_uid),
+                        "projectId": str(args.project_id),
+                        "tenant_id": str(args.tenant_id),
+                        "block_type": f"{algorithm}_disc",
+                        "accuracy": 0.0,
+                        "epoch": epoch_idx + 1,
+                        "model_id": str(args.model_id),
+                        "training_mode": training_mode,
+                        "recon_loss": 0.0,
+                        "execution_id": int(execution_id),
+                        "loss": float(block_loss),
+                        "kl_loss": 0.0,
+                        "block": int(block_idx)
+                    }
+                    
+                    block_training_data.append(block_schema_entry)
+            
+            print(f"  Generator blocks: {len(block_training_results.get('generator_blocks', []))}")
+            print(f"  Discriminator blocks: {len(block_training_results.get('discriminator_blocks', []))}")
+            print(f"  Total block entries: {len(block_training_data)}")
         
         print(f"\\nTraining Configuration:")
         print(f"  Algorithm: {algorithm}")
-        print(f"  Training Mode: {actual_training_mode}")
-        print(f"  Block Type: {actual_block_type}")
+        print(f"  Training Mode: {training_mode}")
+        print(f"  Block Type: {block_type}")
         print(f"  Block Training Entries: {len(block_training_data)}")
         print(f"  Adversarial Epochs: {epochs_completed}")
         
-        # Process adversarial training epochs (standard backprop/cafo/ff training)
+        # Process adversarial training epochs
         for epoch in range(1, epochs_completed + 1):
             print(f"\\nProcessing Adversarial Epoch {epoch}/{epochs_completed}")
             
@@ -405,16 +374,16 @@ implementation:
                 "uid": str(entry_uid),
                 "projectId": str(args.project_id),
                 "tenant_id": str(args.tenant_id),
-                "block_type": actual_block_type,
+                "block_type": block_type,
                 "accuracy": float(discriminator_accuracy),
                 "epoch": int(epoch),
                 "model_id": str(args.model_id),
-                "training_mode": actual_training_mode,
+                "training_mode": training_mode,
                 "recon_loss": float(0.0),
                 "execution_id": int(execution_id),
                 "loss": float(gen_loss),
                 "kl_loss": float(0.0),
-                "block": int(block_number)
+                "block": 0  # For adversarial training, block is 0
             }
             
             print(f"  uid: {schema_entry['uid']}")
@@ -422,19 +391,18 @@ implementation:
             print(f"  block_type: {schema_entry['block_type']}")
             print(f"  loss (gen): {schema_entry['loss']:.6f}")
             print(f"  accuracy (disc): {schema_entry['accuracy']:.6f}")
-            print(f"  block: {schema_entry['block']}")
             
             all_epoch_data.append(schema_entry)
         
-        # Combine block training data with adversarial training data
+        # Combine all data
         all_data_to_upload = all_epoch_data + block_training_data
         
-        print(f"\\nDEBUG: Total entries to upload: {len(all_data_to_upload)}")
+        print(f"\\nTotal entries to upload: {len(all_data_to_upload)}")
         print(f"  Adversarial training entries: {len(all_epoch_data)}")
         print(f"  Block training entries: {len(block_training_data)}")
         
         if all_data_to_upload:
-            print(f"First entry sample:")
+            print(f"\\nFirst entry sample:")
             print(json.dumps(all_data_to_upload[0], indent=2))
         
         print("\\n" + "="*80)
@@ -519,12 +487,9 @@ implementation:
                     'total_entries': len(all_data_to_upload),
                     'adversarial_entries': len(all_epoch_data),
                     'block_training_entries': len(block_training_data),
-                    'training_config': {
-                        'algorithm': algorithm,
-                        'training_mode': actual_training_mode,
-                        'block_type': actual_block_type,
-                        'has_block_training': bool(block_training_data)
-                    }
+                    'algorithm': algorithm,
+                    'training_mode': training_mode,
+                    'block_type': block_type
                 },
                 'upload_summary': {
                     'success': upload_success,
@@ -550,9 +515,12 @@ implementation:
                     'project_id': args.project_id,
                     'schema_id': args.schema_id
                 },
-                'training_summary': {
+                'training_info': {
                     'algorithm': algorithm,
                     'epochs_completed': epochs_completed,
+                    'batch_size': batch_size,
+                    'training_time': training_time,
+                    'num_samples': num_samples,
                     'final_generator_loss': final_g_loss,
                     'final_discriminator_loss': final_d_loss,
                     'block_training_detected': bool(block_training_data),
@@ -565,11 +533,10 @@ implementation:
                     'success': upload_success,
                     'used_endpoint': used_endpoint
                 },
-                'configuration': {
-                    'actual_training_mode': actual_training_mode,
-                    'actual_block_type': actual_block_type,
-                    'input_training_mode': args.training_mode,
-                    'input_block_type': args.block_type
+                'schema_fields': {
+                    'training_mode': training_mode,
+                    'block_type': block_type,
+                    'block_value': '0 for adversarial, block_idx for block training'
                 }
             }
             
@@ -589,8 +556,8 @@ implementation:
         print(f"MODEL: {args.model_id}")
         print(f"EXECUTION: {execution_id}")
         print(f"ALGORITHM: {algorithm}")
-        print(f"TRAINING MODE: {actual_training_mode}")
-        print(f"BLOCK TYPE: {actual_block_type}")
+        print(f"TRAINING MODE: {training_mode}")
+        print(f"BLOCK TYPE: {block_type}")
         print(f"EPOCHS: {epochs_completed}")
         print(f"BLOCK TRAINING ENTRIES: {len(block_training_data)}")
         
@@ -632,12 +599,6 @@ implementation:
       - {inputValue: tenant_id}
       - --project_id
       - {inputValue: project_id}
-      - --training_mode
-      - {inputValue: training_mode}
-      - --block_number
-      - {inputValue: block_number}
-      - --block_type
-      - {inputValue: block_type}
       - --upload_status
       - {outputPath: upload_status}
       - --schema_response
