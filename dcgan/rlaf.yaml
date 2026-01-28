@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v20
+name: DCGAN RLAF Loop v21
 description: DCGAN RLAF with PreprocessedDataset, CAFO, and Forward-Forward support
 inputs:
   - name: trained_model
@@ -144,7 +144,6 @@ implementation:
         
         # ==================== ADD MISSING CLASSES FROM TASKS GENERATOR ====================
         class DCGANTaskDataset(Dataset):
-            """Compatible dataset class for DCGAN tasks"""
             
             def __init__(self, images, task_id=0, domain_factor=0.0, style='original'):
                 self.images = images
@@ -165,7 +164,7 @@ implementation:
                 return img
             
             def apply_gan_domain_shift(self, img, factor, style):
-                """Apply domain shift transformations"""
+             
                 img = img.clone()
                 
                 if style == 'noise':
@@ -214,8 +213,7 @@ implementation:
                 return img
         
         class TasksWrapper:
-            """Wrapper class for tasks from the Continual Tasks Generator"""
-            
+       
             def __init__(self, tasks):
                 self.tasks = tasks
                 self.num_tasks = len(tasks)
@@ -227,7 +225,7 @@ implementation:
                 return self.tasks[idx]
             
             def get_task(self, task_id):
-                """Get a specific task by ID"""
+             
                 for task in self.tasks:
                     if task['task_id'] == task_id:
                         return task
@@ -451,7 +449,7 @@ implementation:
         
         # ==================== TRAINING WITH CAFO/FF SUPPORT ====================
         def train_dcgan_with_action(action, model_path, config_str, tasks_path, output_model_path):
-            """Full DCGAN training with CAFO/Forward-Forward support"""
+      
             print(f"DEBUG: Starting DCGAN training with action: {action}")
             
             # Parse config
@@ -945,7 +943,7 @@ implementation:
                 access_token = f.read().strip()
             
             # Load initial metrics
-            print("\n[STEP 1] Loading initial metrics...")
+            print("\\n[STEP 1] Loading initial metrics...")
             current_metrics = {}
             try:
                 with open(args.init_metrics, 'r') as f: 
@@ -972,10 +970,10 @@ implementation:
             action_to_use = None
             
             # Run RLAF loop
-            print(f"\n[STEP 2] Starting RLAF loop (2 iterations)")
+            print(f"\\n[STEP 2] Starting RLAF loop (2 iterations)")
             
             for i in range(2):
-                print(f"\n{'='*60}")
+                print(f"\\n{'='*60}")
                 print(f"RLAF ITERATION {i+1}/2")
                 print(f"{'='*60}")
                 
@@ -1026,7 +1024,7 @@ implementation:
                     raise
                 
                 # STEP 4: Trigger DQN pipeline
-                print("\n[STEP 3] Triggering DQN pipeline...")
+                print("\\n[STEP 3] Triggering DQN pipeline...")
                 try:
                     dqn_config = {
                         "pipeline_id": args.dqn_pipeline_id,
@@ -1061,7 +1059,7 @@ implementation:
                                     print(f"Action parameters: {action_to_use}")
                                     
                                     # STEP 5: FULL TRAINING WITH CAFO/FF SUPPORT
-                                    print("\n[STEP 4] Starting full DCGAN training with CAFO/FF support...")
+                                    print("\\n[STEP 4] Starting full DCGAN training with CAFO/FF support...")
                                     new_metrics = train_dcgan_with_action(
                                         action_to_use, 
                                         args.trained_model, 
@@ -1118,7 +1116,7 @@ implementation:
                     raise
             
             # STEP 6: Save final results
-            print("\n[STEP 5] Saving final results...")
+            print("\\n[STEP 5] Saving final results...")
             os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
             
             # Include CAFO/FF information in final output
@@ -1138,21 +1136,21 @@ implementation:
             with open(args.rlaf_output, 'w') as f:
                 json.dump(final_output, f, indent=2)
             
-            print(f"\n✓ Final results saved to: {args.rlaf_output}")
+            print(f"\\n✓ Final results saved to: {args.rlaf_output}")
             print(f"✓ Final model saved to: {args.retrained_model}")
             print(f"✓ Final metrics: {current_metrics}")
             print(f"✓ Training algorithm used: {current_metrics.get('algorithm', 'backprop')}")
-            print("\n" + "=" * 80)
+            print("\\n" + "=" * 80)
             print("DCGAN RLAF LOOP WITH CAFO/FF SUPPORT COMPLETED SUCCESSFULLY")
             print("=" * 80)
         
         if __name__ == '__main__':
             try:
                 main()
-                print("\n✓ RLAF loop completed successfully")
+                print("\\n✓ RLAF loop completed successfully")
                 sys.exit(0)
             except Exception as e:
-                print(f"\n✗ RLAF loop failed: {e}")
+                print(f"\\n✗ RLAF loop failed: {e}")
                 traceback.print_exc()
                 sys.exit(1)
     args:
