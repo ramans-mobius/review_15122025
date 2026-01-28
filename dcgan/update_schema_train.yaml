@@ -1,5 +1,5 @@
-name: Upload Training Metrics To Schema v6
-description: Uploads DCGAN training metrics to training schema
+name: Upload Training Metrics To Schema v7
+description: Uploads DCGAN training metrics to training schema with enhanced error logging
 inputs:
   - name: training_history
     type: String
@@ -42,7 +42,7 @@ implementation:
       - sh
       - -c
       - |
-        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        apt-get update > /dev/null && apt-get install -y curl jq > /dev/null
         exec "$0" "$@"
       - python3
       - -u
@@ -77,7 +77,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD TRAINING METRICS TO SCHEMA v5")
+        print("UPLOAD TRAINING METRICS TO SCHEMA v6 - ENHANCED DEBUGGING")
         print("=" * 80)
         
         for path in [args.upload_status, args.schema_response, args.metrics_summary]:
@@ -159,24 +159,104 @@ implementation:
             traceback.print_exc()
             sys.exit(1)
         
-        def upload_to_schema(schema_entry, epoch_num):
-            endpoints = [
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/create"
+        def test_schema_existence(schema_url_base):
+            
+            print(f"\\n{'='*60}")
+            print(f"TESTING SCHEMA ACCESS")
+            print(f"{'='*60}")
+            
+            test_urls = [
+                f"{schema_url_base}/schemas/{args.schema_id}",
+                f"{schema_url_base}/v3.0/schemas/{args.schema_id}",
+                f"{schema_url_base}/schemas/{args.schema_id}/definition",
+                f"{schema_url_base}/v3.0/schemas/{args.schema_id}/definition"
             ]
             
-            for endpoint_idx, schema_url in enumerate(endpoints):
-                clean_url = schema_url.replace('\\n', '').replace('\\r', '')
-                print(f"Trying endpoint {endpoint_idx + 1}: {clean_url}")
-                
+            for test_url in test_urls:
+                print(f"\\nTrying test URL: {test_url}")
                 try:
                     curl_command = [
                         "curl",
-                        "--location", clean_url,
+                        "--location", test_url,
                         "--header", f"Authorization: Bearer {bearer_token}",
                         "--header", "Content-Type: application/json",
-                        "--data", json.dumps(schema_entry),
+                        "--fail",
+                        "--show-error",
+                        "--connect-timeout", "30",
+                        "--max-time", "60",
+                        "--silent",
+                        "--include"
+                    ]
+                    
+                    process = subprocess.run(
+                        curl_command,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    
+                    print(f"Exit code: {process.returncode}")
+                    
+                    if process.returncode == 0:
+                        print(f" Schema exists and is accessible")
+                        
+                        # Try to parse the response
+                        try:
+                            response_lines = process.stdout.split('\\n')
+                            for line in response_lines[:10]:  # Print first 10 lines
+                                if line.strip():
+                                    print(f"  Response: {line[:200]}")
+                        except:
+                            pass
+                            
+                        return True, test_url, None
+                    else:
+                        print(f" Schema test failed")
+                        print(f"  Stderr: {process.stderr[:200]}")
+                        
+                        # Extract HTTP status code
+                        response_lines = process.stdout.split('\\n')
+                        for line in response_lines:
+                            if line.startswith('HTTP/'):
+                                print(f"  HTTP Status: {line}")
+                                break
+                        
+                        if "401" in process.stderr or "401" in process.stdout:
+                            return False, test_url, "Authentication failed (401 Unauthorized)"
+                        elif "403" in process.stderr or "403" in process.stdout:
+                            return False, test_url, "Permission denied (403 Forbidden)"
+                        elif "404" in process.stderr or "404" in process.stdout:
+                            continue  # Try next URL
+                        else:
+                            return False, test_url, f"HTTP error: {process.stderr[:200]}"
+                            
+                except Exception as e:
+                    print(f"Exception during schema test: {str(e)}")
+                    return False, test_url, str(e)
+            
+            return False, None, f"Schema {args.schema_id} not found at any test endpoint"
+        
+        def test_schema_definition():
+         
+            print(f"\\n{'='*60}")
+            print(f"GETTING SCHEMA DEFINITION")
+            print(f"{'='*60}")
+            
+            definition_urls = [
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/definition",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/definition",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}"
+            ]
+            
+            for def_url in definition_urls:
+                print(f"\\nTrying definition URL: {def_url}")
+                try:
+                    curl_command = [
+                        "curl",
+                        "--location", def_url,
+                        "--header", f"Authorization: Bearer {bearer_token}",
+                        "--header", "Content-Type: application/json",
                         "--fail",
                         "--show-error",
                         "--connect-timeout", "30",
@@ -191,33 +271,297 @@ implementation:
                         check=False
                     )
                     
-                    print(f"Curl exit code: {process.returncode}")
-                    
                     if process.returncode == 0:
-                        print(f"Upload successful")
                         try:
-                            response_data = json.loads(process.stdout)
-                            return True, response_data, None
+                            schema_def = json.loads(process.stdout)
+                            print(f" Schema definition retrieved successfully")
+                            print(f"Schema Name: {schema_def.get('name', 'N/A')}")
+                            print(f"Schema Type: {schema_def.get('type', 'N/A')}")
+                            
+                            # Print required fields if available
+                            if 'properties' in schema_def:
+                                print(f"\\nSchema Properties:")
+                                for prop_name, prop_details in schema_def['properties'].items():
+                                    prop_type = prop_details.get('type', 'N/A')
+                                    required = "REQUIRED" if prop_name in schema_def.get('required', []) else "optional"
+                                    print(f"  {prop_name}: {prop_type} ({required})")
+                                    
+                            if 'required' in schema_def:
+                                print(f"\\nRequired fields: {schema_def['required']}")
+                                
+                            return schema_def
                         except json.JSONDecodeError:
-                            return True, {"raw_response": process.stdout}, None
+                            print(f"  Could not parse schema definition as JSON")
+                            print(f"Raw response: {process.stdout[:500]}")
+                            return None
                     else:
-                        print(f"Upload failed (exit code: {process.returncode})")
-                        print(f"Stderr: {process.stderr[:200]}")
-                        print(f"Stdout: {process.stdout[:200]}")
-                        
-                        if "404" in process.stderr or "404" in process.stdout:
-                            print(f"Endpoint not found, trying next...")
-                            continue
-                        
-                        return False, {"error": process.stderr[:200]}, process.stderr[:500]
+                        print(f" Failed to get definition: {process.stderr[:200]}")
+                        continue
                         
                 except Exception as e:
-                    print(f"Exception: {str(e)}")
+                    print(f"Exception getting definition: {str(e)}")
             
-            return False, {"error": "All endpoints failed"}, None
+            print(f"  Could not retrieve schema definition from any endpoint")
+            return None
         
+        def validate_schema_entry(schema_entry, schema_definition=None):
+           
+            print(f"\\n{'='*60}")
+            print(f"VALIDATING SCHEMA ENTRY")
+            print(f"{'='*60}")
+            
+            print(f"Entry UID: {schema_entry.get('uid')}")
+            print(f"Entry keys ({len(schema_entry)}): {list(schema_entry.keys())}")
+            
+            if schema_definition and 'properties' in schema_definition:
+                print(f"\\nComparing with schema definition:")
+                schema_props = schema_definition.get('properties', {})
+                required_fields = schema_definition.get('required', [])
+                
+                # Check for missing required fields
+                missing_required = [field for field in required_fields if field not in schema_entry]
+                if missing_required:
+                    print(f" MISSING REQUIRED FIELDS: {missing_required}")
+                
+                # Check for extra fields
+                extra_fields = [field for field in schema_entry.keys() if field not in schema_props]
+                if extra_fields:
+                    print(f"  EXTRA FIELDS (not in schema): {extra_fields}")
+                
+                # Check field types
+                print(f"\\nField type validation:")
+                for field, value in schema_entry.items():
+                    if field in schema_props:
+                        expected_type = schema_props[field].get('type', 'any')
+                        actual_type = type(value).__name__
+                        
+                        # Map Python types to JSON schema types
+                        type_mapping = {
+                            'str': 'string',
+                            'int': 'integer',
+                            'float': 'number',
+                            'bool': 'boolean',
+                            'dict': 'object',
+                            'list': 'array'
+                        }
+                        
+                        actual_json_type = type_mapping.get(actual_type, actual_type)
+                        
+                        if expected_type != 'any' and actual_json_type != expected_type:
+                            print(f"   {field}: Expected {expected_type}, got {actual_json_type} (value: {value})")
+                        else:
+                            print(f"   {field}: {expected_type} matches {actual_json_type}")
+                    else:
+                        print(f"    {field}: Not defined in schema properties")
+            
+            return True
+        
+        def upload_to_schema(schema_entry, epoch_num):
+            endpoints = [
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/create",
+                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+            ]
+            
+            for endpoint_idx, schema_url in enumerate(endpoints):
+                clean_url = schema_url.replace('\\n', '').replace('\\r', '')
+                print(f"\\n{'='*60}")
+                print(f"ATTEMPT {endpoint_idx + 1} for Epoch {epoch_num}")
+                print(f"{'='*60}")
+                print(f"Endpoint: {clean_url}")
+                print(f"Method: {'POST' if 'create' in schema_url else 'POST to instances endpoint'}")
+                
+                # Log the full payload for debugging
+                print(f"\\nRequest Payload:")
+                print(json.dumps(schema_entry, indent=2)[:1000] + ("..." if len(json.dumps(schema_entry)) > 1000 else ""))
+                
+                try:
+                    # First, test the endpoint with OPTIONS or HEAD to understand available methods
+                    print(f"\\n1. Testing endpoint availability...")
+                    test_command = [
+                        "curl",
+                        "--location", clean_url,
+                        "--header", f"Authorization: Bearer {bearer_token}",
+                        "--head",
+                        "--fail",
+                        "--show-error",
+                        "--connect-timeout", "10",
+                        "--max-time", "20",
+                        "--silent"
+                    ]
+                    
+                    test_process = subprocess.run(
+                        test_command,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    
+                    print(f"Endpoint test exit code: {test_process.returncode}")
+                    
+                    if test_process.returncode != 0:
+                        print(f"Endpoint test details:")
+                        print(f"  Stderr: {test_process.stderr[:200]}")
+                        
+                        # Try to get more info with verbose curl
+                        print(f"\\n2. Trying verbose request...")
+                        verbose_command = [
+                            "curl",
+                            "--location", clean_url,
+                            "--header", f"Authorization: Bearer {bearer_token}",
+                            "--header", "Content-Type: application/json",
+                            "--data", json.dumps(schema_entry),
+                            "--verbose",
+                            "--connect-timeout", "30",
+                            "--max-time", "60"
+                        ]
+                        
+                        verbose_process = subprocess.run(
+                            verbose_command,
+                            capture_output=True,
+                            text=True,
+                            check=False
+                        )
+                        
+                        print(f"Verbose output (first 1000 chars):")
+                        print(verbose_process.stderr[:1000])
+                        print(f"\\nResponse (first 500 chars):")
+                        print(verbose_process.stdout[:500])
+                        
+                        if "404" in verbose_process.stderr:
+                            print(f"\\n ERROR: Endpoint not found (404)")
+                            print(f"   The schema or endpoint doesn't exist")
+                            continue
+                        elif "401" in verbose_process.stderr:
+                            print(f"\\n ERROR: Authentication failed (401)")
+                            print(f"   Bearer token might be invalid or expired")
+                            return False, {"error": "Authentication failed"}, "401 Unauthorized"
+                        elif "403" in verbose_process.stderr:
+                            print(f"\\n ERROR: Permission denied (403)")
+                            print(f"   You don't have permission to access this schema")
+                            return False, {"error": "Permission denied"}, "403 Forbidden"
+                        elif "400" in verbose_process.stderr:
+                            print(f"\\n ERROR: Bad request (400)")
+                            print(f"   The request payload might be invalid")
+                            return False, {"error": "Bad request"}, "400 Bad Request"
+                        else:
+                            print(f"\\n ERROR: Unknown error")
+                            continue
+                    
+                    # Now try the actual POST request
+                    print(f"\\n3. Attempting data upload...")
+                    curl_command = [
+                        "curl",
+                        "--location", clean_url,
+                        "--header", f"Authorization: Bearer {bearer_token}",
+                        "--header", "Content-Type: application/json",
+                        "--data", json.dumps(schema_entry),
+                        "--fail",
+                        "--show-error",
+                        "--connect-timeout", "30",
+                        "--max-time", "60",
+                        "--silent",
+                        "--include"  # Include HTTP headers in output
+                    ]
+                    
+                    process = subprocess.run(
+                        curl_command,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    
+                    print(f"Curl exit code: {process.returncode}")
+                    print(f"Full response length: {len(process.stdout)} chars")
+                    
+                    # Parse response
+                    response_lines = process.stdout.split('\\n')
+                    
+                    # Print HTTP status line
+                    for line in response_lines[:5]:
+                        if line.startswith('HTTP/'):
+                            print(f"HTTP Status: {line}")
+                            break
+                    
+                    # Find the JSON body (usually after empty line)
+                    json_body = ""
+                    for i, line in enumerate(response_lines):
+                        if line.strip() == '':
+                            json_body = '\\n'.join(response_lines[i+1:])
+                            break
+                    
+                    if process.returncode == 0:
+                        print(f" Upload successful!")
+                        
+                        try:
+                            response_data = json.loads(json_body) if json_body else {"success": True}
+                            print(f"Response data: {json.dumps(response_data, indent=2)[:500]}")
+                            return True, response_data, None
+                        except json.JSONDecodeError:
+                            print(f"  Could not parse response as JSON")
+                            print(f"Raw response: {json_body[:500]}")
+                            return True, {"raw_response": json_body}, None
+                    else:
+                        print(f" Upload failed")
+                        print(f"Error details: {process.stderr[:500]}")
+                        print(f"Response body: {json_body[:500]}")
+                        
+                        # Try to extract error message
+                        error_message = process.stderr[:200]
+                        if not error_message and json_body:
+                            try:
+                                error_json = json.loads(json_body)
+                                error_message = str(error_json.get('message', json_body[:200]))
+                            except:
+                                error_message = json_body[:200]
+                        
+                        return False, {"error": error_message, "response_body": json_body}, error_message
+                        
+                except Exception as e:
+                    print(f"Exception during upload: {str(e)}")
+                    traceback.print_exc()
+                    return False, {"exception": str(e)}, str(e)
+            
+            return False, {"error": "All endpoints failed"}, "All endpoints returned errors"
+        
+        # ==================== MAIN EXECUTION ====================
+        
+        print(f"\\n{'='*80}")
+        print(f"PRE-UPLOAD DIAGNOSTICS")
+        print(f"{'='*80}")
+        
+        # 1. Test if schema exists
+        base_urls = [
+            "https://igs.gov-cloud.ai/pi-entity-instances-service",
+            "https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0"
+        ]
+        
+        schema_exists = False
+        for base_url in base_urls:
+            exists, test_url, error = test_schema_existence(base_url)
+            if exists:
+                schema_exists = True
+                print(f"\\n Schema validation passed at: {test_url}")
+                break
+            elif error:
+                print(f"\\n Schema validation failed: {error}")
+        
+        if not schema_exists:
+            print(f"\\n CRITICAL ERROR: Schema {args.schema_id} does not exist or is not accessible")
+            print(f"   Please verify:")
+            print(f"   1. Schema ID is correct: {args.schema_id}")
+            print(f"   2. You have permission to access this schema")
+            print(f"   3. The schema service is running")
+            print(f"   4. Your bearer token is valid")
+            sys.exit(1)
+        
+        # 2. Get schema definition
+        schema_definition = test_schema_definition()
+        
+        print(f"\\n{'='*80}")
         print(f"UPLOADING METRICS")
-        print("=" * 80)
+        print(f"{'='*80}")
         
         all_responses = []
         successful_uploads = 0
@@ -228,7 +572,9 @@ implementation:
         print(f"Total epochs to upload: {epochs_completed}")
         
         for epoch in range(1, epochs_completed + 1):
-            print(f"Processing Epoch {epoch}/{epochs_completed}")
+            print(f"\\n{'='*80}")
+            print(f"PROCESSING EPOCH {epoch}/{epochs_completed}")
+            print(f"{'='*80}")
             
             gen_loss = 0.0
             disc_loss = 0.0
@@ -271,10 +617,10 @@ implementation:
                 "kl_loss": float(0.0)
             }
             
-            print(f"Schema entry for epoch {epoch}:")
-            for key, value in schema_entry.items():
-                print(f"  {key}: {value} (type: {type(value).__name__})")
+            # Validate schema entry
+            validate_schema_entry(schema_entry, schema_definition)
             
+            # Upload to schema
             success, response, error = upload_to_schema(schema_entry, epoch)
             
             all_responses.append({
@@ -287,13 +633,16 @@ implementation:
             
             if success:
                 successful_uploads += 1
-                print(f"Epoch {epoch} uploaded successfully")
+                print(f"\\n Epoch {epoch} uploaded successfully")
             else:
                 failed_uploads += 1
-                print(f"Epoch {epoch} upload failed")
+                print(f"\\n Epoch {epoch} upload failed")
+                print(f"   Error: {error}")
             
             if epoch < epochs_completed:
-                time.sleep(0.5)
+                time.sleep(1)  # Slight delay between epochs
+        
+        # ==================== SAVE RESULTS ====================
         
         metrics_summary_data = {
             'upload_session': {
@@ -302,7 +651,8 @@ implementation:
                 'model_id': args.model_id,
                 'execution_id': execution_id,
                 'project_id': args.project_id,
-                'training_mode': args.training_mode
+                'training_mode': args.training_mode,
+                'schema_id': args.schema_id
             },
             'training_summary': {
                 'epochs_completed': epochs_completed,
@@ -319,7 +669,14 @@ implementation:
                 'successful': successful_uploads,
                 'failed': failed_uploads,
                 'success_rate': (successful_uploads / epochs_completed * 100) if epochs_completed > 0 else 0,
-                'session_uid': session_uid
+                'session_uid': session_uid,
+                'schema_id': args.schema_id,
+                'schema_accessible': schema_exists,
+                'diagnostics': {
+                    'schema_definition_retrieved': schema_definition is not None,
+                    'endpoints_tested': 4,
+                    'timestamp': datetime.now().isoformat()
+                }
             }
         }
         
@@ -335,59 +692,104 @@ implementation:
                 },
                 'schema_info': {
                     'schema_id': args.schema_id,
-                    'upload_endpoint': f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create"
+                    'schema_exists': schema_exists,
+                    'upload_endpoints': [
+                        f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/create",
+                        f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+                        f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/create",
+                        f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+                    ]
+                },
+                'diagnostic_info': {
+                    'schema_definition': schema_definition.get('name', 'N/A') if schema_definition else 'Not retrieved',
+                    'schema_type': schema_definition.get('type', 'N/A') if schema_definition else 'Not retrieved',
+                    'bearer_token_valid': schema_exists
                 }
             }
             
             with open(args.upload_status, 'w') as f:
                 json.dump(upload_status_data, f, indent=2)
-            print(f"Upload status saved: {args.upload_status}")
+            print(f"\\n Upload status saved: {args.upload_status}")
             
             detailed_responses = {
                 'session_uid': session_uid,
                 'total_epochs': epochs_completed,
+                'schema_id': args.schema_id,
+                'schema_accessible': schema_exists,
                 'responses': all_responses
             }
             
             with open(args.schema_response, 'w') as f:
                 json.dump(detailed_responses, f, indent=2)
-            print(f"Schema responses saved: {args.schema_response}")
+            print(f" Schema responses saved: {args.schema_response}")
             
             with open(args.metrics_summary, 'w') as f:
                 json.dump(metrics_summary_data, f, indent=2)
-            print(f"Metrics summary saved: {args.metrics_summary}")
+            print(f" Metrics summary saved: {args.metrics_summary}")
             
         except Exception as e:
             print(f"ERROR saving outputs: {e}")
             traceback.print_exc()
         
-        print("FINAL SUMMARY")
-        print("=" * 80)
+        # ==================== FINAL SUMMARY ====================
         
-        print(f"Training Data:")
+        print(f"\\n{'='*80}")
+        print(f"FINAL DIAGNOSTIC SUMMARY")
+        print(f"{'='*80}")
+        
+        print(f"\\n TRAINING DATA:")
         print(f"  Model ID: {args.model_id}")
         print(f"  Execution ID: {execution_id}")
         print(f"  Epochs: {epochs_completed}")
         print(f"  Algorithm: {algorithm}")
         print(f"  Training Mode: {args.training_mode}")
         
-        print(f"Upload Results:")
+        print(f"\\n SCHEMA STATUS:")
         print(f"  Schema ID: {args.schema_id}")
+        print(f"  Schema Exists: {' YES' if schema_exists else ' NO'}")
         print(f"  Project ID: {args.project_id}")
+        
+        print(f"\\n UPLOAD RESULTS:")
         print(f"  Epochs Attempted: {epochs_completed}")
         print(f"  Successful: {successful_uploads}")
         print(f"  Failed: {failed_uploads}")
-        print(f"  Success Rate: {(successful_uploads/epochs_completed*100):.1f}%" if epochs_completed > 0 else "N/A")
-        
-        print("=" * 80)
-        if successful_uploads == epochs_completed and epochs_completed > 0:
-            print("ALL TRAINING METRICS UPLOADED SUCCESSFULLY!")
-        elif successful_uploads > 0:
-            print(f"PARTIAL SUCCESS: {successful_uploads}/{epochs_completed} epochs uploaded")
+        if epochs_completed > 0:
+            success_rate = (successful_uploads / epochs_completed * 100)
+            print(f"  Success Rate: {success_rate:.1f}%")
+            print(f"  Status: {' ALL SUCCESSFUL' if failed_uploads == 0 else '  PARTIAL SUCCESS' if successful_uploads > 0 else ' ALL FAILED'}")
         else:
-            print("NO METRICS WERE UPLOADED SUCCESSFULLY")
+            print(f"  Success Rate: N/A (no epochs)")
+        
+        print(f"\\n DIAGNOSTICS:")
+        print(f"  Bearer Token: {' Valid' if schema_exists else ' Invalid or insufficient permissions'}")
+        print(f"  Schema Definition: {' Retrieved' if schema_definition else ' Not retrieved'}")
+        print(f"  Session UID: {session_uid}")
+        
+        print(f"\\n TROUBLESHOOTING TIPS:")
+        if not schema_exists:
+            print(f"  1. Verify Schema ID '{args.schema_id}' is correct")
+            print(f"  2. Check if you have permission to access this schema")
+            print(f"  3. Ensure the schema service is running")
+            print(f"  4. Verify your bearer token is valid and not expired")
+        elif successful_uploads == 0:
+            print(f"  1. Check if the schema accepts POST requests to /instances/create")
+            print(f"  2. Verify the request payload matches schema requirements")
+            print(f"  3. Check network connectivity to the schema service")
+            print(f"  4. Look for schema validation errors in the detailed logs above")
+        
+        print(f"\\n{'='*80}")
+        if successful_uploads == epochs_completed and epochs_completed > 0:
+            print(" ALL TRAINING METRICS UPLOADED SUCCESSFULLY!")
+        elif successful_uploads > 0:
+            print(f"  PARTIAL SUCCESS: {successful_uploads}/{epochs_completed} epochs uploaded")
+        else:
+            print(" NO METRICS WERE UPLOADED SUCCESSFULLY")
+            if not schema_exists:
+                print("   Reason: Schema does not exist or is not accessible")
+            else:
+                print("   Reason: All upload attempts failed (see detailed logs above)")
             sys.exit(1)
-        print("=" * 80)
+        print(f"{'='*80}")
     args:
       - --training_history
       - {inputPath: training_history}
