@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v19
+name: DCGAN RLAF Loop v20
 description: DCGAN RLAF with PreprocessedDataset, CAFO, and Forward-Forward support
 inputs:
   - name: trained_model
@@ -142,6 +142,97 @@ implementation:
                     'preprocessed': self.preprocessed
                 }
         
+        # ==================== ADD MISSING CLASSES FROM TASKS GENERATOR ====================
+        class DCGANTaskDataset(Dataset):
+            """Compatible dataset class for DCGAN tasks"""
+            
+            def __init__(self, images, task_id=0, domain_factor=0.0, style='original'):
+                self.images = images
+                self.task_id = task_id
+                self.domain_factor = domain_factor
+                self.style = style
+                
+            def __len__(self):
+                return len(self.images)
+                
+            def __getitem__(self, idx):
+                img = self.images[idx]
+                
+                # Apply domain-specific transformations for GANs
+                if self.domain_factor > 0:
+                    img = self.apply_gan_domain_shift(img, self.domain_factor, self.style)
+                
+                return img
+            
+            def apply_gan_domain_shift(self, img, factor, style):
+                """Apply domain shift transformations"""
+                img = img.clone()
+                
+                if style == 'noise':
+                    # Add Gaussian noise
+                    noise_level = 0.1 + factor * 0.3
+                    noise = torch.randn_like(img) * noise_level
+                    img = img + noise
+                    img = torch.clamp(img, -1, 1)  # DCGAN uses [-1, 1] range
+                    
+                elif style == 'blur':
+                    # Apply Gaussian blur (simulated with pooling)
+                    kernel_size = int(3 + factor * 5)
+                    if kernel_size % 2 == 0:
+                        kernel_size += 1
+                    
+                    if img.dim() == 3:
+                        # Apply blur using average pooling
+                        img = F.avg_pool2d(img.unsqueeze(0), 
+                                          kernel_size=kernel_size, 
+                                          stride=1, 
+                                          padding=kernel_size//2).squeeze(0)
+                
+                elif style == 'contrast':
+                    # Adjust contrast
+                    mean = img.mean()
+                    contrast_factor = 1.0 + factor * 1.5
+                    img = (img - mean) * contrast_factor + mean
+                    img = torch.clamp(img, -1, 1)
+                
+                elif style == 'brightness':
+                    # Adjust brightness
+                    brightness_shift = factor * 0.4
+                    img = img + brightness_shift
+                    img = torch.clamp(img, -1, 1)
+                
+                elif style == 'color_shift' and img.shape[0] == 3:
+                    # RGB color shift
+                    shift = torch.tensor([
+                        factor * 0.3,   # Red shift
+                        factor * 0.2,   # Green shift  
+                        -factor * 0.25  # Blue shift
+                    ]).view(3, 1, 1).to(img.device)
+                    img = img + shift
+                    img = torch.clamp(img, -1, 1)
+                
+                return img
+        
+        class TasksWrapper:
+            """Wrapper class for tasks from the Continual Tasks Generator"""
+            
+            def __init__(self, tasks):
+                self.tasks = tasks
+                self.num_tasks = len(tasks)
+            
+            def __len__(self):
+                return len(self.tasks)
+            
+            def __getitem__(self, idx):
+                return self.tasks[idx]
+            
+            def get_task(self, task_id):
+                """Get a specific task by ID"""
+                for task in self.tasks:
+                    if task['task_id'] == task_id:
+                        return task
+                return None
+        
         class SimpleDCGANDataset(Dataset):
             def __init__(self, images, normalize=False):
                 self.images = images
@@ -155,6 +246,40 @@ implementation:
                 if self.normalize:
                     return img
                 return img
+        
+        # ==================== SAFE UNPICKLER TO HANDLE TASK DATA ====================
+        class SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                try:
+                    return super().find_class(module, name)
+                except:
+                    # Handle common classes from DCGAN pipeline
+                    if name == 'RawDatasetWrapper':
+                        return RawDatasetWrapper
+                    elif name == 'PreprocessedDataset':
+                        return PreprocessedDataset
+                    elif name == 'DCGANTaskDataset':
+                        return DCGANTaskDataset
+                    elif name == 'TasksWrapper':
+                        return TasksWrapper
+                    elif name == 'GANDataset':
+                        return DCGANTaskDataset
+                    elif name == 'DCGANDataset':
+                        return DCGANTaskDataset
+                    else:
+                        # Return a generic class for unknown types
+                        class GenericClass:
+                            def __init__(self, *args, **kwargs):
+                                self.data = args[0] if args else kwargs
+                            def __len__(self):
+                                if hasattr(self.data, '__len__'):
+                                    return len(self.data)
+                                return 0
+                            def __getitem__(self, idx):
+                                if hasattr(self.data, '__getitem__'):
+                                    return self.data[idx]
+                                return None
+                        return GenericClass
         
         # ==================== GAN METRICS ====================
         def calculate_gan_metrics(real_images, fake_images):
@@ -326,7 +451,7 @@ implementation:
         
         # ==================== TRAINING WITH CAFO/FF SUPPORT ====================
         def train_dcgan_with_action(action, model_path, config_str, tasks_path, output_model_path):
-          
+            """Full DCGAN training with CAFO/Forward-Forward support"""
             print(f"DEBUG: Starting DCGAN training with action: {action}")
             
             # Parse config
@@ -428,21 +553,29 @@ implementation:
             generator = generator.to(device)
             discriminator = discriminator.to(device)
             
-            # Load tasks data
-            with open(tasks_path, 'rb') as f:
-                tasks_data = pickle.load(f)
+            # ==================== LOAD TASKS DATA WITH SAFE UNPICKLER ====================
+            print(f"DEBUG: Loading tasks data from {tasks_path}")
+            
+            try:
+                with open(tasks_path, 'rb') as f:
+                    raw_data = f.read()
+                
+                import io
+                data = SafeUnpickler(io.BytesIO(raw_data)).load()
+                print(f"✓ Tasks data loaded successfully")
+                print(f"  Data type: {type(data)}")
+                
+            except Exception as e:
+                print(f"ERROR: Failed to load tasks data: {e}")
+                traceback.print_exc()
+                raise
             
             # Handle different data formats
             all_images = []
-            if isinstance(tasks_data, PreprocessedDataset):
-                print("DEBUG: Loading PreprocessedDataset")
-                all_images = [tasks_data.images]
-            elif isinstance(tasks_data, RawDatasetWrapper):
-                print("DEBUG: Loading RawDatasetWrapper")
-                all_images = [tasks_data.images]
-            elif isinstance(tasks_data, list):
-                print("DEBUG: Loading list of tasks")
-                for task in tasks_data:
+            if isinstance(data, TasksWrapper):
+                print("DEBUG: Loading TasksWrapper")
+                tasks = data.tasks
+                for task in tasks:
                     if 'train_loader' in task:
                         dataloader = task['train_loader']
                         for batch in dataloader:
@@ -450,12 +583,60 @@ implementation:
                                 all_images.append(batch)
                             elif isinstance(batch, (list, tuple)):
                                 all_images.append(batch[0])
-            elif hasattr(tasks_data, 'images'):
+                    elif 'dataset' in task:
+                        dataset = task['dataset']
+                        if hasattr(dataset, '__len__'):
+                            for i in range(min(len(dataset), 50)):  # Sample first 50
+                                try:
+                                    all_images.append(dataset[i])
+                                except:
+                                    pass
+            elif isinstance(data, PreprocessedDataset):
+                print("DEBUG: Loading PreprocessedDataset")
+                if hasattr(data, 'images'):
+                    images = data.images
+                    if torch.is_tensor(images):
+                        all_images = [images[i] for i in range(min(len(images), 100))]
+                    elif isinstance(images, list):
+                        all_images = images[:100]
+            elif isinstance(data, RawDatasetWrapper):
+                print("DEBUG: Loading RawDatasetWrapper")
+                if hasattr(data, 'images'):
+                    images = data.images
+                    if torch.is_tensor(images):
+                        all_images = [images[i] for i in range(min(len(images), 100))]
+                    elif isinstance(images, list):
+                        all_images = images[:100]
+            elif isinstance(data, list):
+                print("DEBUG: Loading list of tasks")
+                for task in data:
+                    if isinstance(task, dict) and 'train_loader' in task:
+                        dataloader = task['train_loader']
+                        for batch in dataloader:
+                            if isinstance(batch, torch.Tensor):
+                                all_images.append(batch)
+                            elif isinstance(batch, (list, tuple)):
+                                all_images.append(batch[0])
+                    elif hasattr(task, '__len__'):
+                        # Try to extract images
+                        try:
+                            for i in range(min(len(task), 20)):
+                                all_images.append(task[i])
+                        except:
+                            pass
+            elif hasattr(data, 'images'):
                 print("DEBUG: Loading object with images attribute")
-                if isinstance(tasks_data.images, torch.Tensor):
-                    all_images = [tasks_data.images]
-                elif isinstance(tasks_data.images, list):
-                    all_images = tasks_data.images
+                if isinstance(data.images, torch.Tensor):
+                    all_images = [data.images[i] for i in range(min(len(data.images), 100))]
+                elif isinstance(data.images, list):
+                    all_images = data.images[:100]
+            elif hasattr(data, '__len__'):
+                print("DEBUG: Loading direct dataset")
+                try:
+                    for i in range(min(len(data), 100)):
+                        all_images.append(data[i])
+                except:
+                    pass
             
             if not all_images:
                 print("WARNING: No training data found in tasks, creating dummy data")
@@ -463,13 +644,22 @@ implementation:
                 channels = dataset_cfg.get('channels', 1)
                 all_images = [torch.randn(32, channels, image_size, image_size) * 2 - 1]
             
+            print(f"DEBUG: Collected {len(all_images)} image batches/samples")
+            
             # Prepare dataset
-            if isinstance(all_images[0], torch.Tensor) and all_images[0].dim() == 4:
+            if all_images and isinstance(all_images[0], torch.Tensor) and all_images[0].dim() == 4:
+                # List of batch tensors
                 images_tensor = torch.cat(all_images, dim=0)
-            elif isinstance(all_images[0], torch.Tensor):
+            elif all_images and isinstance(all_images[0], torch.Tensor):
+                # List of individual tensors
                 images_tensor = torch.stack(all_images)
-            else:
-                images_tensor = torch.tensor(np.stack(all_images))
+            elif all_images:
+                # Try to convert to tensor
+                try:
+                    images_tensor = torch.tensor(np.stack(all_images))
+                except:
+                    print("WARNING: Could not stack images, using first batch")
+                    images_tensor = all_images[0] if isinstance(all_images[0], torch.Tensor) else torch.tensor(all_images[0])
             
             # Ensure values are in [-1, 1]
             if images_tensor.max() > 1.0 or images_tensor.min() < -1.0:
@@ -755,7 +945,7 @@ implementation:
                 access_token = f.read().strip()
             
             # Load initial metrics
-            print("\\n[STEP 1] Loading initial metrics...")
+            print("\n[STEP 1] Loading initial metrics...")
             current_metrics = {}
             try:
                 with open(args.init_metrics, 'r') as f: 
@@ -782,10 +972,10 @@ implementation:
             action_to_use = None
             
             # Run RLAF loop
-            print(f"\\n[STEP 2] Starting RLAF loop (2 iterations)")
+            print(f"\n[STEP 2] Starting RLAF loop (2 iterations)")
             
             for i in range(2):
-                print(f"\\n{'='*60}")
+                print(f"\n{'='*60}")
                 print(f"RLAF ITERATION {i+1}/2")
                 print(f"{'='*60}")
                 
@@ -836,7 +1026,7 @@ implementation:
                     raise
                 
                 # STEP 4: Trigger DQN pipeline
-                print("\\n[STEP 3] Triggering DQN pipeline...")
+                print("\n[STEP 3] Triggering DQN pipeline...")
                 try:
                     dqn_config = {
                         "pipeline_id": args.dqn_pipeline_id,
@@ -871,7 +1061,7 @@ implementation:
                                     print(f"Action parameters: {action_to_use}")
                                     
                                     # STEP 5: FULL TRAINING WITH CAFO/FF SUPPORT
-                                    print("\\n[STEP 4] Starting full DCGAN training with CAFO/FF support...")
+                                    print("\n[STEP 4] Starting full DCGAN training with CAFO/FF support...")
                                     new_metrics = train_dcgan_with_action(
                                         action_to_use, 
                                         args.trained_model, 
@@ -928,7 +1118,7 @@ implementation:
                     raise
             
             # STEP 6: Save final results
-            print("\\n[STEP 5] Saving final results...")
+            print("\n[STEP 5] Saving final results...")
             os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
             
             # Include CAFO/FF information in final output
@@ -948,21 +1138,21 @@ implementation:
             with open(args.rlaf_output, 'w') as f:
                 json.dump(final_output, f, indent=2)
             
-            print(f"\\n✓ Final results saved to: {args.rlaf_output}")
+            print(f"\n✓ Final results saved to: {args.rlaf_output}")
             print(f"✓ Final model saved to: {args.retrained_model}")
             print(f"✓ Final metrics: {current_metrics}")
             print(f"✓ Training algorithm used: {current_metrics.get('algorithm', 'backprop')}")
-            print("\\n" + "=" * 80)
+            print("\n" + "=" * 80)
             print("DCGAN RLAF LOOP WITH CAFO/FF SUPPORT COMPLETED SUCCESSFULLY")
             print("=" * 80)
         
         if __name__ == '__main__':
             try:
                 main()
-                print("\\n✓ RLAF loop completed successfully")
+                print("\n✓ RLAF loop completed successfully")
                 sys.exit(0)
             except Exception as e:
-                print(f"\\n✗ RLAF loop failed: {e}")
+                print(f"\n✗ RLAF loop failed: {e}")
                 traceback.print_exc()
                 sys.exit(1)
     args:
