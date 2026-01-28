@@ -1,5 +1,5 @@
-name: Upload Model To Schema Complete v10
-description: Uploads model to schema with complete required fields only
+name: Upload Model To Schema Complete v11
+description: Uploads model to schema with complete required fields only with comprehensive endpoint testing
 inputs:
   - name: trained_model
     type: Model
@@ -77,7 +77,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD MODEL TO SCHEMA COMPLETE v3")
+        print("UPLOAD MODEL TO SCHEMA COMPLETE v7")
         print("=" * 80)
         
         for path in [args.schema_response, args.schema_entry, args.upload_status]:
@@ -91,10 +91,7 @@ implementation:
         
         print("Reading CDN URLs...")
         model_weights_cdn = args.model_weights_cdn_url.strip()
-        print(f"Model weights CDN: {model_weights_cdn[:80]}...")
-        
         model_metadata_cdn = args.model_metadata_cdn_url.strip()
-        print(f"Model metadata CDN: {model_metadata_cdn[:80]}...")
         
         print("Loading model to extract metadata...")
         try:
@@ -165,67 +162,31 @@ implementation:
             "created_by": "DCGAN Pipeline"
         }
         
-        optional_fields = ["experiment_id", "symbolic_profile"]
-        for field in optional_fields:
-            if field not in schema_entry:
-                schema_entry[field] = None
-        
-        print("Schema entry prepared:")
-        print("-" * 80)
-        required = ["tenant_id", "model_id", "execution_id", "projectId", "name", "source"]
-        for field in required:
-            value = schema_entry.get(field, "MISSING")
-            status = "OK" if field in schema_entry and schema_entry[field] is not None else "MISSING"
-            print(f"  {status} {field}: {value}")
-        
-        cdn_fields = ["model_weights_cdn", "model_metadata_cdn", "model_url"]
-        for field in cdn_fields:
-            value = schema_entry.get(field, "MISSING")
-            has_value = value and value != "MISSING"
-            status = "OK" if has_value else "MISSING"
-            preview = f"{value[:50]}..." if has_value and len(value) > 50 else value
-            print(f"  {status} {field}: {preview}")
-        
-        other_fields = ["architecture_type", "input_shape", "output_shape", "parameter_count"]
-        for field in other_fields:
-            value = schema_entry.get(field, "MISSING")
-            status = "OK" if field in schema_entry else "MISSING"
-            print(f"  {status} {field}: {value}")
-        print("-" * 80)
-        
         with open(args.schema_entry, 'w') as f:
             json.dump(schema_entry, f, indent=2)
         print(f"Schema entry saved to: {args.schema_entry}")
         
-        print("UPLOADING TO SCHEMA DATABASE")
-        print("=" * 80)
-        
-        endpoints = [
-            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances",
-            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
-            f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
-        ]
-        
-        upload_success = False
-        schema_response = {}
-        used_endpoint = ""
-        
-        for endpoint_idx, endpoint in enumerate(endpoints):
-            clean_url = endpoint.replace('\\n', '').replace('\\r', '')
-            print(f"Trying endpoint {endpoint_idx + 1}: {clean_url}")
+        def make_api_request(method, url, data=None):
+            clean_url = url.replace('\\n', '').replace('\\r', '')
+            print(f"{method} {clean_url}")
+            
+            if data:
+                print(f"Payload size: {len(json.dumps(data))} bytes")
             
             curl_command = [
                 "curl",
                 "--location", clean_url,
                 "--header", f"Authorization: Bearer {bearer_token}",
                 "--header", "Content-Type: application/json",
-                "--data", json.dumps(schema_entry),
-                "--fail",
-                "--show-error",
+                "--request", method,
                 "--connect-timeout", "30",
                 "--max-time", "60",
-                "--silent"
+                "--silent",
+                "--show-error"
             ]
+            
+            if data:
+                curl_command.extend(["--data", json.dumps(data)])
             
             try:
                 process = subprocess.run(
@@ -238,38 +199,161 @@ implementation:
                 print(f"Curl exit code: {process.returncode}")
                 
                 if process.returncode == 0:
-                    upload_success = True
-                    used_endpoint = clean_url
-                    print(f"Schema upload successful!")
-                    
                     try:
-                        schema_response = json.loads(process.stdout)
-                        print("FULL RESPONSE JSON:")
-                        print("-" * 60)
-                        print(json.dumps(schema_response, indent=2))
-                        print("-" * 60)
+                        response_data = json.loads(process.stdout)
+                        return True, response_data, None
                     except json.JSONDecodeError:
-                        print(f"Response is not valid JSON")
-                        print(f"Raw response: {process.stdout[:500]}...")
-                        schema_response = {"raw_response": process.stdout}
-                    break
+                        return True, {"raw_response": process.stdout}, None
                 else:
-                    print(f"Upload failed (exit code: {process.returncode})")
-                    print(f"Stderr: {process.stderr[:200]}")
-                    print(f"Stdout: {process.stdout[:200]}")
-                    
-                    if "404" in process.stderr or "404" in process.stdout:
-                        print(f"Endpoint not found, trying next...")
-                        continue
-                    
-                    schema_response = {
-                        "error": process.stderr[:200],
-                        "stdout": process.stdout[:200]
-                    }
+                    print(f"API call failed")
+                    print(f"Stderr: {process.stderr[:500]}")
+                    print(f"Stdout: {process.stdout[:500]}")
+                    return False, {"error": process.stderr[:500]}, process.stderr[:500]
                     
             except Exception as e:
-                print(f"Unexpected error: {e}")
-                schema_response = {"error": str(e)}
+                print(f"Exception: {str(e)}")
+                return False, {"error": str(e)}, str(e)
+        
+        print("TESTING ENDPOINTS")
+        print("=" * 80)
+        
+        list_endpoints = [
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances/list",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/list"
+        ]
+        
+        instances_endpoints = [
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+        ]
+        
+        working_list_endpoints = []
+        working_instances_endpoints = []
+        
+        test_payload = {
+            "dbType": "TIDB",
+            "ownedOnly": True,
+            "filter": {
+                "execution_id": int(args.execution_id)
+            }
+        }
+        
+        for endpoint in list_endpoints:
+            print(f"Testing list endpoint: {endpoint}")
+            success, response, error = make_api_request("POST", endpoint, test_payload)
+            if success:
+                print(f"List endpoint WORKING: {endpoint}")
+                working_list_endpoints.append(endpoint)
+            else:
+                print(f"List endpoint FAILED: {endpoint}")
+        
+        for endpoint in instances_endpoints:
+            print(f"Testing instances endpoint: {endpoint}")
+            test_create_payload = {"data": [{"test": "data"}]}
+            success, response, error = make_api_request("POST", endpoint, test_create_payload)
+            if success:
+                print(f"Instances endpoint WORKING: {endpoint}")
+                working_instances_endpoints.append(endpoint)
+            else:
+                print(f"Instances endpoint FAILED: {endpoint}")
+        
+        print(f"Found {len(working_list_endpoints)} working list endpoints")
+        print(f"Found {len(working_instances_endpoints)} working instances endpoints")
+        
+        if not working_list_endpoints and not working_instances_endpoints:
+            print("ERROR: No working endpoints found")
+            sys.exit(1)
+        
+        print("UPLOADING TO SCHEMA")
+        print("=" * 80)
+        
+        upload_success = False
+        schema_response = {}
+        used_endpoint = ""
+        
+        if working_list_endpoints:
+            list_endpoint = working_list_endpoints[0]
+            print(f"Using list endpoint: {list_endpoint}")
+            
+            check_payload = {
+                "dbType": "TIDB",
+                "ownedOnly": True,
+                "filter": {
+                    "execution_id": int(args.execution_id),
+                    "model_id": args.model_id
+                }
+            }
+            
+            check_success, check_response, check_error = make_api_request("POST", list_endpoint, check_payload)
+            
+            if check_success:
+                print(f"Check successful")
+                
+                if 'content' in check_response and check_response['content']:
+                    print(f"Row exists, need to update")
+                    
+                    if working_instances_endpoints:
+                        instances_endpoint = working_instances_endpoints[0]
+                        
+                        patch_requests = []
+                        for key, value in schema_entry.items():
+                            if key not in ['execution_id', 'model_id', 'tenant_id']:
+                                patch_requests.append({
+                                    "operation": "REPLACE",
+                                    "path": key,
+                                    "value": value
+                                })
+                        
+                        update_payload = {
+                            "dbType": "TIDB",
+                            "conditionalFilter": {
+                                "conditions": [
+                                    {
+                                        "field": "execution_id",
+                                        "operator": "EQUAL",
+                                        "value": int(args.execution_id)
+                                    },
+                                    {
+                                        "field": "model_id",
+                                        "operator": "EQUAL",
+                                        "value": args.model_id
+                                    }
+                                ]
+                            },
+                            "partialUpdateRequests": [
+                                {
+                                    "patch": patch_requests
+                                }
+                            ]
+                        }
+                        
+                        print(f"Updating via PATCH to: {instances_endpoint}")
+                        upload_success, schema_response, upload_error = make_api_request("PATCH", instances_endpoint, update_payload)
+                        used_endpoint = instances_endpoint
+                
+                else:
+                    print(f"Row does not exist, need to create")
+                    
+                    if working_instances_endpoints:
+                        instances_endpoint = working_instances_endpoints[0]
+                        create_payload = {"data": [schema_entry]}
+                        
+                        print(f"Creating via POST to: {instances_endpoint}")
+                        upload_success, schema_response, upload_error = make_api_request("POST", instances_endpoint, create_payload)
+                        used_endpoint = instances_endpoint
+        
+        else:
+            print(f"No working list endpoints, trying direct create")
+            
+            if working_instances_endpoints:
+                instances_endpoint = working_instances_endpoints[0]
+                create_payload = {"data": [schema_entry]}
+                
+                print(f"Creating via POST to: {instances_endpoint}")
+                upload_success, schema_response, upload_error = make_api_request("POST", instances_endpoint, create_payload)
+                used_endpoint = instances_endpoint
         
         with open(args.schema_response, 'w') as f:
             if isinstance(schema_response, dict):
@@ -288,21 +372,14 @@ implementation:
             "model_name": args.model_name,
             "execution_id": int(args.execution_id),
             "used_endpoint": used_endpoint,
-            "fields_submitted": {
-                "total": len(schema_entry),
-                "required_present": all(field in schema_entry for field in required),
-                "cdn_urls_present": all(field in schema_entry for field in cdn_fields),
-                "source_field": schema_entry.get("source", "missing")
-            },
-            "cdn_urls": {
-                "model_weights_cdn": model_weights_cdn[:100] + "..." if len(model_weights_cdn) > 100 else model_weights_cdn,
-                "model_metadata_cdn": model_metadata_cdn[:100] + "..." if len(model_metadata_cdn) > 100 else model_metadata_cdn,
-                "model_url": "Same as model_weights_cdn"
+            "working_endpoints": {
+                "list_endpoints": working_list_endpoints,
+                "instances_endpoints": working_instances_endpoints
             },
             "schema_response_summary": {
+                "success": upload_success,
                 "has_id": 'id' in schema_response if isinstance(schema_response, dict) else False,
-                "has_status": 'status' in schema_response if isinstance(schema_response, dict) else False,
-                "success": upload_success
+                "has_status": 'status' in schema_response if isinstance(schema_response, dict) else False
             }
         }
         
@@ -321,9 +398,9 @@ implementation:
         print(f"Summary:")
         print(f"  Model: {args.model_name} ({args.model_id})")
         print(f"  Schema: {args.schema_id}")
+        print(f"  Working List Endpoints: {len(working_list_endpoints)}")
+        print(f"  Working Instances Endpoints: {len(working_instances_endpoints)}")
         print(f"  Used Endpoint: {used_endpoint}")
-        print(f"  CDN URLs: {len(cdn_fields)} fields included")
-        print(f"  Source field: {schema_entry.get('source', 'missing')}")
         print(f"  Success: {'Yes' if upload_success else 'No'}")
         print("=" * 80)
         
