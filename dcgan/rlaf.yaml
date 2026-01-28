@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v21
+name: DCGAN RLAF Loop v22
 description: DCGAN RLAF with PreprocessedDataset, CAFO, and Forward-Forward support
 inputs:
   - name: trained_model
@@ -70,7 +70,6 @@ implementation:
         print("DCGAN RLAF LOOP - WITH CAFO/FF SUPPORT")
         print("=" * 80)
         
-        # ==================== IMPORT DCGAN MODULES ====================
         try:
             import nesy_factory.GANs.dcgan as dcgan_module
             print("SUCCESS: Imported nesy_factory.GANs.dcgan")
@@ -94,7 +93,6 @@ implementation:
             traceback.print_exc()
             sys.exit(1)
         
-        # ==================== DATA CLASSES FROM TRAINING BRICK ====================
         class PreprocessedDataset:
             def __init__(self, images, labels, dataset_name, preprocessor_params):
                 self.images = images
@@ -142,9 +140,7 @@ implementation:
                     'preprocessed': self.preprocessed
                 }
         
-        # ==================== ADD MISSING CLASSES FROM TASKS GENERATOR ====================
         class DCGANTaskDataset(Dataset):
-            
             def __init__(self, images, task_id=0, domain_factor=0.0, style='original'):
                 self.images = images
                 self.task_id = task_id
@@ -157,55 +153,47 @@ implementation:
             def __getitem__(self, idx):
                 img = self.images[idx]
                 
-                # Apply domain-specific transformations for GANs
                 if self.domain_factor > 0:
                     img = self.apply_gan_domain_shift(img, self.domain_factor, self.style)
                 
                 return img
             
             def apply_gan_domain_shift(self, img, factor, style):
-             
                 img = img.clone()
                 
                 if style == 'noise':
-                    # Add Gaussian noise
                     noise_level = 0.1 + factor * 0.3
                     noise = torch.randn_like(img) * noise_level
                     img = img + noise
-                    img = torch.clamp(img, -1, 1)  # DCGAN uses [-1, 1] range
+                    img = torch.clamp(img, -1, 1)
                     
                 elif style == 'blur':
-                    # Apply Gaussian blur (simulated with pooling)
                     kernel_size = int(3 + factor * 5)
                     if kernel_size % 2 == 0:
                         kernel_size += 1
                     
                     if img.dim() == 3:
-                        # Apply blur using average pooling
                         img = F.avg_pool2d(img.unsqueeze(0), 
                                           kernel_size=kernel_size, 
                                           stride=1, 
                                           padding=kernel_size//2).squeeze(0)
                 
                 elif style == 'contrast':
-                    # Adjust contrast
                     mean = img.mean()
                     contrast_factor = 1.0 + factor * 1.5
                     img = (img - mean) * contrast_factor + mean
                     img = torch.clamp(img, -1, 1)
                 
                 elif style == 'brightness':
-                    # Adjust brightness
                     brightness_shift = factor * 0.4
                     img = img + brightness_shift
                     img = torch.clamp(img, -1, 1)
                 
                 elif style == 'color_shift' and img.shape[0] == 3:
-                    # RGB color shift
                     shift = torch.tensor([
-                        factor * 0.3,   # Red shift
-                        factor * 0.2,   # Green shift  
-                        -factor * 0.25  # Blue shift
+                        factor * 0.3,
+                        factor * 0.2,
+                        -factor * 0.25
                     ]).view(3, 1, 1).to(img.device)
                     img = img + shift
                     img = torch.clamp(img, -1, 1)
@@ -213,7 +201,6 @@ implementation:
                 return img
         
         class TasksWrapper:
-       
             def __init__(self, tasks):
                 self.tasks = tasks
                 self.num_tasks = len(tasks)
@@ -225,7 +212,6 @@ implementation:
                 return self.tasks[idx]
             
             def get_task(self, task_id):
-             
                 for task in self.tasks:
                     if task['task_id'] == task_id:
                         return task
@@ -245,13 +231,11 @@ implementation:
                     return img
                 return img
         
-        # ==================== SAFE UNPICKLER TO HANDLE TASK DATA ====================
         class SafeUnpickler(pickle.Unpickler):
             def find_class(self, module, name):
                 try:
                     return super().find_class(module, name)
                 except:
-                    # Handle common classes from DCGAN pipeline
                     if name == 'RawDatasetWrapper':
                         return RawDatasetWrapper
                     elif name == 'PreprocessedDataset':
@@ -265,7 +249,6 @@ implementation:
                     elif name == 'DCGANDataset':
                         return DCGANTaskDataset
                     else:
-                        # Return a generic class for unknown types
                         class GenericClass:
                             def __init__(self, *args, **kwargs):
                                 self.data = args[0] if args else kwargs
@@ -279,7 +262,6 @@ implementation:
                                 return None
                         return GenericClass
         
-        # ==================== GAN METRICS ====================
         def calculate_gan_metrics(real_images, fake_images):
             metrics = {
                 'fid_score': 100.0,
@@ -333,7 +315,6 @@ implementation:
             except Exception as e:
                 print(f"WARNING: SSIM/PSNR calculation failed: {e}")
             
-            # Diversity score
             try:
                 images_np = fake_images.cpu().numpy().reshape(fake_images.shape[0], -1)
                 if len(images_np) > 1:
@@ -349,7 +330,6 @@ implementation:
             except Exception as e:
                 print(f"WARNING: Diversity score calculation failed: {e}")
             
-            # Simplified FID
             try:
                 real_np = real_images.cpu().numpy().reshape(real_images.shape[0], -1)
                 fake_np = fake_images.cpu().numpy().reshape(fake_images.shape[0], -1)
@@ -377,7 +357,6 @@ implementation:
             
             return metrics
         
-        # ==================== DATABASE FUNCTIONS ====================
         def get_retry_session():
             retry_strategy = Retry(total=5, status_forcelist=[500, 502, 503, 504])
             adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -447,22 +426,17 @@ implementation:
                 time.sleep(30)
             raise RuntimeError("DQN pipeline timeout after 30 minutes")
         
-        # ==================== TRAINING WITH CAFO/FF SUPPORT ====================
         def train_dcgan_with_action(action, model_path, config_str, tasks_path, output_model_path):
-      
             print(f"DEBUG: Starting DCGAN training with action: {action}")
             
-            # Parse config
             config = json.loads(config_str)
             gan_cfg = config['gan']
             dataset_cfg = config['dataset']
             
-            # Apply action parameters
             training_cfg = gan_cfg['training']
             generator_cfg = gan_cfg['generator']
             discriminator_cfg = gan_cfg['discriminator']
             
-            # Override with action parameters
             batch_size = action.get('batch_size', training_cfg.get('batch_size', 16))
             epochs = action.get('epochs', training_cfg.get('epochs', 2))
             gen_lr = action.get('learning_rate_g', generator_cfg.get('learning_rate', 0.0002))
@@ -478,13 +452,10 @@ implementation:
             print(f"  Discriminator LR: {disc_lr}")
             print(f"  Dropout: {dropout}")
             
-            # Load model
             checkpoint = torch.load(model_path, map_location='cpu')
             
-            # Extract config and create models
             dcgan_config = checkpoint.get('config', {})
             
-            # Determine training algorithm
             algorithm_map = {
                 'backprop': TrainingAlgorithm.BACKPROP,
                 'cafo': TrainingAlgorithm.CAFO,
@@ -493,9 +464,7 @@ implementation:
             }
             training_algorithm = algorithm_map.get(algorithm, TrainingAlgorithm.BACKPROP)
             
-            # Create config object
             if isinstance(dcgan_config, dict):
-                # Update with training parameters
                 dcgan_config.update({
                     'batch_size': batch_size,
                     'epochs': epochs,
@@ -511,7 +480,6 @@ implementation:
                 if hasattr(DCGANConfig, 'from_dict'):
                     dcgan_config_obj = DCGANConfig.from_dict(dcgan_config)
                 else:
-                    # Fallback: create config with algorithm
                     dcgan_config_obj = DCGANConfig(
                         image_size=dataset_cfg.get('image_size', 64),
                         channels=dataset_cfg.get('channels', 1),
@@ -526,18 +494,15 @@ implementation:
                     )
             else:
                 dcgan_config_obj = dcgan_config
-                # Update algorithm if config is already a DCGANConfig
                 if hasattr(dcgan_config_obj, 'training_algorithm'):
                     dcgan_config_obj.training_algorithm = training_algorithm
                     dcgan_config_obj.use_cafo = (algorithm == 'cafo')
                     dcgan_config_obj.use_forward_forward = (algorithm == 'forward_forward')
                     dcgan_config_obj.use_hybrid = (algorithm == 'hybrid')
             
-            # Create models
             generator = FullyConfigurableDCGANGenerator(dcgan_config_obj)
             discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config_obj)
             
-            # Load weights
             if 'generator_state_dict' in checkpoint:
                 generator.load_state_dict(checkpoint['generator_state_dict'])
                 print("DEBUG: Loaded generator weights")
@@ -551,7 +516,6 @@ implementation:
             generator = generator.to(device)
             discriminator = discriminator.to(device)
             
-            # ==================== LOAD TASKS DATA WITH SAFE UNPICKLER ====================
             print(f"DEBUG: Loading tasks data from {tasks_path}")
             
             try:
@@ -560,7 +524,7 @@ implementation:
                 
                 import io
                 data = SafeUnpickler(io.BytesIO(raw_data)).load()
-                print(f"✓ Tasks data loaded successfully")
+                print(f"Tasks data loaded successfully")
                 print(f"  Data type: {type(data)}")
                 
             except Exception as e:
@@ -568,7 +532,6 @@ implementation:
                 traceback.print_exc()
                 raise
             
-            # Handle different data formats
             all_images = []
             if isinstance(data, TasksWrapper):
                 print("DEBUG: Loading TasksWrapper")
@@ -584,7 +547,7 @@ implementation:
                     elif 'dataset' in task:
                         dataset = task['dataset']
                         if hasattr(dataset, '__len__'):
-                            for i in range(min(len(dataset), 50)):  # Sample first 50
+                            for i in range(min(len(dataset), 50)):
                                 try:
                                     all_images.append(dataset[i])
                                 except:
@@ -616,7 +579,6 @@ implementation:
                             elif isinstance(batch, (list, tuple)):
                                 all_images.append(batch[0])
                     elif hasattr(task, '__len__'):
-                        # Try to extract images
                         try:
                             for i in range(min(len(task), 20)):
                                 all_images.append(task[i])
@@ -644,22 +606,17 @@ implementation:
             
             print(f"DEBUG: Collected {len(all_images)} image batches/samples")
             
-            # Prepare dataset
             if all_images and isinstance(all_images[0], torch.Tensor) and all_images[0].dim() == 4:
-                # List of batch tensors
                 images_tensor = torch.cat(all_images, dim=0)
             elif all_images and isinstance(all_images[0], torch.Tensor):
-                # List of individual tensors
                 images_tensor = torch.stack(all_images)
             elif all_images:
-                # Try to convert to tensor
                 try:
                     images_tensor = torch.tensor(np.stack(all_images))
                 except:
                     print("WARNING: Could not stack images, using first batch")
                     images_tensor = all_images[0] if isinstance(all_images[0], torch.Tensor) else torch.tensor(all_images[0])
             
-            # Ensure values are in [-1, 1]
             if images_tensor.max() > 1.0 or images_tensor.min() < -1.0:
                 images_tensor = (images_tensor - images_tensor.min()) / (images_tensor.max() - images_tensor.min()) * 2 - 1
             
@@ -671,7 +628,6 @@ implementation:
             print(f"DEBUG: Batch size: {actual_batch_size}")
             print(f"DEBUG: Batches per epoch: {len(dataloader)}")
             
-            # ==================== TRAINING LOOP WITH ALGORITHM SUPPORT ====================
             latent_dim = generator.latent_dim if hasattr(generator, 'latent_dim') else 100
             gen_optimizer = optim.Adam(generator.parameters(), lr=gen_lr, betas=(0.5, 0.999))
             disc_optimizer = optim.Adam(discriminator.parameters(), lr=disc_lr, betas=(0.5, 0.999))
@@ -697,12 +653,9 @@ implementation:
                     real_data = real_data.to(device)
                     batch_size_real = real_data.size(0)
                     
-                    # Different training based on algorithm
                     if algorithm == 'cafo':
-                        # CAFO training
                         disc_optimizer.zero_grad()
                         
-                        # Real data forward
                         real_output = discriminator(real_data)
                         if hasattr(discriminator, 'compute_cafo_loss'):
                             d_loss_real = discriminator.compute_cafo_loss(real_output, is_real=True)
@@ -710,7 +663,6 @@ implementation:
                             real_labels = torch.ones(batch_size_real, device=device)
                             d_loss_real = nn.functional.binary_cross_entropy_with_logits(real_output, real_labels)
                         
-                        # Fake data
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z).detach()
                         fake_output = discriminator(fake_data)
@@ -725,7 +677,6 @@ implementation:
                         d_loss.backward()
                         disc_optimizer.step()
                         
-                        # Generator training for CAFO
                         gen_optimizer.zero_grad()
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z)
@@ -734,39 +685,35 @@ implementation:
                         if hasattr(generator, 'compute_cafo_loss'):
                             g_loss = generator.compute_cafo_loss(fake_output)
                         else:
-                            g_loss = -torch.mean(fake_output)  # Maximize discriminator output
+                            g_loss = -torch.mean(fake_output)
                         
                         g_loss.backward()
                         gen_optimizer.step()
                         
                     elif algorithm == 'forward_forward':
-                        # Forward-Forward training
                         disc_optimizer.zero_grad()
                         
-                        # Positive phase (real data)
                         real_output = discriminator(real_data)
                         if hasattr(discriminator, 'compute_goodness'):
                             real_goodness = discriminator.compute_goodness(real_output)
-                            d_loss_real = -torch.mean(real_goodness)  # Maximize goodness
+                            d_loss_real = -torch.mean(real_goodness)
                         else:
-                            d_loss_real = -torch.mean(real_output)  # Maximize output
+                            d_loss_real = -torch.mean(real_output)
                         
-                        # Negative phase (fake data)
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z).detach()
                         fake_output = discriminator(fake_data)
                         
                         if hasattr(discriminator, 'compute_goodness'):
                             fake_goodness = discriminator.compute_goodness(fake_output)
-                            d_loss_fake = torch.mean(fake_goodness)  # Minimize goodness
+                            d_loss_fake = torch.mean(fake_goodness)
                         else:
-                            d_loss_fake = torch.mean(fake_output)  # Minimize output
+                            d_loss_fake = torch.mean(fake_output)
                         
                         d_loss = d_loss_real + d_loss_fake
                         d_loss.backward()
                         disc_optimizer.step()
                         
-                        # Generator training for FF
                         gen_optimizer.zero_grad()
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z)
@@ -774,18 +721,16 @@ implementation:
                         
                         if hasattr(generator, 'compute_goodness'):
                             fake_goodness = generator.compute_goodness(fake_output)
-                            g_loss = -torch.mean(fake_goodness)  # Maximize goodness
+                            g_loss = -torch.mean(fake_goodness)
                         else:
-                            g_loss = -torch.mean(fake_output)  # Maximize output
+                            g_loss = -torch.mean(fake_output)
                         
                         g_loss.backward()
                         gen_optimizer.step()
                         
                     else:
-                        # Standard adversarial training
                         disc_optimizer.zero_grad()
                         
-                        # Real data
                         real_output = discriminator(real_data)
                         if real_output.dim() > 1:
                             real_output = real_output.view(-1)
@@ -793,7 +738,6 @@ implementation:
                         real_labels = torch.ones(batch_size_real, device=device)
                         d_loss_real = nn.functional.binary_cross_entropy_with_logits(real_output, real_labels)
                         
-                        # Fake data
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z).detach()
                         fake_output = discriminator(fake_data)
@@ -807,7 +751,6 @@ implementation:
                         d_loss.backward()
                         disc_optimizer.step()
                         
-                        # Train generator
                         gen_optimizer.zero_grad()
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z)
@@ -836,24 +779,20 @@ implementation:
             training_time = time.time() - start_time
             print(f"DEBUG: Training completed in {training_time:.2f}s")
             
-            # ==================== EVALUATION ====================
             generator.eval()
             discriminator.eval()
             
             with torch.no_grad():
-                # Generate samples for evaluation
                 num_eval_samples = min(20, len(dataset))
                 real_images = []
                 fake_images = []
                 
-                # Get real images
                 dataloader_iter = iter(dataloader)
                 for i in range(min(2, len(dataloader))):
                     try:
                         real_batch = next(dataloader_iter).to(device)
                         real_images.append(real_batch)
                         
-                        # Generate fake images
                         z = torch.randn(real_batch.size(0), latent_dim, device=device)
                         fake_batch = generator(z)
                         fake_images.append(fake_batch)
@@ -866,7 +805,6 @@ implementation:
                     
                     metrics = calculate_gan_metrics(real_images, fake_images)
                     
-                    # Add discriminator scores
                     real_output = discriminator(real_images).mean().item()
                     fake_output = discriminator(fake_images).mean().item()
                     
@@ -892,7 +830,6 @@ implementation:
                         'algorithm': algorithm
                     }
             
-            # ==================== SAVE MODEL ====================
             os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
             
             checkpoint = {
@@ -916,7 +853,6 @@ implementation:
             
             return metrics
         
-        # ==================== MAIN FUNCTION ====================
         def main():
             parser = argparse.ArgumentParser()
             parser.add_argument('--trained_model', type=str, required=True)
@@ -942,7 +878,6 @@ implementation:
             with open(args.access_token, 'r') as f: 
                 access_token = f.read().strip()
             
-            # Load initial metrics
             print("\\n[STEP 1] Loading initial metrics...")
             current_metrics = {}
             try:
@@ -959,7 +894,6 @@ implementation:
             
             print(f"Initial metrics: {current_metrics}")
             
-            # DQN parameters - ONLY 4 features
             dcgan_dqn_params = [
                 {"key": "fid_score", "sign": "-", "mul": 0.3},
                 {"key": "ssim_mean", "sign": "+", "mul": 0.3},
@@ -969,7 +903,6 @@ implementation:
             
             action_to_use = None
             
-            # Run RLAF loop
             print(f"\\n[STEP 2] Starting RLAF loop (2 iterations)")
             
             for i in range(2):
@@ -977,7 +910,6 @@ implementation:
                 print(f"RLAF ITERATION {i+1}/2")
                 print(f"{'='*60}")
                 
-                # Prepare state for DQN (only 4 features)
                 state_for_dqn = {
                     'fid_score': float(current_metrics.get('fid_score', 100.0)),
                     'ssim_mean': float(current_metrics.get('ssim_mean', 0.0)),
@@ -985,7 +917,6 @@ implementation:
                     'diversity_score': float(current_metrics.get('diversity_score', 0.0))
                 }
                 
-                # Handle NaN values
                 for key in state_for_dqn:
                     if np.isnan(state_for_dqn[key]): 
                         state_for_dqn[key] = 0.0
@@ -993,10 +924,8 @@ implementation:
                 print(f"State for DQN: {state_for_dqn}")
                 
                 try:
-                    # Get current instance
                     instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                     
-                    # Update pierce2rlaf with only 4 features
                     if instance.get('pierce2rlaf'):
                         latest_entry = instance['pierce2rlaf'][-1]
                         previous_state = latest_entry['current_state']
@@ -1017,13 +946,12 @@ implementation:
                     update_instance_field(access_token, args.domain, args.schema_id, args.model_id,
                                         "pierce2rlaf", pierce2rlaf_history)
                     
-                    print(f"✓ Updated pierce2rlaf (size: {len(pierce2rlaf_history)})")
+                    print(f"Updated pierce2rlaf (size: {len(pierce2rlaf_history)})")
                     
                 except Exception as e:
                     print(f"ERROR: Database update failed: {str(e)}")
                     raise
                 
-                # STEP 4: Trigger DQN pipeline
                 print("\\n[STEP 3] Triggering DQN pipeline...")
                 try:
                     dqn_config = {
@@ -1037,7 +965,6 @@ implementation:
                     )
                     
                     if dqn_success:
-                        # Get DQN action
                         instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                         
                         if instance.get('rlaf2pierce'):
@@ -1051,14 +978,12 @@ implementation:
                                 if action_details:
                                     action_to_use = action_details['params']
                                     
-                                    # Add algorithm parameter if present in action
                                     if 'algorithm' in action_details:
                                         action_to_use['algorithm'] = action_details['algorithm']
                                     
-                                    print(f"✓ DQN selected action: {action_details['name']}")
+                                    print(f"DQN selected action: {action_details['name']}")
                                     print(f"Action parameters: {action_to_use}")
                                     
-                                    # STEP 5: FULL TRAINING WITH CAFO/FF SUPPORT
                                     print("\\n[STEP 4] Starting full DCGAN training with CAFO/FF support...")
                                     new_metrics = train_dcgan_with_action(
                                         action_to_use, 
@@ -1068,7 +993,6 @@ implementation:
                                         args.retrained_model
                                     )
                                     
-                                    # Update current metrics with additional metrics from training
                                     current_metrics = {
                                         'fid_score': new_metrics.get('fid_score', 100.0),
                                         'ssim_mean': new_metrics.get('ssim_mean', 0.0),
@@ -1081,9 +1005,8 @@ implementation:
                                         'discriminator_loss': new_metrics.get('discriminator_loss', 0.0),
                                         'algorithm': new_metrics.get('algorithm', 'backprop')
                                     }
-                                    print(f"✓ Training completed. New metrics: {current_metrics}")
+                                    print(f"Training completed. New metrics: {current_metrics}")
                                     
-                                    # Update rlaf2pierce with training results
                                     rlaf2pierce_history = instance.get("rlaf2pierce", [])
                                     if rlaf2pierce_history:
                                         latest_entry = rlaf2pierce_history[-1]
@@ -1094,7 +1017,6 @@ implementation:
                                         update_instance_field(access_token, args.domain, args.schema_id, args.model_id,
                                                             "rlaf2pierce", rlaf2pierce_history)
                                     
-                                    # Update model path for next iteration
                                     args.trained_model = args.retrained_model
                                     
                                 else:
@@ -1115,13 +1037,26 @@ implementation:
                     traceback.print_exc()
                     raise
             
-            # STEP 6: Save final results
             print("\\n[STEP 5] Saving final results...")
             os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
             
-            # Include CAFO/FF information in final output
+            final_metrics = {}
+            for k, v in current_metrics.items():
+                try:
+                    if isinstance(v, (int, float, np.integer, np.floating)):
+                        final_metrics[k] = float(v)
+                    elif isinstance(v, str) and k != 'algorithm':
+                        try:
+                            final_metrics[k] = float(v)
+                        except ValueError:
+                            final_metrics[k] = v
+                    else:
+                        final_metrics[k] = v
+                except:
+                    final_metrics[k] = v
+            
             final_output = {
-                "final_metrics": {k: float(v) for k, v in current_metrics.items()},
+                "final_metrics": final_metrics,
                 "model_type": "DCGAN",
                 "iterations_completed": i + 1,
                 "timestamp": time.time(),
@@ -1136,10 +1071,10 @@ implementation:
             with open(args.rlaf_output, 'w') as f:
                 json.dump(final_output, f, indent=2)
             
-            print(f"\\n✓ Final results saved to: {args.rlaf_output}")
-            print(f"✓ Final model saved to: {args.retrained_model}")
-            print(f"✓ Final metrics: {current_metrics}")
-            print(f"✓ Training algorithm used: {current_metrics.get('algorithm', 'backprop')}")
+            print(f"\\nFinal results saved to: {args.rlaf_output}")
+            print(f"Final model saved to: {args.retrained_model}")
+            print(f"Final metrics: {current_metrics}")
+            print(f"Training algorithm used: {current_metrics.get('algorithm', 'backprop')}")
             print("\\n" + "=" * 80)
             print("DCGAN RLAF LOOP WITH CAFO/FF SUPPORT COMPLETED SUCCESSFULLY")
             print("=" * 80)
@@ -1147,10 +1082,10 @@ implementation:
         if __name__ == '__main__':
             try:
                 main()
-                print("\\n✓ RLAF loop completed successfully")
+                print("\\nRLAF loop completed successfully")
                 sys.exit(0)
             except Exception as e:
-                print(f"\\n✗ RLAF loop failed: {e}")
+                print(f"\\nRLAF loop failed: {e}")
                 traceback.print_exc()
                 sys.exit(1)
     args:
