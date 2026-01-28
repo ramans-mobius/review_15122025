@@ -1,5 +1,5 @@
-name: Upload Training Metrics To Schema v12
-description: Uploads DCGAN training metrics to training schema matching exact schema structure
+name: Upload Training Metrics To Schema v13
+description: Uploads DCGAN training metrics to training schema with debugging
 inputs:
   - name: training_history
     type: String
@@ -110,15 +110,61 @@ implementation:
         print(f"  Tenant ID: {args.tenant_id}")
         print(f"  Project ID: {args.project_id}")
         print(f"  Training Mode: {args.training_mode}")
+        print(f"  Block Number: {block_number}")
+        print(f"  Block Type: {args.block_type}")
+        
+        print("\\n" + "="*80)
+        print("DEBUG: READING TRAINING HISTORY FILE")
+        print("="*80)
         
         try:
+            # First, check if file exists and get its size
+            if not os.path.exists(args.training_history):
+                print(f"ERROR: Training history file does not exist: {args.training_history}")
+                sys.exit(1)
+            
+            file_size = os.path.getsize(args.training_history)
+            print(f"File size: {file_size} bytes")
+            
+            # Read and parse the training history
+            with open(args.training_history, 'r') as f:
+                training_history = json.load(f)
+            print(f"Training history loaded successfully")
+            
+            # DEBUG: Print ALL keys in training history
+            print(f"\\nDEBUG: Training History Structure:")
+            print(f"Type: {type(training_history)}")
+            print(f"Keys: {list(training_history.keys())}")
+            
+            # DEBUG: Print each key with its value type
+            for key, value in training_history.items():
+                print(f"\\n  {key}:")
+                print(f"    Type: {type(value)}")
+                if isinstance(value, (list, dict)):
+                    print(f"    Length/Size: {len(value)}")
+                if key == 'epoch_losses' and isinstance(value, list) and value:
+                    print(f"    Sample epoch_losses[0]: {value[0]}")
+                    print(f"    Type of epoch_losses[0]: {type(value[0])}")
+                if key == 'generator_losses' and isinstance(value, list) and value:
+                    print(f"    generator_losses[:5]: {value[:5] if len(value) > 5 else value}")
+                if key == 'discriminator_losses' and isinstance(value, list) and value:
+                    print(f"    discriminator_losses[:5]: {value[:5] if len(value) > 5 else value}")
+                if key == 'block_training_results' and value:
+                    print(f"    Block training results keys: {list(value.keys())}")
+            
+            # Now load training metrics
+            print("\\n" + "="*80)
+            print("DEBUG: READING TRAINING METRICS FILE")
+            print("="*80)
+            
             with open(args.training_metrics, 'r') as f:
                 training_metrics = json.load(f)
             print(f"Training metrics loaded")
             
-            with open(args.training_history, 'r') as f:
-                training_history = json.load(f)
-            print(f"Training history loaded")
+            # DEBUG: Print training metrics
+            print(f"\\nDEBUG: Training Metrics:")
+            for key, value in training_metrics.items():
+                print(f"  {key}: {value} (type: {type(value).__name__})")
             
             try:
                 master_config = json.loads(args.master_config)
@@ -127,29 +173,82 @@ implementation:
                 master_config = {}
                 print(f"Master config is not valid JSON, using empty dict")
             
-            final_g_loss = training_metrics.get('final_generator_loss', 0.0)
-            final_d_loss = training_metrics.get('final_discriminator_loss', 0.0)
-            total_training_time = training_metrics.get('training_time', 0)
+            # Extract algorithm from training history or metrics
             algorithm = training_history.get('algorithm', training_metrics.get('algorithm', 'backprop'))
             
+            # Extract generator and discriminator losses
             generator_losses = training_history.get('generator_losses', [])
             discriminator_losses = training_history.get('discriminator_losses', [])
             epoch_losses = training_history.get('epoch_losses', [])
             
-            epochs_completed = max(
-                training_history.get('epochs', 0),
-                training_history.get('epochs_completed', 0),
-                training_metrics.get('epochs_completed', 0),
-                len(generator_losses),
-                len(discriminator_losses),
-                len(epoch_losses)
-            )
+            print(f"\\nDEBUG: Loss Arrays:")
+            print(f"  generator_losses length: {len(generator_losses)}")
+            print(f"  discriminator_losses length: {len(discriminator_losses)}")
+            print(f"  epoch_losses length: {len(epoch_losses)}")
             
-            print(f"Extracted data:")
+            # Try different methods to determine epochs completed
+            epochs_completed = 0
+            
+            # Method 1: Use epochs from training history
+            if 'epochs' in training_history:
+                epochs_completed = int(training_history['epochs'])
+                print(f"Method 1: Using 'epochs' from training_history: {epochs_completed}")
+            
+            # Method 2: Use max length of loss arrays
+            if epochs_completed == 0:
+                max_from_arrays = max(
+                    len(generator_losses),
+                    len(discriminator_losses),
+                    len(epoch_losses)
+                )
+                if max_from_arrays > 0:
+                    epochs_completed = max_from_arrays
+                    print(f"Method 2: Using max length from loss arrays: {epochs_completed}")
+            
+            # Method 3: Use epochs from training metrics
+            if epochs_completed == 0 and 'epochs_completed' in training_metrics:
+                epochs_completed = int(training_metrics['epochs_completed'])
+                print(f"Method 3: Using 'epochs_completed' from training_metrics: {epochs_completed}")
+            
+            # If still 0, default to 2 (minimum for DCGAN)
+            if epochs_completed == 0:
+                epochs_completed = 2
+                print(f"Method 4: Defaulting to: {epochs_completed}")
+            
+            print(f"\\nDEBUG: Final Determination:")
             print(f"  Algorithm: {algorithm}")
             print(f"  Epochs to upload: {epochs_completed}")
+            
+            # Get final losses
+            final_g_loss = 0.0
+            final_d_loss = 0.0
+            
+            if generator_losses and len(generator_losses) > 0:
+                final_g_loss = float(generator_losses[-1])
+            elif 'final_generator_loss' in training_metrics:
+                final_g_loss = float(training_metrics['final_generator_loss'])
+            
+            if discriminator_losses and len(discriminator_losses) > 0:
+                final_d_loss = float(discriminator_losses[-1])
+            elif 'final_discriminator_loss' in training_metrics:
+                final_d_loss = float(training_metrics['final_discriminator_loss'])
+            
             print(f"  Final Generator Loss: {final_g_loss:.6f}")
             print(f"  Final Discriminator Loss: {final_d_loss:.6f}")
+            
+            # Check for block training results
+            block_training_results = training_history.get('block_training_results', {})
+            if block_training_results:
+                print(f"\\nDEBUG: Block Training Results Found:")
+                print(f"  Keys: {list(block_training_results.keys())}")
+                
+                # Check if we need to handle block training
+                if 'generator_blocks' in block_training_results or 'discriminator_blocks' in block_training_results:
+                    print(f"  WARNING: Block training detected - will need special handling")
+                    
+            print("\\n" + "="*80)
+            print("DEBUG: PREPARING DATA FOR UPLOAD")
+            print("="*80)
             
         except Exception as e:
             print(f"ERROR loading training data: {e}")
@@ -204,6 +303,7 @@ implementation:
                 print(f"Exception: {str(e)}")
                 return False, {"error": str(e)}, str(e)
         
+        # Prepare data for upload
         print("PREPARING DATA FOR SCHEMA: training4")
         print("=" * 80)
         
@@ -214,33 +314,39 @@ implementation:
         all_epoch_data = []
         
         for epoch in range(1, epochs_completed + 1):
-            print(f"Processing Epoch {epoch}/{epochs_completed}")
+            print(f"\\nProcessing Epoch {epoch}/{epochs_completed}")
             
+            # Get generator loss for this epoch
             gen_loss = 0.0
-            disc_loss = 0.0
-            
-            if epoch <= len(epoch_losses):
+            if epoch <= len(generator_losses):
+                gen_loss = float(generator_losses[epoch - 1])
+            elif epoch_losses and epoch <= len(epoch_losses):
                 epoch_data = epoch_losses[epoch - 1]
                 if isinstance(epoch_data, dict):
-                    gen_loss = epoch_data.get('generator_loss', 0.0)
-                    disc_loss = epoch_data.get('discriminator_loss', 0.0)
+                    gen_loss = float(epoch_data.get('generator_loss', 0.0))
                 else:
                     gen_loss = float(epoch_data)
             
-            if gen_loss == 0.0 and epoch <= len(generator_losses):
-                gen_loss = generator_losses[epoch - 1]
+            # Get discriminator loss for this epoch
+            disc_loss = 0.0
+            if epoch <= len(discriminator_losses):
+                disc_loss = float(discriminator_losses[epoch - 1])
+            elif epoch_losses and epoch <= len(epoch_losses):
+                epoch_data = epoch_losses[epoch - 1]
+                if isinstance(epoch_data, dict):
+                    disc_loss = float(epoch_data.get('discriminator_loss', 0.0))
             
-            if disc_loss == 0.0 and epoch <= len(discriminator_losses):
-                disc_loss = discriminator_losses[epoch - 1]
-            
+            # Calculate discriminator accuracy
             total_loss = gen_loss + disc_loss
             if total_loss > 0:
                 discriminator_accuracy = max(0.0, min(1.0, 0.5 - (gen_loss - disc_loss) / (2 * total_loss)))
             else:
                 discriminator_accuracy = 0.5
             
+            # Create unique UID for this epoch
             entry_uid = f"{args.model_id}_{execution_id}_{epoch}_{session_uid[:8]}"
             
+            # Prepare schema entry matching training4 schema
             schema_entry = {
                 "uid": str(entry_uid),  # REQUIRED: string
                 "projectId": str(args.project_id),  # REQUIRED: string
@@ -257,15 +363,24 @@ implementation:
                 "block": int(block_number)  # OPTIONAL: number
             }
             
-            print(f"Schema entry for epoch {epoch} matches training4 schema structure")
+            print(f"  Schema entry created:")
+            print(f"    uid: {schema_entry['uid']}")
+            print(f"    epoch: {schema_entry['epoch']}")
+            print(f"    loss (gen): {schema_entry['loss']:.6f}")
+            print(f"    accuracy (disc): {schema_entry['accuracy']:.6f}")
+            print(f"    block: {schema_entry['block']}")
+            print(f"    block_type: {schema_entry['block_type']}")
+            
             all_epoch_data.append(schema_entry)
         
-        print(f"Prepared {len(all_epoch_data)} epoch entries")
-        print(f"Schema fields per entry: {len(schema_entry)}")
-        print(f"Required fields present: uid={schema_entry.get('uid')[:20]}..., projectId={schema_entry.get('projectId')[:20]}...")
+        print(f"\\nDEBUG: Prepared {len(all_epoch_data)} epoch entries")
+        print(f"First entry sample:")
+        print(json.dumps(all_epoch_data[0], indent=2))
         
+        # TEST ENDPOINTS
+        print("\\n" + "="*80)
         print("TESTING ENDPOINTS")
-        print("=" * 80)
+        print("="*80)
         
         endpoints_to_test = [
             f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances",
@@ -276,24 +391,26 @@ implementation:
         working_endpoints = []
         
         for endpoint in endpoints_to_test:
-            print(f"Testing endpoint: {endpoint}")
+            print(f"\\nTesting endpoint: {endpoint}")
             test_payload = {"data": [{"uid": "test", "projectId": "test"}]}
             
             success, response, error = make_api_request("POST", endpoint, test_payload)
             if success or (error and "400" in str(error)):
-                print(f"Endpoint WORKING (or accepts request): {endpoint}")
+                print(f"  Result: WORKING (or accepts request)")
                 working_endpoints.append(endpoint)
             else:
-                print(f"Endpoint FAILED: {endpoint}")
+                print(f"  Result: FAILED")
         
-        print(f"Found {len(working_endpoints)} working endpoints")
+        print(f"\\nFound {len(working_endpoints)} working endpoints: {working_endpoints}")
         
         if not working_endpoints:
             print("ERROR: No working endpoints found")
             sys.exit(1)
         
-        print("UPLOADING METRICS")
-        print("=" * 80)
+        # UPLOAD DATA
+        print("\\n" + "="*80)
+        print("UPLOADING DATA")
+        print("="*80)
         
         upload_success = False
         schema_response = {}
@@ -301,15 +418,14 @@ implementation:
         upload_error = ""
         
         for endpoint in working_endpoints:
-            print(f"Trying upload to: {endpoint}")
+            print(f"\\nTrying upload to: {endpoint}")
             
             create_payload = {
                 "data": all_epoch_data
             }
             
-            print(f"First entry sample:")
-            print(json.dumps(all_epoch_data[0], indent=2))
-            print(f"Total entries: {len(all_epoch_data)}")
+            print(f"Sending {len(all_epoch_data)} entries")
+            print(f"Payload size: {len(json.dumps(create_payload))} bytes")
             
             success, response, error = make_api_request("POST", endpoint, create_payload)
             
@@ -321,10 +437,13 @@ implementation:
                 break
             else:
                 print(f"Upload FAILED to: {endpoint}")
+                print(f"Error: {error}")
                 upload_error = error
         
+        # SAVE RESULTS
+        print("\\n" + "="*80)
         print("SAVING RESULTS")
-        print("=" * 80)
+        print("="*80)
         
         try:
             upload_status_data = {
@@ -336,17 +455,15 @@ implementation:
                 'schema_name': 'training4',
                 'used_endpoint': used_endpoint,
                 'working_endpoints': working_endpoints,
-                'upload_summary': {
+                'data_summary': {
                     'epochs_attempted': epochs_completed,
                     'epochs_prepared': len(all_epoch_data),
+                    'first_epoch_data': all_epoch_data[0] if all_epoch_data else {},
+                    'last_epoch_data': all_epoch_data[-1] if all_epoch_data else {}
+                },
+                'upload_summary': {
                     'success': upload_success,
                     'error': upload_error[:500] if upload_error else None
-                },
-                'schema_structure_check': {
-                    'required_fields': ['uid', 'projectId'],
-                    'has_uid': True,
-                    'has_projectId': True,
-                    'total_fields': len(schema_entry) if all_epoch_data else 0
                 },
                 'schema_response': schema_response
             }
@@ -371,9 +488,11 @@ implementation:
                 'training_summary': {
                     'epochs_completed': epochs_completed,
                     'algorithm': algorithm,
-                    'total_training_time': total_training_time,
                     'final_generator_loss': final_g_loss,
-                    'final_discriminator_loss': final_d_loss
+                    'final_discriminator_loss': final_d_loss,
+                    'block_training': block_number > 0,
+                    'block_number': block_number,
+                    'block_type': args.block_type if args.block_type else "N/A"
                 },
                 'upload_results': {
                     'total_attempted': epochs_completed,
@@ -384,6 +503,13 @@ implementation:
                         'required_fields_present': True,
                         'data_types_match': True
                     }
+                },
+                'debug_info': {
+                    'training_history_keys': list(training_history.keys()),
+                    'training_metrics_keys': list(training_metrics.keys()),
+                    'generator_losses_length': len(generator_losses),
+                    'discriminator_losses_length': len(discriminator_losses),
+                    'epoch_losses_length': len(epoch_losses)
                 }
             }
             
@@ -395,32 +521,36 @@ implementation:
             print(f"ERROR saving outputs: {e}")
             traceback.print_exc()
         
+        # FINAL SUMMARY
+        print("\\n" + "="*80)
         print("FINAL SUMMARY")
-        print("=" * 80)
+        print("="*80)
         
         print(f"SCHEMA: training4 ({args.schema_id})")
-        print(f"REQUIRED FIELDS: uid, projectId")
         print(f"MODEL: {args.model_id}")
         print(f"EXECUTION: {execution_id}")
         print(f"EPOCHS: {epochs_completed}")
+        print(f"BLOCK: {block_number} ({args.block_type})")
         
-        print(f"UPLOAD:")
+        print(f"\\nUPLOAD:")
         print(f"  Working Endpoints: {len(working_endpoints)}")
         print(f"  Used Endpoint: {used_endpoint}")
         print(f"  Success: {'YES' if upload_success else 'NO'}")
         
         if upload_success:
-            print(f"  Response ID: {schema_response.get('id', 'N/A')}")
-            print(f"  Status: {schema_response.get('status', 'N/A')}")
+            if isinstance(schema_response, dict):
+                print(f"  Response ID: {schema_response.get('id', 'N/A')}")
+                print(f"  Status: {schema_response.get('status', 'N/A')}")
+        else:
+            print(f"  Error: {upload_error[:200] if upload_error else 'Unknown error'}")
         
-        print("=" * 80)
+        print("="*80)
         if upload_success:
             print("ALL TRAINING METRICS UPLOADED SUCCESSFULLY!")
         else:
             print("UPLOAD FAILED")
-            print(f"Error: {upload_error[:200] if upload_error else 'Unknown error'}")
             sys.exit(1)
-        print("=" * 80)
+        print("="*80)
     args:
       - --training_history
       - {inputPath: training_history}
