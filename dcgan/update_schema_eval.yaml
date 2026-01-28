@@ -1,5 +1,5 @@
-name: Upload Evaluation Metrics To Schema v10
-description: Uploads FID, SSIM, PSNR scores to performance matrix schema
+name: Upload Evaluation Metrics To Schema v11
+description: Uploads FID, SSIM, PSNR scores to performance matrix schema with comprehensive endpoint testing
 inputs:
   - name: evaluation_metrics
     type: String
@@ -63,7 +63,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD EVALUATION METRICS TO SCHEMA v5")
+        print("UPLOAD EVALUATION METRICS TO SCHEMA v6")
         print("=" * 80)
         
         for path in [args.upload_status, args.schema_response]:
@@ -77,7 +77,7 @@ implementation:
         
         try:
             execution_id = int(args.execution_id)
-            print(f"Execution ID: {execution_id} (type: number)")
+            print(f"Execution ID: {execution_id}")
         except ValueError:
             print(f"ERROR: execution_id must be an integer. Got: {args.execution_id}")
             sys.exit(1)
@@ -88,11 +88,7 @@ implementation:
         print(f"  Schema ID: {args.schema_id}")
         print(f"  Model ID: {args.model_id}")
         print(f"  Model Name: {args.model_name}")
-        print(f"  Model Type: {args.model_type}")
         print(f"  Execution ID: {execution_id}")
-        print(f"  Tenant ID: {args.tenant_id}")
-        print(f"  Project ID: {args.project_id}")
-        print(f"  Timestamp: {current_timestamp}")
         
         try:
             with open(args.evaluation_metrics, 'r') as f:
@@ -136,20 +132,9 @@ implementation:
             mse_value = float(eval_metrics['mse'])
             print(f"Found MSE: {mse_value}")
         
-        algorithm = eval_metrics.get('algorithm', 'unknown')
-        
-        print(f"Extracted values:")
-        print(f"  FID: {fid_value}")
-        print(f"  SSIM: {ssim_value}")
-        print(f"  PSNR: {psnr_value}")
-        if mse_value > 0:
-            print(f"  MSE: {mse_value}")
-        
-        print(f"Creating schema entry...")
-        
         rmse_value = np.sqrt(mse_value) if mse_value > 0 else np.sqrt(10 ** (-psnr_value / 10)) if psnr_value > 0 else 0.0
         
-        schema_entry = {
+        metrics_data = {
             'tenant_id': str(args.tenant_id),
             'model_id': str(args.model_id),
             'execution_id': int(execution_id),
@@ -166,106 +151,224 @@ implementation:
             'precision_score': float(psnr_value),
             'r2_score': float(ssim_value),
             'rmse_score': float(rmse_value),
-            'rmse': str(rmse_value),
-            'roc_auc': int(0),
-            'confusion_matrix': [],
-            'recall': float(0.0),
-            'f1_score': float(0.0)
+            'rmse': str(rmse_value)
         }
         
-        print(f"Schema entry prepared ({len(schema_entry)} fields):")
-        for key, value in schema_entry.items():
-            print(f"  {key}: {value} (type: {type(value).__name__})")
+        print(f"Metrics data prepared ({len(metrics_data)} fields)")
         
-        def upload_to_schema(schema_data):
-            endpoints = [
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+        def make_api_request(method, url, data=None):
+            clean_url = url.replace('\\n', '').replace('\\r', '')
+            print(f"{method} {clean_url}")
+            
+            if data:
+                print(f"Payload size: {len(json.dumps(data))} bytes")
+            
+            curl_command = [
+                "curl",
+                "--location", clean_url,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--header", "Content-Type: application/json",
+                "--request", method,
+                "--connect-timeout", "30",
+                "--max-time", "60",
+                "--silent",
+                "--show-error"
             ]
             
-            for endpoint_idx, schema_url in enumerate(endpoints):
-                clean_url = schema_url.replace('\\n', '').replace('\\r', '')
-                print(f"Trying endpoint {endpoint_idx + 1}: {clean_url}")
-                
-                try:
-                    curl_command = [
-                        "curl",
-                        "--location", clean_url,
-                        "--header", f"Authorization: Bearer {bearer_token}",
-                        "--header", "Content-Type: application/json",
-                        "--data", json.dumps(schema_data),
-                        "--fail",
-                        "--show-error",
-                        "--connect-timeout", "30",
-                        "--max-time", "60"
-                    ]
-                    
-                    print(f"Executing curl command...")
-                    
-                    process = subprocess.run(
-                        curl_command,
-                        capture_output=True,
-                        text=True,
-                        check=False
-                    )
-                    
-                    print(f"Curl exit code: {process.returncode}")
-                    
-                    if process.returncode == 0:
-                        print(f"Upload successful")
-                        
-                        print(f"Full response:")
-                        print("-" * 40)
-                        print(process.stdout)
-                        print("-" * 40)
-                        
-                        try:
-                            response_data = json.loads(process.stdout)
-                            return True, response_data, None
-                        except json.JSONDecodeError:
-                            return True, {"raw_response": process.stdout}, None
-                    else:
-                        print(f"Upload failed (exit code: {process.returncode})")
-                        print(f"Stderr: {process.stderr[:200]}")
-                        print(f"Stdout: {process.stdout[:200]}")
-                        
-                        if "404" in process.stderr or "404" in process.stdout:
-                            print(f"Endpoint not found, trying next...")
-                            continue
-                        
-                        return False, {"error": process.stderr[:200]}, process.stderr[:500]
-                        
-                except Exception as e:
-                    print(f"Exception: {str(e)}")
+            if data:
+                curl_command.extend(["--data", json.dumps(data)])
             
-            return False, {"error": "All endpoints failed"}, None
+            try:
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                
+                print(f"Curl exit code: {process.returncode}")
+                
+                if process.returncode == 0:
+                    try:
+                        response_data = json.loads(process.stdout)
+                        return True, response_data, None
+                    except json.JSONDecodeError:
+                        return True, {"raw_response": process.stdout}, None
+                else:
+                    print(f"API call failed")
+                    print(f"Stderr: {process.stderr[:500]}")
+                    print(f"Stdout: {process.stdout[:500]}")
+                    return False, {"error": process.stderr[:500]}, process.stderr[:500]
+                    
+            except Exception as e:
+                print(f"Exception: {str(e)}")
+                return False, {"error": str(e)}, str(e)
         
-        print("UPLOADING TO SCHEMA")
+        print("TESTING ENDPOINTS")
         print("=" * 80)
         
-        success, response, error = upload_to_schema(schema_entry)
+        list_endpoints = [
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances/list",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/list"
+        ]
         
-        print(f"Saving outputs...")
+        instances_endpoints = [
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+        ]
+        
+        working_list_endpoints = []
+        working_instances_endpoints = []
+        
+        test_payload = {
+            "dbType": "TIDB",
+            "ownedOnly": True,
+            "filter": {
+                "execution_id": execution_id
+            }
+        }
+        
+        for endpoint in list_endpoints:
+            print(f"Testing list endpoint: {endpoint}")
+            success, response, error = make_api_request("POST", endpoint, test_payload)
+            if success:
+                print(f"List endpoint WORKING: {endpoint}")
+                working_list_endpoints.append(endpoint)
+            else:
+                print(f"List endpoint FAILED: {endpoint}")
+        
+        for endpoint in instances_endpoints:
+            print(f"Testing instances endpoint: {endpoint}")
+            test_create_payload = {"data": [{"test": "data"}]}
+            success, response, error = make_api_request("POST", endpoint, test_create_payload)
+            if success or (error and "400" in str(error)):
+                print(f"Instances endpoint WORKING: {endpoint}")
+                working_instances_endpoints.append(endpoint)
+            else:
+                print(f"Instances endpoint FAILED: {endpoint}")
+        
+        print(f"Found {len(working_list_endpoints)} working list endpoints")
+        print(f"Found {len(working_instances_endpoints)} working instances endpoints")
+        
+        if not working_list_endpoints and not working_instances_endpoints:
+            print("ERROR: No working endpoints found")
+            sys.exit(1)
+        
+        print("UPLOADING METRICS")
+        print("=" * 80)
+        
+        upload_success = False
+        schema_response = {}
+        used_endpoint = ""
+        
+        if working_list_endpoints:
+            list_endpoint = working_list_endpoints[0]
+            print(f"Using list endpoint: {list_endpoint}")
+            
+            check_payload = {
+                "dbType": "TIDB",
+                "ownedOnly": True,
+                "filter": {
+                    "execution_id": execution_id,
+                    "model_id": args.model_id
+                }
+            }
+            
+            check_success, check_response, check_error = make_api_request("POST", list_endpoint, check_payload)
+            
+            if check_success:
+                print(f"Check successful")
+                
+                if 'content' in check_response and check_response['content']:
+                    print(f"Row exists, updating")
+                    
+                    if working_instances_endpoints:
+                        instances_endpoint = working_instances_endpoints[0]
+                        
+                        patch_requests = []
+                        for key, value in metrics_data.items():
+                            if key not in ['execution_id', 'model_id', 'tenant_id', 'projectId']:
+                                patch_requests.append({
+                                    "operation": "REPLACE",
+                                    "path": key,
+                                    "value": value
+                                })
+                        
+                        update_payload = {
+                            "dbType": "TIDB",
+                            "conditionalFilter": {
+                                "conditions": [
+                                    {
+                                        "field": "execution_id",
+                                        "operator": "EQUAL",
+                                        "value": execution_id
+                                    },
+                                    {
+                                        "field": "model_id",
+                                        "operator": "EQUAL",
+                                        "value": args.model_id
+                                    }
+                                ]
+                            },
+                            "partialUpdateRequests": [
+                                {
+                                    "patch": patch_requests
+                                }
+                            ]
+                        }
+                        
+                        print(f"Updating via PATCH to: {instances_endpoint}")
+                        upload_success, schema_response, upload_error = make_api_request("PATCH", instances_endpoint, update_payload)
+                        used_endpoint = instances_endpoint
+                
+                else:
+                    print(f"Row does not exist, creating")
+                    
+                    if working_instances_endpoints:
+                        instances_endpoint = working_instances_endpoints[0]
+                        create_payload = {"data": [metrics_data]}
+                        
+                        print(f"Creating via POST to: {instances_endpoint}")
+                        upload_success, schema_response, upload_error = make_api_request("POST", instances_endpoint, create_payload)
+                        used_endpoint = instances_endpoint
+        
+        else:
+            print(f"No working list endpoints, trying direct create")
+            
+            if working_instances_endpoints:
+                instances_endpoint = working_instances_endpoints[0]
+                create_payload = {"data": [metrics_data]}
+                
+                print(f"Creating via POST to: {instances_endpoint}")
+                upload_success, schema_response, upload_error = make_api_request("POST", instances_endpoint, create_payload)
+                used_endpoint = instances_endpoint
+        
+        print("SAVING OUTPUTS")
+        print("=" * 80)
         
         try:
             upload_status_data = {
-                'success': success,
+                'success': upload_success,
                 'timestamp': current_timestamp,
                 'model_id': args.model_id,
                 'model_name': args.model_name,
                 'execution_id': execution_id,
                 'schema_id': args.schema_id,
+                'used_endpoint': used_endpoint,
+                'working_endpoints': {
+                    'list_endpoints': working_list_endpoints,
+                    'instances_endpoints': working_instances_endpoints
+                },
                 'metrics_uploaded': {
                     'fid': fid_value,
                     'ssim': ssim_value,
                     'psnr': psnr_value,
                     'mse': mse_value
                 },
-                'schema_fields_populated': len(schema_entry),
-                'upload_response': response if success else {"error": str(response.get('error', 'Unknown error')), "details": error},
-                'upload_timestamp': int(time.time()),
-                'schema_entry_sample': {k: v for i, (k, v) in enumerate(schema_entry.items()) if i < 10}
+                'upload_response': schema_response,
+                'upload_timestamp': int(time.time())
             }
             
             with open(args.upload_status, 'w') as f:
@@ -273,7 +376,7 @@ implementation:
             print(f"Upload status saved: {args.upload_status}")
             
             with open(args.schema_response, 'w') as f:
-                json.dump(response if success else {"error": str(response.get('error', 'Unknown error')), "details": error}, f, indent=2)
+                json.dump(schema_response, f, indent=2)
             print(f"Schema response saved: {args.schema_response}")
             
         except Exception as e:
@@ -281,29 +384,26 @@ implementation:
             traceback.print_exc()
         
         print("=" * 80)
-        if success:
+        if upload_success:
             print("EVALUATION METRICS UPLOADED SUCCESSFULLY!")
         else:
             print("EVALUATION METRICS UPLOAD FAILED")
         print("=" * 80)
         
-        print(f"UPLOADED METRICS:")
-        print(f"  fid: {fid_value:.2f}")
-        print(f"  ssim: {ssim_value:.4f}")
-        print(f"  psnr: {psnr_value:.2f} dB")
-        print(f"  mse: {schema_entry['mse']:.6f}")
+        print(f"METRICS:")
+        print(f"  FID: {fid_value:.2f}")
+        print(f"  SSIM: {ssim_value:.4f}")
+        print(f"  PSNR: {psnr_value:.2f} dB")
         
-        print(f"MODEL INFO:")
-        print(f"  Model: {args.model_name} ({args.model_id})")
-        print(f"  Type: {args.model_type}")
-        print(f"  Algorithm: {algorithm}")
-        print(f"  Execution ID: {execution_id}")
-        print(f"  Schema ID: {args.schema_id}")
+        print(f"ENDPOINTS:")
+        print(f"  Working List Endpoints: {len(working_list_endpoints)}")
+        print(f"  Working Instances Endpoints: {len(working_instances_endpoints)}")
+        print(f"  Used Endpoint: {used_endpoint}")
         
-        print(f"STATUS: {'SUCCESS' if success else 'FAILED'}")
+        print(f"STATUS: {'SUCCESS' if upload_success else 'FAILED'}")
         print("=" * 80)
         
-        if not success:
+        if not upload_success:
             sys.exit(1)
     args:
       - --evaluation_metrics
