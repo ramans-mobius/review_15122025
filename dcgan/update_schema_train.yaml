@@ -1,5 +1,5 @@
-name: Upload Training Metrics To Schema v10
-description: Uploads DCGAN training metrics to training schema
+name: Upload Training Metrics To Schema v11
+description: Uploads DCGAN training metrics to training schema with comprehensive endpoint testing
 inputs:
   - name: training_history
     type: String
@@ -77,7 +77,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD TRAINING METRICS TO SCHEMA v5")
+        print("UPLOAD TRAINING METRICS TO SCHEMA v6")
         print("=" * 80)
         
         for path in [args.upload_status, args.schema_response, args.metrics_summary]:
@@ -110,8 +110,6 @@ implementation:
         print(f"  Tenant ID: {args.tenant_id}")
         print(f"  Project ID: {args.project_id}")
         print(f"  Training Mode: {args.training_mode}")
-        print(f"  Block Number: {block_number}")
-        print(f"  Block Type: {args.block_type}")
         
         try:
             with open(args.training_metrics, 'r') as f:
@@ -152,80 +150,105 @@ implementation:
             print(f"  Epochs to upload: {epochs_completed}")
             print(f"  Final Generator Loss: {final_g_loss:.6f}")
             print(f"  Final Discriminator Loss: {final_d_loss:.6f}")
-            print(f"  Total Training Time: {total_training_time:.2f}s")
             
         except Exception as e:
             print(f"ERROR loading training data: {e}")
             traceback.print_exc()
             sys.exit(1)
         
-        def upload_to_schema(schema_entry, epoch_num):
-            endpoints = [
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
-                f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+        def make_api_request(method, url, data=None):
+            clean_url = url.replace('\\n', '').replace('\\r', '')
+            print(f"{method} {clean_url}")
+            
+            if data:
+                print(f"Payload size: {len(json.dumps(data))} bytes")
+            
+            curl_command = [
+                "curl",
+                "--location", clean_url,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--header", "Content-Type: application/json",
+                "--request", method,
+                "--connect-timeout", "30",
+                "--max-time", "60",
+                "--silent",
+                "--show-error"
             ]
             
-            for endpoint_idx, schema_url in enumerate(endpoints):
-                clean_url = schema_url.replace('\\n', '').replace('\\r', '')
-                print(f"Trying endpoint {endpoint_idx + 1}: {clean_url}")
-                
-                try:
-                    curl_command = [
-                        "curl",
-                        "--location", clean_url,
-                        "--header", f"Authorization: Bearer {bearer_token}",
-                        "--header", "Content-Type: application/json",
-                        "--data", json.dumps(schema_entry),
-                        "--fail",
-                        "--show-error",
-                        "--connect-timeout", "30",
-                        "--max-time", "60",
-                        "--silent"
-                    ]
-                    
-                    process = subprocess.run(
-                        curl_command,
-                        capture_output=True,
-                        text=True,
-                        check=False
-                    )
-                    
-                    print(f"Curl exit code: {process.returncode}")
-                    
-                    if process.returncode == 0:
-                        print(f"Upload successful")
-                        try:
-                            response_data = json.loads(process.stdout)
-                            return True, response_data, None
-                        except json.JSONDecodeError:
-                            return True, {"raw_response": process.stdout}, None
-                    else:
-                        print(f"Upload failed (exit code: {process.returncode})")
-                        print(f"Stderr: {process.stderr[:200]}")
-                        print(f"Stdout: {process.stdout[:200]}")
-                        
-                        if "404" in process.stderr or "404" in process.stdout:
-                            print(f"Endpoint not found, trying next...")
-                            continue
-                        
-                        return False, {"error": process.stderr[:200]}, process.stderr[:500]
-                        
-                except Exception as e:
-                    print(f"Exception: {str(e)}")
+            if data:
+                curl_command.extend(["--data", json.dumps(data)])
             
-            return False, {"error": "All endpoints failed"}, None
+            try:
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                
+                print(f"Curl exit code: {process.returncode}")
+                
+                if process.returncode == 0:
+                    try:
+                        response_data = json.loads(process.stdout)
+                        return True, response_data, None
+                    except json.JSONDecodeError:
+                        return True, {"raw_response": process.stdout}, None
+                else:
+                    print(f"API call failed")
+                    print(f"Stderr: {process.stderr[:500]}")
+                    print(f"Stdout: {process.stdout[:500]}")
+                    return False, {"error": process.stderr[:500]}, process.stderr[:500]
+                    
+            except Exception as e:
+                print(f"Exception: {str(e)}")
+                return False, {"error": str(e)}, str(e)
         
-        print(f"UPLOADING METRICS")
+        print("TESTING ENDPOINTS")
         print("=" * 80)
         
-        all_responses = []
-        successful_uploads = 0
-        failed_uploads = 0
+        endpoints_to_test = [
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances/list",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances/list",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances",
+            f"https://igs.gov-cloud.ai/pi-entity-instances-service/schemas/{args.schema_id}/instances"
+        ]
+        
+        working_endpoints = []
+        
+        for endpoint in endpoints_to_test:
+            print(f"Testing endpoint: {endpoint}")
+            test_payload = {
+                "dbType": "TIDB",
+                "ownedOnly": True,
+                "filter": {
+                    "execution_id": execution_id
+                }
+            }
+            
+            success, response, error = make_api_request("POST", endpoint, test_payload)
+            if success:
+                print(f"Endpoint WORKING: {endpoint}")
+                working_endpoints.append(endpoint)
+            else:
+                print(f"Endpoint FAILED: {endpoint}")
+        
+        print(f"Found {len(working_endpoints)} working endpoints")
+        
+        if not working_endpoints:
+            print("ERROR: No working endpoints found")
+            sys.exit(1)
+        
+        print("PREPARING DATA")
+        print("=" * 80)
         
         session_uid = str(uuid.uuid4())
         print(f"Upload session UID: {session_uid}")
         print(f"Total epochs to upload: {epochs_completed}")
+        
+        all_epoch_data = []
         
         for epoch in range(1, epochs_completed + 1):
             print(f"Processing Epoch {epoch}/{epochs_completed}")
@@ -271,87 +294,91 @@ implementation:
                 "kl_loss": float(0.0)
             }
             
-            print(f"Schema entry for epoch {epoch}:")
-            for key, value in schema_entry.items():
-                print(f"  {key}: {value} (type: {type(value).__name__})")
+            all_epoch_data.append(schema_entry)
+        
+        print(f"Prepared {len(all_epoch_data)} epoch entries")
+        
+        print("UPLOADING METRICS")
+        print("=" * 80)
+        
+        upload_success = False
+        schema_response = {}
+        upload_error = ""
+        used_endpoint = ""
+        
+        for endpoint in working_endpoints:
+            if "/instances/list" in endpoint:
+                continue
             
-            success, response, error = upload_to_schema(schema_entry, epoch)
+            print(f"Trying upload to: {endpoint}")
             
-            all_responses.append({
-                'epoch': epoch,
-                'success': success,
-                'schema_entry': schema_entry,
-                'response': response,
-                'error': error
-            })
+            create_payload = {
+                "data": all_epoch_data
+            }
+            
+            success, response, error = make_api_request("POST", endpoint, create_payload)
             
             if success:
-                successful_uploads += 1
-                print(f"Epoch {epoch} uploaded successfully")
+                upload_success = True
+                schema_response = response
+                used_endpoint = endpoint
+                print(f"Upload SUCCESSFUL to: {endpoint}")
+                break
             else:
-                failed_uploads += 1
-                print(f"Epoch {epoch} upload failed")
-            
-            if epoch < epochs_completed:
-                time.sleep(0.5)
+                print(f"Upload FAILED to: {endpoint}")
+                upload_error = error
         
-        metrics_summary_data = {
-            'upload_session': {
-                'session_uid': session_uid,
-                'timestamp': datetime.now().isoformat(),
-                'model_id': args.model_id,
-                'execution_id': execution_id,
-                'project_id': args.project_id,
-                'training_mode': args.training_mode
-            },
-            'training_summary': {
-                'epochs_completed': epochs_completed,
-                'algorithm': algorithm,
-                'total_training_time': total_training_time,
-                'final_generator_loss': final_g_loss,
-                'final_discriminator_loss': final_d_loss,
-                'block_training': block_number > 0,
-                'block_number': block_number,
-                'block_type': args.block_type if args.block_type else "N/A"
-            },
-            'upload_results': {
-                'total_attempted': epochs_completed,
-                'successful': successful_uploads,
-                'failed': failed_uploads,
-                'success_rate': (successful_uploads / epochs_completed * 100) if epochs_completed > 0 else 0,
-                'session_uid': session_uid
-            }
-        }
+        print("SAVING RESULTS")
+        print("=" * 80)
         
         try:
             upload_status_data = {
-                'overall_success': failed_uploads == 0,
-                'summary': metrics_summary_data['upload_results'],
                 'timestamp': datetime.now().isoformat(),
-                'model_info': {
-                    'model_id': args.model_id,
-                    'execution_id': execution_id,
-                    'training_mode': args.training_mode
+                'overall_success': upload_success,
+                'model_id': args.model_id,
+                'execution_id': execution_id,
+                'schema_id': args.schema_id,
+                'used_endpoint': used_endpoint,
+                'working_endpoints': working_endpoints,
+                'upload_summary': {
+                    'epochs_attempted': epochs_completed,
+                    'epochs_prepared': len(all_epoch_data),
+                    'success': upload_success,
+                    'error': upload_error[:500] if upload_error else None
                 },
-                'schema_info': {
-                    'schema_id': args.schema_id,
-                    'upload_endpoint': f"https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
-                }
+                'schema_response': schema_response
             }
             
             with open(args.upload_status, 'w') as f:
                 json.dump(upload_status_data, f, indent=2)
             print(f"Upload status saved: {args.upload_status}")
             
-            detailed_responses = {
-                'session_uid': session_uid,
-                'total_epochs': epochs_completed,
-                'responses': all_responses
-            }
-            
             with open(args.schema_response, 'w') as f:
-                json.dump(detailed_responses, f, indent=2)
-            print(f"Schema responses saved: {args.schema_response}")
+                json.dump(schema_response, f, indent=2)
+            print(f"Schema response saved: {args.schema_response}")
+            
+            metrics_summary_data = {
+                'upload_session': {
+                    'session_uid': session_uid,
+                    'timestamp': datetime.now().isoformat(),
+                    'model_id': args.model_id,
+                    'execution_id': execution_id,
+                    'project_id': args.project_id
+                },
+                'training_summary': {
+                    'epochs_completed': epochs_completed,
+                    'algorithm': algorithm,
+                    'total_training_time': total_training_time,
+                    'final_generator_loss': final_g_loss,
+                    'final_discriminator_loss': final_d_loss
+                },
+                'upload_results': {
+                    'total_attempted': epochs_completed,
+                    'successful': epochs_completed if upload_success else 0,
+                    'failed': 0 if upload_success else epochs_completed,
+                    'used_endpoint': used_endpoint
+                }
+            }
             
             with open(args.metrics_summary, 'w') as f:
                 json.dump(metrics_summary_data, f, indent=2)
@@ -368,22 +395,16 @@ implementation:
         print(f"  Model ID: {args.model_id}")
         print(f"  Execution ID: {execution_id}")
         print(f"  Epochs: {epochs_completed}")
-        print(f"  Algorithm: {algorithm}")
-        print(f"  Training Mode: {args.training_mode}")
         
         print(f"Upload Results:")
         print(f"  Schema ID: {args.schema_id}")
-        print(f"  Project ID: {args.project_id}")
-        print(f"  Epochs Attempted: {epochs_completed}")
-        print(f"  Successful: {successful_uploads}")
-        print(f"  Failed: {failed_uploads}")
-        print(f"  Success Rate: {(successful_uploads/epochs_completed*100):.1f}%" if epochs_completed > 0 else "N/A")
+        print(f"  Working Endpoints: {len(working_endpoints)}")
+        print(f"  Used Endpoint: {used_endpoint}")
+        print(f"  Success: {'YES' if upload_success else 'NO'}")
         
         print("=" * 80)
-        if successful_uploads == epochs_completed and epochs_completed > 0:
+        if upload_success:
             print("ALL TRAINING METRICS UPLOADED SUCCESSFULLY!")
-        elif successful_uploads > 0:
-            print(f"PARTIAL SUCCESS: {successful_uploads}/{epochs_completed} epochs uploaded")
         else:
             print("NO METRICS WERE UPLOADED SUCCESSFULLY")
             sys.exit(1)
