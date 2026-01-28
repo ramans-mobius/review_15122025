@@ -1,5 +1,5 @@
-name: DCGAN RLAF Loop v17
-description: Complete DCGAN RLAF with actual training and 4 features only
+name: DCGAN RLAF Loop v18
+description: DCGAN RLAF with fresh database row (only 4 features)
 inputs:
   - name: trained_model
     type: Model
@@ -54,6 +54,9 @@ implementation:
         import pickle
         import time
         import numpy as np
+        import sys
+        import traceback
+        import warnings
         from typing import Dict, List, Any
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
@@ -61,13 +64,10 @@ implementation:
         import torch.nn as nn
         import torch.optim as optim
         import torch.nn.functional as F
-        import sys
-        import traceback
-        import warnings
         warnings.filterwarnings('ignore')
         
         print("=" * 80)
-        print("DCGAN RLAF LOOP FINAL - WITH ACTUAL TRAINING")
+        print("DCGAN RLAF LOOP - FRESH START WITH FULL TRAINING")
         print("=" * 80)
         
         # ==================== IMPORT DCGAN MODULES ====================
@@ -80,65 +80,16 @@ implementation:
                 FullyConfigurableDCGANGenerator,
                 FullyConfigurableDCGANDiscriminator,
                 EnhancedDCGANTrainer,
-                ActivationConfig, OptimizerConfig,
-                BalancedTrainingConfig
+                ActivationConfig, OptimizerConfig
             )
             print("SUCCESS: DCGAN classes imported")
             
         except ImportError as e:
-            print(f"FATAL ERROR: Failed to import nesy_factory.GANs.dcgan")
-            print(f"Error details: {e}")
+            print(f"FATAL ERROR: Failed to import nesy_factory.GANs.dcgan: {e}")
             traceback.print_exc()
             sys.exit(1)
         
         # ==================== DATA CLASSES ====================
-        class RawDatasetWrapper:
-            def __init__(self, images, labels, dataset_name='mnist'):
-                self.images = images
-                self.labels = labels
-                self.dataset_name = dataset_name
-                self.preprocessed = False
-                self._num_samples = len(images)
-            
-            def __len__(self):
-                return self._num_samples
-            
-            def __getitem__(self, idx):
-                return self.images[idx]
-            
-            def get_sample(self, idx):
-                return {
-                    'image': self.images[idx],
-                    'label': self.labels[idx],
-                    'index': idx,
-                    'dataset': self.dataset_name,
-                    'preprocessed': self.preprocessed
-                }
-        
-        class PreprocessedDataset:
-            def __init__(self, images, labels, dataset_name, preprocessor_params):
-                self.images = images
-                self.labels = labels
-                self.dataset_name = dataset_name
-                self.preprocessed = True
-                self.preprocessor_params = preprocessor_params
-            
-            def __len__(self):
-                return len(self.images)
-            
-            def __getitem__(self, idx):
-                return self.images[idx]
-            
-            def get_sample(self, idx):
-                return {
-                    'image': self.images[idx],
-                    'label': self.labels[idx],
-                    'index': idx,
-                    'dataset': self.dataset_name,
-                    'preprocessed': True,
-                    'preprocessor_params': self.preprocessor_params
-                }
-        
         class SimpleDCGANDataset(Dataset):
             def __init__(self, images, normalize=False):
                 self.images = images
@@ -155,7 +106,12 @@ implementation:
         
         # ==================== GAN METRICS ====================
         def calculate_gan_metrics(real_images, fake_images):
-            metrics = {}
+            metrics = {
+                'fid_score': 100.0,
+                'ssim_mean': 0.0,
+                'psnr_mean': 0.0,
+                'diversity_score': 0.0
+            }
             
             try:
                 from skimage.metrics import structural_similarity as ssim
@@ -196,13 +152,11 @@ implementation:
                     except:
                         psnr_scores.append(0.0)
                 
-                metrics['ssim_mean'] = float(np.mean(ssim_scores))
-                metrics['psnr_mean'] = float(np.mean(psnr_scores))
+                metrics['ssim_mean'] = float(np.mean(ssim_scores)) if ssim_scores else 0.0
+                metrics['psnr_mean'] = float(np.mean(psnr_scores)) if psnr_scores else 0.0
                     
             except Exception as e:
                 print(f"WARNING: SSIM/PSNR calculation failed: {e}")
-                metrics['ssim_mean'] = 0.0
-                metrics['psnr_mean'] = 0.0
             
             # Diversity score
             try:
@@ -217,40 +171,8 @@ implementation:
                             distances.append(dist)
                     if distances:
                         metrics['diversity_score'] = float(np.mean(distances))
-                    else:
-                        metrics['diversity_score'] = 0.0
-                else:
-                    metrics['diversity_score'] = 0.0
             except Exception as e:
                 print(f"WARNING: Diversity score calculation failed: {e}")
-                metrics['diversity_score'] = 0.0
-            
-            # Simplified FID
-            try:
-                real_np = real_images.cpu().numpy().reshape(real_images.shape[0], -1)
-                fake_np = fake_images.cpu().numpy().reshape(fake_images.shape[0], -1)
-                
-                mu_real = np.mean(real_np, axis=0)
-                sigma_real = np.cov(real_np, rowvar=False)
-                mu_fake = np.mean(fake_np, axis=0)
-                sigma_fake = np.cov(fake_np, rowvar=False)
-                
-                from scipy import linalg
-                diff = mu_real - mu_fake
-                eps = 1e-6
-                sigma_real = sigma_real + eps * np.eye(sigma_real.shape[0])
-                sigma_fake = sigma_fake + eps * np.eye(sigma_fake.shape[0])
-                
-                covmean = linalg.sqrtm(sigma_real.dot(sigma_fake))
-                if np.iscomplexobj(covmean):
-                    covmean = covmean.real
-                
-                fid = diff.dot(diff) + np.trace(sigma_real + sigma_fake - 2*covmean)
-                metrics['fid_score'] = float(fid)
-                
-            except Exception as e:
-                print(f"WARNING: FID calculation failed: {e}")
-                metrics['fid_score'] = 100.0
             
             return metrics
         
@@ -262,6 +184,83 @@ implementation:
             session.mount("https://", adapter)
             session.mount("http://", adapter)
             return session
+        
+        def delete_instance(access_token, domain, schema_id, model_id):
+           
+            http = get_retry_session()
+            url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            payload = {
+                "dbType": "TIDB",
+                "conditionalFilter": {
+                    "conditions": [{"field": "model_id", "operator": "EQUAL", "value": model_id}]
+                }
+            }
+            response = http.delete(url, headers=headers, data=json.dumps(payload), timeout=30)
+            print(f"DELETE: Deleted instance for model_id {model_id}: {response.status_code}")
+            return response.status_code
+        
+        def create_fresh_instance(access_token, domain, schema_id, model_id, rlaf_actions=None):
+         
+            http = get_retry_session()
+            url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            
+            # Default rlaf_actions if not provided
+            if not rlaf_actions:
+                rlaf_actions = {
+                    "actions": [
+                        {
+                            "id": 0,
+                            "name": "DCGAN_Config_VeryPoor",
+                            "params": {"batch_size": 8, "dropout": 0.7, "learning_rate_d": 5.0E-5, "learning_rate_g": 5.0E-5},
+                            "score": 0
+                        },
+                        {
+                            "id": 1,
+                            "name": "DCGAN_Config_Poor",
+                            "params": {"batch_size": 16, "dropout": 0.5, "learning_rate_d": 2.0E-4, "learning_rate_g": 1.0E-4},
+                            "score": 0
+                        },
+                        {
+                            "id": 2,
+                            "name": "DCGAN_Config_Standard",
+                            "params": {"batch_size": 32, "dropout": 0.3, "learning_rate_d": 4.0E-4, "learning_rate_g": 2.0E-4},
+                            "score": 0
+                        },
+                        {
+                            "id": 3,
+                            "name": "DCGAN_Config_Good",
+                            "params": {"batch_size": 64, "dropout": 0.1, "learning_rate_d": 0.001, "learning_rate_g": 5.0E-4},
+                            "score": 0
+                        },
+                        {
+                            "id": 4,
+                            "name": "DCGAN_Config_Best",
+                            "params": {"batch_size": 128, "dropout": 0, "learning_rate_d": 0.002, "learning_rate_g": 0.001},
+                            "score": 0
+                        }
+                    ]
+                }
+            
+            fresh_instance = {
+                "policy_cdn": "",
+                "rlaf_actions": rlaf_actions,
+                "pierce2rlaf": [],
+                "target_cdn": "",
+                "model_id": model_id,
+                "rlaf2pierce": []
+            }
+            
+            payload = {
+                "dbType": "TIDB",
+                "entities": [fresh_instance]
+            }
+            
+            response = http.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+            response.raise_for_status()
+            print(f"CREATE: Created fresh instance for model_id {model_id}")
+            return fresh_instance
         
         def get_instance(access_token, domain, schema_id, model_id):
             http = get_retry_session()
@@ -324,10 +323,10 @@ implementation:
                 time.sleep(30)
             raise RuntimeError("DQN pipeline timeout after 30 minutes")
         
-        # ==================== ACTUAL TRAINING FUNCTION ====================
-        def train_dcgan_with_action(action, model_path, data_path, config_str, tasks_path, output_model_path):
-         
-            print("DEBUG: Starting DCGAN training with action parameters")
+        # ==================== FULL TRAINING FUNCTION ====================
+        def train_dcgan_with_action(action, model_path, config_str, tasks_path, output_model_path):
+           
+            print(f"DEBUG: Starting DCGAN training with action: {action}")
             
             # Parse config
             config = json.loads(config_str)
@@ -340,75 +339,63 @@ implementation:
             discriminator_cfg = gan_cfg['discriminator']
             
             # Override with action parameters
-            training_cfg['batch_size'] = action.get('batch_size', training_cfg.get('batch_size', 16))
-            training_cfg['epochs'] = action.get('epochs', training_cfg.get('epochs', 2))
-            generator_cfg['learning_rate'] = action.get('learning_rate_g', generator_cfg.get('learning_rate', 0.0002))
-            discriminator_cfg['learning_rate'] = action.get('learning_rate_d', discriminator_cfg.get('learning_rate', 0.0002))
-            discriminator_cfg['dropout'] = action.get('dropout', discriminator_cfg.get('dropout', 0.3))
+            batch_size = action.get('batch_size', training_cfg.get('batch_size', 16))
+            epochs = action.get('epochs', training_cfg.get('epochs', 2))
+            gen_lr = action.get('learning_rate_g', generator_cfg.get('learning_rate', 0.0002))
+            disc_lr = action.get('learning_rate_d', discriminator_cfg.get('learning_rate', 0.0002))
+            dropout = action.get('dropout', discriminator_cfg.get('dropout', 0.3))
             
-            algorithm = training_cfg.get('algorithm', 'backprop')
-            epochs = training_cfg['epochs']
-            batch_size = training_cfg['batch_size']
-            
-            print(f"DEBUG: Training parameters from action:")
-            print(f"  Algorithm: {algorithm}")
+            print(f"DEBUG: Training parameters:")
             print(f"  Batch size: {batch_size}")
             print(f"  Epochs: {epochs}")
-            print(f"  Generator LR: {generator_cfg['learning_rate']}")
-            print(f"  Discriminator LR: {discriminator_cfg['learning_rate']}")
-            print(f"  Dropout: {discriminator_cfg['dropout']}")
+            print(f"  Generator LR: {gen_lr}")
+            print(f"  Discriminator LR: {disc_lr}")
+            print(f"  Dropout: {dropout}")
             
             # Load model
             checkpoint = torch.load(model_path, map_location='cpu')
+            
+            # Extract config and create models
             dcgan_config = checkpoint.get('config', {})
             
-            # Create models
+            # Create config object
             if isinstance(dcgan_config, dict):
-                # Update config with action parameters
-                dcgan_config['batch_size'] = batch_size
-                dcgan_config['epochs'] = epochs
-                dcgan_config['generator_learning_rate'] = generator_cfg['learning_rate']
-                dcgan_config['discriminator_learning_rate'] = discriminator_cfg['learning_rate']
+                # Update with training parameters
+                dcgan_config.update({
+                    'batch_size': batch_size,
+                    'epochs': epochs,
+                    'generator_learning_rate': gen_lr,
+                    'discriminator_learning_rate': disc_lr,
+                    'dropout': dropout
+                })
                 
-                # Create config object
-                dcgan_config_obj = DCGANConfig.from_dict(dcgan_config) if hasattr(DCGANConfig, 'from_dict') else None
+                if hasattr(DCGANConfig, 'from_dict'):
+                    dcgan_config_obj = DCGANConfig.from_dict(dcgan_config)
+                else:
+                    # Fallback: create minimal config
+                    dcgan_config_obj = DCGANConfig(
+                        image_size=dataset_cfg.get('image_size', 64),
+                        channels=dataset_cfg.get('channels', 1),
+                        latent_dim=generator_cfg.get('latent_dim', 100),
+                        training_algorithm=TrainingAlgorithm.BACKPROP,
+                        batch_size=batch_size,
+                        epochs=epochs,
+                        device='cpu'
+                    )
             else:
                 dcgan_config_obj = dcgan_config
             
             # Create models
-            if dcgan_config_obj:
-                generator = FullyConfigurableDCGANGenerator(dcgan_config_obj)
-                discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config_obj)
-            else:
-                # Fallback: create default models
-                image_size = dataset_cfg.get('image_size', 64)
-                channels = dataset_cfg.get('channels', 1)
-                latent_dim = generator_cfg.get('latent_dim', 100)
-                
-                generator = FullyConfigurableDCGANGenerator(DCGANConfig(
-                    image_size=image_size,
-                    channels=channels,
-                    latent_dim=latent_dim,
-                    training_algorithm=TrainingAlgorithm.BACKPROP,
-                    batch_size=batch_size,
-                    epochs=epochs,
-                    device='cpu'
-                ))
-                discriminator = FullyConfigurableDCGANDiscriminator(DCGANConfig(
-                    image_size=image_size,
-                    channels=channels,
-                    latent_dim=latent_dim,
-                    training_algorithm=TrainingAlgorithm.BACKPROP,
-                    batch_size=batch_size,
-                    epochs=epochs,
-                    device='cpu'
-                ))
+            generator = FullyConfigurableDCGANGenerator(dcgan_config_obj)
+            discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config_obj)
             
             # Load weights
             if 'generator_state_dict' in checkpoint:
                 generator.load_state_dict(checkpoint['generator_state_dict'])
+                print("DEBUG: Loaded generator weights")
             if 'discriminator_state_dict' in checkpoint:
                 discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+                print("DEBUG: Loaded discriminator weights")
             
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f"DEBUG: Using device: {device}")
@@ -416,11 +403,11 @@ implementation:
             generator = generator.to(device)
             discriminator = discriminator.to(device)
             
-            # Load tasks data for training
+            # Load tasks data
             with open(tasks_path, 'rb') as f:
                 tasks_data = pickle.load(f)
             
-            # Extract images from tasks
+            # Extract training images
             all_images = []
             if isinstance(tasks_data, list):
                 for task in tasks_data:
@@ -432,13 +419,16 @@ implementation:
                             elif isinstance(batch, (list, tuple)):
                                 all_images.append(batch[0])
             elif hasattr(tasks_data, 'images'):
-                all_images = [tasks_data.images] if isinstance(tasks_data.images, torch.Tensor) else tasks_data.images
+                if isinstance(tasks_data.images, torch.Tensor):
+                    all_images = [tasks_data.images]
+                elif isinstance(tasks_data.images, list):
+                    all_images = tasks_data.images
             
             if not all_images:
-                print("WARNING: No training data found, using random data")
+                print("WARNING: No training data found in tasks, creating dummy data")
                 image_size = dataset_cfg.get('image_size', 64)
                 channels = dataset_cfg.get('channels', 1)
-                all_images = [torch.randn(16, channels, image_size, image_size)]
+                all_images = [torch.randn(32, channels, image_size, image_size) * 2 - 1]
             
             # Prepare dataset
             if isinstance(all_images[0], torch.Tensor) and all_images[0].dim() == 4:
@@ -448,26 +438,27 @@ implementation:
             else:
                 images_tensor = torch.tensor(np.stack(all_images))
             
-            # Normalize to [-1, 1] if needed
-            if images_tensor.max() > 1.0:
+            # Ensure values are in [-1, 1]
+            if images_tensor.max() > 1.0 or images_tensor.min() < -1.0:
                 images_tensor = (images_tensor - images_tensor.min()) / (images_tensor.max() - images_tensor.min()) * 2 - 1
             
             dataset = SimpleDCGANDataset(images_tensor, normalize=False)
             actual_batch_size = min(batch_size, max(1, len(dataset)))
             dataloader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=True)
             
-            print(f"DEBUG: Training dataset: {len(dataset)} samples, batch size: {actual_batch_size}")
+            print(f"DEBUG: Training dataset: {len(dataset)} samples")
+            print(f"DEBUG: Batch size: {actual_batch_size}")
+            print(f"DEBUG: Batches per epoch: {len(dataloader)}")
             
             # ==================== TRAINING LOOP ====================
-            latent_dim = generator.latent_dim
-            gen_optimizer = optim.Adam(generator.parameters(), lr=generator_cfg['learning_rate'], betas=(0.5, 0.999))
-            disc_optimizer = optim.Adam(discriminator.parameters(), lr=discriminator_cfg['learning_rate'], betas=(0.5, 0.999))
+            latent_dim = generator.latent_dim if hasattr(generator, 'latent_dim') else 100
+            gen_optimizer = optim.Adam(generator.parameters(), lr=gen_lr, betas=(0.5, 0.999))
+            disc_optimizer = optim.Adam(discriminator.parameters(), lr=disc_lr, betas=(0.5, 0.999))
             
             generator.train()
             discriminator.train()
             
             training_history = {
-                'epoch_losses': [],
                 'generator_losses': [],
                 'discriminator_losses': []
             }
@@ -481,12 +472,6 @@ implementation:
                 epoch_d_loss = []
                 
                 for batch_idx, real_data in enumerate(dataloader):
-                    if batch_idx > 10:  # Limit for testing
-                        if epoch == 0 and batch_idx == 0:
-                            print(f"DEBUG: Limiting to 10 batches for testing")
-                        if batch_idx >= 10:
-                            break
-                    
                     real_data = real_data.to(device)
                     batch_size_real = real_data.size(0)
                     
@@ -531,7 +516,7 @@ implementation:
                     epoch_g_loss.append(g_loss.item())
                     epoch_d_loss.append(d_loss.item())
                     
-                    if batch_idx % 2 == 0:
+                    if batch_idx % 5 == 0:
                         print(f"  Batch {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
                 
                 avg_g_loss = np.mean(epoch_g_loss) if epoch_g_loss else 0
@@ -539,13 +524,8 @@ implementation:
                 
                 training_history['generator_losses'].append(avg_g_loss)
                 training_history['discriminator_losses'].append(avg_d_loss)
-                training_history['epoch_losses'].append({
-                    'epoch': epoch + 1,
-                    'generator_loss': avg_g_loss,
-                    'discriminator_loss': avg_d_loss
-                })
                 
-                print(f"  Epoch {epoch+1}: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}")
+                print(f"  Epoch {epoch+1} summary: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}")
             
             training_time = time.time() - start_time
             print(f"DEBUG: Training completed in {training_time:.2f}s")
@@ -554,33 +534,35 @@ implementation:
             generator.eval()
             discriminator.eval()
             
-            # Generate samples for evaluation
             with torch.no_grad():
+                # Generate samples for evaluation
                 num_eval_samples = min(20, len(dataset))
                 real_images = []
                 fake_images = []
                 
                 # Get real images
+                dataloader_iter = iter(dataloader)
                 for i in range(min(2, len(dataloader))):
-                    real_batch = next(iter(dataloader)).to(device)
-                    real_images.append(real_batch)
-                    
-                    # Generate fake images
-                    z = torch.randn(real_batch.size(0), latent_dim, device=device)
-                    fake_batch = generator(z)
-                    fake_images.append(fake_batch)
+                    try:
+                        real_batch = next(dataloader_iter).to(device)
+                        real_images.append(real_batch)
+                        
+                        # Generate fake images
+                        z = torch.randn(real_batch.size(0), latent_dim, device=device)
+                        fake_batch = generator(z)
+                        fake_images.append(fake_batch)
+                    except StopIteration:
+                        break
                 
                 if real_images and fake_images:
                     real_images = torch.cat(real_images, dim=0)
                     fake_images = torch.cat(fake_images, dim=0)
                     
-                    # Calculate metrics
                     metrics = calculate_gan_metrics(real_images, fake_images)
                     
                     # Add discriminator scores
-                    with torch.no_grad():
-                        real_output = discriminator(real_images).mean().item()
-                        fake_output = discriminator(fake_images).mean().item()
+                    real_output = discriminator(real_images).mean().item()
+                    fake_output = discriminator(fake_images).mean().item()
                     
                     metrics['real_score'] = real_output
                     metrics['fake_score'] = fake_output
@@ -608,12 +590,11 @@ implementation:
             checkpoint = {
                 'model_source': 'rlaf_trained',
                 'model_type': 'dcgan',
-                'algorithm': algorithm,
-                'config': dcgan_config_obj if dcgan_config_obj else dcgan_config,
                 'generator_state_dict': generator.state_dict(),
                 'discriminator_state_dict': discriminator.state_dict(),
+                'config': dcgan_config_obj,
                 'training_history': training_history,
-                'epoch': epochs,
+                'epochs': epochs,
                 'batch_size': batch_size,
                 'action_applied': action,
                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -625,87 +606,6 @@ implementation:
             print(f"DEBUG: Model saved to: {output_model_path}")
             
             return metrics
-        
-        # ==================== SCHEMA CLEANUP ====================
-        def create_clean_instance(model_id):
-            return {
-                "policy_cdn": "",
-                "rlaf_actions": {
-                    "actions": [
-                        {
-                            "id": 0,
-                            "name": "DCGAN_Config_VeryPoor",
-                            "params": {
-                                "batch_size": 8,
-                                "dropout": 0.7,
-                                "learning_rate_d": 5.0E-5,
-                                "learning_rate_g": 5.0E-5
-                            },
-                            "score": 0
-                        },
-                        {
-                            "id": 1,
-                            "name": "DCGAN_Config_Poor",
-                            "params": {
-                                "batch_size": 16,
-                                "dropout": 0.5,
-                                "learning_rate_d": 2.0E-4,
-                                "learning_rate_g": 1.0E-4
-                            },
-                            "score": 0
-                        },
-                        {
-                            "id": 2,
-                            "name": "DCGAN_Config_Standard",
-                            "params": {
-                                "batch_size": 32,
-                                "dropout": 0.3,
-                                "learning_rate_d": 4.0E-4,
-                                "learning_rate_g": 2.0E-4
-                            },
-                            "score": 0
-                        },
-                        {
-                            "id": 3,
-                            "name": "DCGAN_Config_Good",
-                            "params": {
-                                "batch_size": 64,
-                                "dropout": 0.1,
-                                "learning_rate_d": 0.001,
-                                "learning_rate_g": 5.0E-4
-                            },
-                            "score": 0
-                        },
-                        {
-                            "id": 4,
-                            "name": "DCGAN_Config_Best",
-                            "params": {
-                                "batch_size": 128,
-                                "dropout": 0,
-                                "learning_rate_d": 0.002,
-                                "learning_rate_g": 0.001
-                            },
-                            "score": 0
-                        }
-                    ]
-                },
-                "pierce2rlaf": [],
-                "target_cdn": "",
-                "model_id": model_id,
-                "rlaf2pierce": []
-            }
-        
-        def prepare_4_feature_state(metrics):
-            state = {
-                'fid_score': float(metrics.get('fid_score', 100.0)),
-                'ssim_mean': float(metrics.get('ssim_mean', 0.0)),
-                'psnr_mean': float(metrics.get('psnr_mean', 0.0)),
-                'diversity_score': float(metrics.get('diversity_score', 0.0))
-            }
-            for key in state:
-                if np.isnan(state[key]): 
-                    state[key] = 0.0
-            return state
         
         # ==================== MAIN FUNCTION ====================
         def main():
@@ -727,14 +627,31 @@ implementation:
             args = parser.parse_args()
             
             print("=" * 80)
-            print("DCGAN RLAF LOOP - STARTING")
+            print("DCGAN RLAF LOOP - FRESH START")
             print("=" * 80)
             
             with open(args.access_token, 'r') as f: 
                 access_token = f.read().strip()
             
-            # STEP 1: Load initial metrics
-            print("\\n[STEP 1] Loading initial metrics...")
+            # STEP 1: DELETE AND CREATE FRESH INSTANCE
+            print("\\n[STEP 1] Creating fresh database instance...")
+            try:
+                # First try to delete existing instance
+                delete_status = delete_instance(access_token, args.domain, args.schema_id, args.model_id)
+                print(f"✓ Deleted existing instance (status: {delete_status})")
+            except Exception as e:
+                print(f"NOTE: Could not delete instance (may not exist): {e}")
+            
+            # Create fresh instance
+            try:
+                fresh_instance = create_fresh_instance(access_token, args.domain, args.schema_id, args.model_id)
+                print("✓ Created fresh instance with empty arrays")
+            except Exception as e:
+                print(f"ERROR: Failed to create fresh instance: {e}")
+                raise
+            
+            # STEP 2: Load initial metrics
+            print("\\n[STEP 2] Loading initial metrics...")
             current_metrics = {}
             try:
                 with open(args.init_metrics, 'r') as f: 
@@ -748,10 +665,9 @@ implementation:
             except: 
                 current_metrics = {'fid_score': 100.0, 'ssim_mean': 0.0, 'psnr_mean': 0.0, 'diversity_score': 0.0}
             
-            current_metrics = prepare_4_feature_state(current_metrics)
-            print(f"Initial 4-feature metrics: {current_metrics}")
+            print(f"Initial metrics: {current_metrics}")
             
-            # DQN parameters - 4 features only
+            # DQN parameters - ONLY 4 features
             dcgan_dqn_params = [
                 {"key": "fid_score", "sign": "-", "mul": 0.3},
                 {"key": "ssim_mean", "sign": "+", "mul": 0.3},
@@ -761,44 +677,34 @@ implementation:
             
             action_to_use = None
             
-            # STEP 2: Clean database if needed
-            try:
-                print("\\n[STEP 2] Checking database structure...")
-                instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
-                
-                # Clean pierce2rlaf to only have 4 features
-                if instance.get('pierce2rlaf'):
-                    cleaned_history = []
-                    for entry in instance['pierce2rlaf']:
-                        cleaned_entry = {
-                            "action_id": entry.get("action_id", -1),
-                            "previous_state": prepare_4_feature_state(entry.get("previous_state", {})),
-                            "current_state": prepare_4_feature_state(entry.get("current_state", {})),
-                            "episode": entry.get("episode", 0),
-                            "timestamp": entry.get("timestamp", int(time.time()))
-                        }
-                        cleaned_history.append(cleaned_entry)
-                    
-                    update_instance_field(access_token, args.domain, args.schema_id, args.model_id,
-                                        "pierce2rlaf", cleaned_history)
-                    print("✓ Database cleaned to 4 features")
-            except Exception as e:
-                print(f"WARNING: Could not clean database: {e}")
-            
             # STEP 3: Run RLAF loop
+            print(f"\\n[STEP 3] Starting RLAF loop (2 iterations)")
+            
             for i in range(2):
                 print(f"\\n{'='*60}")
                 print(f"RLAF ITERATION {i+1}/2")
                 print(f"{'='*60}")
                 
-                # Prepare state for DQN
-                state_for_dqn = prepare_4_feature_state(current_metrics)
+                # Prepare state for DQN (only 4 features)
+                state_for_dqn = {
+                    'fid_score': float(current_metrics.get('fid_score', 100.0)),
+                    'ssim_mean': float(current_metrics.get('ssim_mean', 0.0)),
+                    'psnr_mean': float(current_metrics.get('psnr_mean', 0.0)),
+                    'diversity_score': float(current_metrics.get('diversity_score', 0.0))
+                }
+                
+                # Handle NaN values
+                for key in state_for_dqn:
+                    if np.isnan(state_for_dqn[key]): 
+                        state_for_dqn[key] = 0.0
+                
                 print(f"State for DQN: {state_for_dqn}")
                 
                 try:
-                    # Update pierce2rlaf
+                    # Get current instance
                     instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                     
+                    # Update pierce2rlaf with only 4 features
                     if instance.get('pierce2rlaf'):
                         latest_entry = instance['pierce2rlaf'][-1]
                         previous_state = latest_entry['current_state']
@@ -807,7 +713,7 @@ implementation:
                     
                     new_entry = {
                         "action_id": -1,
-                        "previous_state": prepare_4_feature_state(previous_state),
+                        "previous_state": previous_state,
                         "current_state": state_for_dqn,
                         "episode": i,
                         "timestamp": int(time.time())
@@ -819,7 +725,7 @@ implementation:
                     update_instance_field(access_token, args.domain, args.schema_id, args.model_id,
                                         "pierce2rlaf", pierce2rlaf_history)
                     
-                    print(f"✓ Updated pierce2rlaf")
+                    print(f"✓ Updated pierce2rlaf (size: {len(pierce2rlaf_history)})")
                     
                 except Exception as e:
                     print(f"ERROR: Database update failed: {str(e)}")
@@ -855,19 +761,23 @@ implementation:
                                     print(f"✓ DQN selected action: {action_details['name']}")
                                     print(f"Action parameters: {action_to_use}")
                                     
-                                    # STEP 5: ACTUAL TRAINING
-                                    print("\\n[STEP 5] Starting actual DCGAN training...")
+                                    # STEP 5: FULL TRAINING
+                                    print("\\n[STEP 5] Starting full DCGAN training...")
                                     new_metrics = train_dcgan_with_action(
                                         action_to_use, 
                                         args.trained_model, 
-                                        args.data_path, 
                                         args.config, 
                                         args.tasks,
                                         args.retrained_model
                                     )
                                     
                                     # Update current metrics
-                                    current_metrics = prepare_4_feature_state(new_metrics)
+                                    current_metrics = {
+                                        'fid_score': new_metrics.get('fid_score', 100.0),
+                                        'ssim_mean': new_metrics.get('ssim_mean', 0.0),
+                                        'psnr_mean': new_metrics.get('psnr_mean', 0.0),
+                                        'diversity_score': new_metrics.get('diversity_score', 0.0)
+                                    }
                                     print(f"✓ Training completed. New metrics: {current_metrics}")
                                     
                                     # Update model path for next iteration
@@ -899,6 +809,7 @@ implementation:
                 "model_type": "DCGAN",
                 "iterations_completed": i + 1,
                 "timestamp": time.time(),
+                "database_reset": True,
                 "features_used": 4,
                 "feature_names": ["fid_score", "ssim_mean", "psnr_mean", "diversity_score"]
             }
@@ -916,10 +827,10 @@ implementation:
         if __name__ == '__main__':
             try:
                 main()
-                print("\\n✓ DCGAN RLAF Loop completed successfully")
+                print("\\n✓ RLAF loop completed successfully")
                 sys.exit(0)
             except Exception as e:
-                print(f"\\n✗ DCGAN RLAF Loop failed: {e}")
+                print(f"\\n✗ RLAF loop failed: {e}")
                 traceback.print_exc()
                 sys.exit(1)
     args:
