@@ -1,4 +1,4 @@
-name: Upload Evaluation Metrics To Schema v8
+name: Upload Evaluation Metrics To Schema v9
 description: Uploads FID, SSIM, PSNR scores to performance matrix schema with enhanced debugging
 inputs:
   - name: evaluation_metrics
@@ -317,7 +317,7 @@ implementation:
         print("="*100)
         
         def upload_to_schema_with_diagnostics(schema_data, schema_id, bearer_token):
-            """Upload with comprehensive diagnostics"""
+         
             endpoints = [
                 f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/create",
                 f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances",
