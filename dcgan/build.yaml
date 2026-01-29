@@ -1,4 +1,4 @@
-name: Build DCGAN Model v11 
+name: Build DCGAN Model v12 
 description: Builds or loads DCGAN models with schema and CDN support
 inputs:
   - name: master_config
@@ -70,25 +70,18 @@ implementation:
         
         def deep_merge(base_dict, override_dict):
             result = base_dict.copy()
-            
             for key, value in override_dict.items():
                 if key in result and isinstance(result[key], dict) and isinstance(value, dict):
                     result[key] = deep_merge(result[key], value)
                 else:
                     result[key] = value
-            
             return result
         
-        # ============================================================================
-        # IMPORT NESY FACTORY CLASSES
-        # ============================================================================
         print("Importing nesy_factory.GANs.dcgan...")
         
         try:
             import nesy_factory.GANs.dcgan as dcgan_module
             print(" nesy_factory.GANs.dcgan imported successfully")
-            
-            # Try to import specific classes
             from nesy_factory.GANs.dcgan import (
                 DCGANConfig, TrainingAlgorithm, DCGANLayerConfig,
                 ActivationConfig, LossConfig, OptimizerConfig,
@@ -97,9 +90,7 @@ implementation:
                 FullyConfigurableDCGANDiscriminator,
                 EnhancedDCGANTrainer
             )
-            
             print(" All necessary imports successful")
-            
         except ImportError as e:
             print(f" Import error: {e}")
             traceback.print_exc()
@@ -108,39 +99,29 @@ implementation:
             print(f" Partial import issue: {e}")
             traceback.print_exc()
         
-        # ============================================================================
-        # SCHEMA FUNCTIONS
-        # ============================================================================
-        
         def query_schema_for_weights(schema_id, model_id, execution_id, bearer_token):
-    
             schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list?size=1000"
             
             try:
-                # Convert execution_id to float (as stored in schema)
                 execution_id_float = float(execution_id)
+                print(f"  Looking for execution_id: {execution_id_float} (as float)")
             except ValueError:
                 print(f"  ERROR: execution_id must be a number. Got: {execution_id}")
                 return None, None
             
-            # Build filter - IMPORTANT: match data types with schema
             filter_data = {
                 "dbType": "TIDB",
                 "ownedOnly": True,
                 "filter": {
-                    "model_id": str(model_id),  # Schema stores as string
-                    "execution_id": execution_id_float  # Schema stores as float
+                    "model_id": str(model_id),
+                    "execution_id": execution_id_float
                 }
             }
             
             try:
                 print(f"  Querying schema for model weights...")
-                print(f"  Filter: model_id='{model_id}' (string), execution_id={execution_id_float} (float)")
-                
-                headers = {
-                    'Authorization': f'Bearer {bearer_token}',
-                    'Content-Type': 'application/json'
-                }
+                print(f"  Schema URL: {schema_url}")
+                print(f"  Request filter: {json.dumps(filter_data, indent=4)}")
                 
                 curl_command = [
                     "curl",
@@ -151,157 +132,220 @@ implementation:
                     "--fail",
                     "--show-error",
                     "--connect-timeout", "30",
-                    "--max-time", "60",
+                    "--max-time", "120",
                     "--silent"
                 ]
                 
+                print(f"  Executing curl command...")
                 process = subprocess.run(
                     curl_command,
                     capture_output=True,
                     text=True,
-                    check=True
+                    check=False
                 )
                 
-                response_json = json.loads(process.stdout)
-                print(f"  Response received: {len(response_json.get('content', []))} items found")
+                print(f"  Curl exit code: {process.returncode}")
+                print(f"  Curl stderr (first 500 chars): {process.stderr[:500]}")
                 
-                if 'content' in response_json and len(response_json['content']) > 0:
-                    instance = response_json['content'][0]
-                    model_weights_cdn = instance.get('model_weights_cdn')
-                    
-                    if model_weights_cdn:
-                        print(f"   Found model_weights_cdn: {model_weights_cdn[:100]}...")
-                        
-                        # Check and fix CDN URL format if needed
-                        # Some systems expect _$$_ instead of _$_ in URLs
-                        if '_$_V1_data.' in model_weights_cdn and '_$$_V1_data.' not in model_weights_cdn:
-                            # Try both formats - first try the original
-                            original_url = model_weights_cdn
-                            corrected_url = model_weights_cdn.replace('_$_V1_data.', '_$$_V1_data.')
-                            
-                            print(f"   CDN URL contains _$_ pattern")
-                            print(f"   Original URL: {original_url[:100]}...")
-                            print(f"   Corrected URL (for testing): {corrected_url[:100]}...")
-                            
-                            # We'll try original first, but keep corrected as fallback
-                            # Store both in instance for reference
-                            instance['original_cdn_url'] = original_url
-                            instance['corrected_cdn_url'] = corrected_url
-                            
-                            return original_url, instance
-                        else:
-                            print(f"   Using CDN URL as-is")
-                            return model_weights_cdn, instance
-                    else:
-                        print(f"   No model_weights_cdn found in schema entry")
-                        return None, None
-                else:
-                    print(f"   No schema entry found for model_id={model_id}, execution_id={execution_id}")
-                    print(f"   Full response: {json.dumps(response_json, indent=2)[:500]}")
+                if process.returncode != 0:
+                    print(f"  Curl command failed with exit code {process.returncode}")
+                    print(f"  Full stderr: {process.stderr}")
                     return None, None
+                
+                print(f"  Raw response length: {len(process.stdout)} characters")
+                print(f"  First 2000 chars of response:\\n{process.stdout[:2000]}")
+                print(f"  Last 500 chars of response:\\n{process.stdout[-500:]}")
+                
+                try:
+                    response_json = json.loads(process.stdout)
+                    print(f"  Successfully parsed JSON response")
+                    print(f"  Response keys: {list(response_json.keys())}")
+                except json.JSONDecodeError as e:
+                    print(f"  FAILED to parse JSON response: {e}")
+                    print(f"  Response text (first 2000 chars): {process.stdout[:2000]}")
+                    return None, None
+                
+                print(f"\\n  ========== FULL RESPONSE STRUCTURE ==========")
+                print(f"  Response type: {type(response_json)}")
+                
+                if 'content' in response_json:
+                    content_count = len(response_json['content'])
+                    print(f"  Content array has {content_count} items")
                     
-            except subprocess.CalledProcessError as e:
-                print(f"   Failed to query schema: {e.stderr[:200]}")
-                print(f"   Command: {' '.join(curl_command[:5])}...")
+                    if content_count > 0:
+                        print(f"\\n  ========== CONTENT DETAILS ==========")
+                        for i, item in enumerate(response_json['content']):
+                            print(f"\\n  --- Item {i} ---")
+                            print(f"    Type: {type(item)}")
+                            print(f"    Keys: {list(item.keys())}")
+                            
+                            for key, value in item.items():
+                                value_type = type(value)
+                                if isinstance(value, str):
+                                    print(f"    {key}: {value[:100]}{'...' if len(value) > 100 else ''}")
+                                elif isinstance(value, (int, float, bool)):
+                                    print(f"    {key}: {value} ({value_type.__name__})")
+                                elif value is None:
+                                    print(f"    {key}: None")
+                                else:
+                                    print(f"    {key}: {value_type.__name__} (length: {len(value) if hasattr(value, '__len__') else 'N/A'})")
+                            
+                            if 'model_weights_cdn' in item:
+                                weights_url = item['model_weights_cdn']
+                                print(f"\\n    FOUND model_weights_cdn: {weights_url[:150]}...")
+                                
+                                item_model_id = str(item.get('model_id', ''))
+                                item_exec_id = item.get('execution_id')
+                                
+                                print(f"    Item model_id: {item_model_id} (type: {type(item.get('model_id'))})")
+                                print(f"    Item execution_id: {item_exec_id} (type: {type(item_exec_id)})")
+                                
+                                try:
+                                    item_exec_float = float(item_exec_id) if item_exec_id is not None else None
+                                except (ValueError, TypeError):
+                                    item_exec_float = None
+                                
+                                if (item_model_id == str(model_id) and 
+                                    item_exec_float is not None and
+                                    abs(item_exec_float - execution_id_float) < 0.1):
+                                    print(f"\\n    PERFECT MATCH FOUND!")
+                                    print(f"    model_id matches: {item_model_id} == {model_id}")
+                                    print(f"    execution_id matches: {item_exec_float} == {execution_id_float}")
+                                    
+                                    if '_$_V1_data.' in weights_url:
+                                        print(f"    URL contains _$_ pattern")
+                                        corrected_url = weights_url.replace('_$_V1_data.', '_$$_V1_data.')
+                                        print(f"    Original URL: {weights_url[:150]}...")
+                                        print(f"    Corrected URL: {corrected_url[:150]}...")
+                                        item['original_cdn_url'] = weights_url
+                                        item['corrected_cdn_url'] = corrected_url
+                                    
+                                    return weights_url, item
+                                else:
+                                    print(f"\\n    DOES NOT match filter criteria")
+                                    print(f"    Expected model_id: {model_id}, Got: {item_model_id}")
+                                    print(f"    Expected execution_id: {execution_id_float}, Got: {item_exec_float}")
+                            else:
+                                print(f"\\n    NO model_weights_cdn field in this item")
+                                url_fields = ['model_url', 'model_weights_url', 'weights_url', 'cdn_url']
+                                for field in url_fields:
+                                    if field in item:
+                                        print(f"    Has '{field}': {item[field][:150]}...")
+                else:
+                    print(f"  No 'content' key in response")
+                    print(f"  Full response: {json.dumps(response_json, indent=2)[:2000]}...")
+                
+                print(f"\\n  ========== RESPONSE SUMMARY ==========")
+                if 'content' in response_json and len(response_json['content']) > 0:
+                    print(f"  Total items in response: {len(response_json['content'])}")
+                    print(f"  First item has 'model_weights_cdn': {'model_weights_cdn' in response_json['content'][0]}")
+                    items_with_weights = [i for i, item in enumerate(response_json['content']) if 'model_weights_cdn' in item]
+                    print(f"  Items with model_weights_cdn: {len(items_with_weights)}")
+                    if items_with_weights:
+                        print(f"  Indices with weights: {items_with_weights}")
+                        first_with_weights = items_with_weights[0]
+                        item = response_json['content'][first_with_weights]
+                        weights_url = item['model_weights_cdn']
+                        print(f"  Returning item {first_with_weights} with weights URL")
+                        return weights_url, item
+                else:
+                    print(f"  No content in response")
+                
                 return None, None
-            except json.JSONDecodeError as e:
-                print(f"   Failed to parse JSON response: {e}")
-                if 'process' in locals():
-                    print(f"   Response text: {process.stdout[:500]}")
+                
+            except subprocess.CalledProcessError as e:
+                print(f"  Failed to query schema: {e}")
+                print(f"  Command: {' '.join(curl_command)}")
+                print(f"  Stderr: {e.stderr[:500]}")
                 return None, None
             except Exception as e:
-                print(f"   Error querying schema: {str(e)}")
+                print(f"  Error querying schema: {str(e)}")
                 traceback.print_exc()
                 return None, None
         
         def download_and_load_model(weights_url, master_config):
-           
             try:
                 print(f"  Downloading model weights from: {weights_url[:100]}...")
                 
-                # Download weights
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
                     tmp_path = tmp_file.name
                 
-                # Try to download with the given URL
+                print(f"  Attempt 1: Downloading from original URL...")
                 try:
                     urllib.request.urlretrieve(weights_url, tmp_path)
                     file_size = os.path.getsize(tmp_path)
-                    print(f"   Downloaded weights ({file_size:,} bytes)")
+                    print(f"   SUCCESS - Downloaded weights ({file_size:,} bytes)")
                 except Exception as download_error:
-                    print(f"   Failed to download from URL: {download_error}")
+                    print(f"   FAILED - Download from original URL: {download_error}")
                     
-                    # If URL contains _$_ and download failed, try with _$$_
                     if '_$_V1_data.' in weights_url:
                         corrected_url = weights_url.replace('_$_V1_data.', '_$$_V1_data.')
-                        print(f"   Trying corrected URL: {corrected_url[:100]}...")
+                        print(f"  Attempt 2: Trying corrected URL: {corrected_url[:100]}...")
                         try:
                             urllib.request.urlretrieve(corrected_url, tmp_path)
                             file_size = os.path.getsize(tmp_path)
-                            print(f"   Downloaded weights with corrected URL ({file_size:,} bytes)")
-                            weights_url = corrected_url  # Update to corrected URL
+                            print(f"   SUCCESS - Downloaded weights with corrected URL ({file_size:,} bytes)")
+                            weights_url = corrected_url
                         except Exception as corrected_error:
-                            print(f"   Also failed with corrected URL: {corrected_error}")
+                            print(f"   FAILED - Also failed with corrected URL: {corrected_error}")
                             os.unlink(tmp_path)
                             return None, None, None
                     else:
                         os.unlink(tmp_path)
                         return None, None, None
                 
-                # Load checkpoint
+                print(f"  Loading checkpoint...")
                 checkpoint = torch.load(tmp_path, map_location='cpu')
                 print(f"  Checkpoint type: {type(checkpoint)}")
                 if isinstance(checkpoint, dict):
                     print(f"  Checkpoint keys: {list(checkpoint.keys())}")
+                    if 'config' in checkpoint:
+                        print(f"  Config type in checkpoint: {type(checkpoint['config'])}")
                 
-                # Extract config from checkpoint or use master_config
+                dcgan_config = None
                 if isinstance(checkpoint, dict) and 'config' in checkpoint:
-                    # Use config from checkpoint
                     checkpoint_config = checkpoint['config']
                     print("  Using config from checkpoint")
                     
-                    # Create DCGANConfig from checkpoint config
-                    try:
-                        # Extract parameters from checkpoint config
-                        image_size = checkpoint_config.get('image_size', 32)
-                        channels = checkpoint_config.get('channels', 1)
-                        latent_dim = checkpoint_config.get('latent_dim', 100)
-                        
-                        # Create DCGAN config
-                        dcgan_config = DCGANConfig(
-                            image_size=image_size,
-                            channels=channels,
-                            latent_dim=latent_dim,
-                            # Use default values for other params
-                            generator_layers=[],
-                            discriminator_layers=[],
-                            training_algorithm=TrainingAlgorithm.BACKPROP,
-                            use_cafo=False,
-                            use_forward_forward=False,
-                            use_hybrid=False,
-                            batch_size=16,
-                            epochs=2,
-                            device='cpu'
-                        )
-                    except:
-                        # If can't create from checkpoint, use master_config
-                        print("  Couldn't create config from checkpoint, using master_config")
-                        dcgan_config = create_valid_dcgan_config(master_config)
+                    if hasattr(checkpoint_config, 'image_size'):
+                        dcgan_config = checkpoint_config
+                        print(f"  Config is already DCGANConfig object")
+                    else:
+                        try:
+                            image_size = checkpoint_config.get('image_size', 32)
+                            channels = checkpoint_config.get('channels', 1)
+                            latent_dim = checkpoint_config.get('latent_dim', 100)
+                            
+                            dcgan_config = DCGANConfig(
+                                image_size=image_size,
+                                channels=channels,
+                                latent_dim=latent_dim,
+                                generator_layers=[],
+                                discriminator_layers=[],
+                                training_algorithm=TrainingAlgorithm.BACKPROP,
+                                use_cafo=False,
+                                use_forward_forward=False,
+                                use_hybrid=False,
+                                batch_size=16,
+                                epochs=2,
+                                device='cpu'
+                            )
+                            print(f"  Created DCGANConfig from checkpoint dict")
+                        except Exception as e:
+                            print(f"  Couldn't create config from checkpoint: {e}")
+                            dcgan_config = create_valid_dcgan_config(master_config)
                 else:
-                    # Use master_config to create model
-                    print("  Using master_config to create model")
+                    print("  No config in checkpoint, using master_config")
                     dcgan_config = create_valid_dcgan_config(master_config)
                 
                 if dcgan_config is None:
                     print(" Failed to create DCGAN config")
                     return None, None, None
                 
-                # Create models
                 print(f"  Creating generator and discriminator...")
                 generator = FullyConfigurableDCGANGenerator(dcgan_config)
                 discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config)
                 
-                # Load weights if available
                 if isinstance(checkpoint, dict):
                     if 'generator_state_dict' in checkpoint:
                         generator.load_state_dict(checkpoint['generator_state_dict'])
@@ -312,26 +356,22 @@ implementation:
                         print(f"   Loaded discriminator weights")
                     
                     if 'model_state_dict' in checkpoint:
-                        # Try to load as combined model
                         try:
                             generator.load_state_dict(checkpoint['model_state_dict'], strict=False)
                             print(f"   Loaded model_state_dict (generator)")
                         except:
-                            pass
+                            print(f"   Could not load model_state_dict")
                 else:
-                    # Assume checkpoint is generator state_dict
                     try:
                         generator.load_state_dict(checkpoint)
                         print(f"   Loaded checkpoint as generator weights")
                     except:
                         print(f"   Could not load weights directly")
                 
-                # Calculate parameters
                 gen_params = sum(p.numel() for p in generator.parameters())
                 disc_params = sum(p.numel() for p in discriminator.parameters())
                 total_params = gen_params + disc_params
                 
-                # Create model info
                 model_info = {
                     'model_type': 'dcgan',
                     'model_source': 'loaded_weights',
@@ -342,10 +382,10 @@ implementation:
                     'discriminator_params': disc_params,
                     'total_params': total_params,
                     'weights_url': weights_url,
-                    'loaded_successfully': True
+                    'loaded_successfully': True,
+                    'downloaded_file_size': file_size
                 }
                 
-                # Create checkpoint with loaded weights
                 loaded_checkpoint = {
                     'config': dcgan_config,
                     'generator_state_dict': generator.state_dict(),
@@ -354,8 +394,8 @@ implementation:
                     'weights_source': weights_url
                 }
                 
-                # Clean up
                 os.unlink(tmp_path)
+                print(f"  Model loaded successfully")
                 
                 return loaded_checkpoint, dcgan_config, model_info
                 
@@ -370,16 +410,13 @@ implementation:
                 return None, None, None
         
         def create_valid_dcgan_config(master_config: dict):
-           
             try:
-                # Extract parameters
                 gan_cfg = master_config['gan']
                 dataset_cfg = master_config['dataset']
                 gen_cfg = gan_cfg.get('generator', {})
                 disc_cfg = gan_cfg.get('discriminator', {})
                 train_cfg = gan_cfg.get('training', {})
                 
-                # Determine algorithm
                 algorithm = train_cfg.get('algorithm', 'backprop')
                 algorithm_map = {
                     'backprop': TrainingAlgorithm.BACKPROP,
@@ -389,16 +426,13 @@ implementation:
                 }
                 training_algorithm = algorithm_map.get(algorithm, TrainingAlgorithm.BACKPROP)
                 
-                # Set algorithm flags
                 use_cafo = algorithm == 'cafo'
                 use_forward_forward = algorithm == 'forward_forward'
                 use_hybrid = algorithm == 'hybrid'
                 
-                # Image parameters
                 image_size = dataset_cfg.get('image_size', 32)
                 channels = dataset_cfg.get('channels', 1)
                 
-                # Default generator layers
                 default_gen_layers = [
                     {"channels": 128, "kernel_size": 4, "stride": 1, "padding": 0, "output_padding": 0},
                     {"channels": 64, "kernel_size": 4, "stride": 2, "padding": 1, "output_padding": 0},
@@ -406,7 +440,6 @@ implementation:
                     {"channels": channels, "kernel_size": 4, "stride": 2, "padding": 1, "output_padding": 0},
                 ]
                 
-                # Adjust for image size
                 if image_size == 64:
                     default_gen_layers.insert(0, {"channels": 256, "kernel_size": 4, "stride": 1, "padding": 0, "output_padding": 0})
                     default_gen_layers[1]["channels"] = 128
@@ -434,7 +467,6 @@ implementation:
                     else:
                         generator_layers.append(layer)
                 
-                # Default discriminator layers
                 default_disc_layers = [
                     {"channels": 32, "kernel_size": 4, "stride": 2, "padding": 1},
                     {"channels": 64, "kernel_size": 4, "stride": 2, "padding": 1},
@@ -468,7 +500,6 @@ implementation:
                     else:
                         discriminator_layers.append(layer)
                 
-                # Create configs
                 block_training = BlockTrainingConfig(
                     enabled=train_cfg.get('use_block_training', False),
                     num_blocks=3,
@@ -488,7 +519,6 @@ implementation:
                     discriminator_steps=1
                 )
                 
-                # Create DCGANConfig
                 config = DCGANConfig(
                     image_size=image_size,
                     channels=channels,
@@ -524,21 +554,17 @@ implementation:
                 return None
         
         def build_new_model(master_config):
-           
             try:
                 print(f"  Building new DCGAN model...")
                 
-                # Create DCGAN config
                 dcgan_config = create_valid_dcgan_config(master_config)
                 if dcgan_config is None:
                     print(" Failed to create DCGAN config")
                     return None, None, None
                 
-                # Create models
                 generator = FullyConfigurableDCGANGenerator(dcgan_config)
                 discriminator = FullyConfigurableDCGANDiscriminator(dcgan_config)
                 
-                # Calculate parameters
                 gen_params = sum(p.numel() for p in generator.parameters())
                 disc_params = sum(p.numel() for p in discriminator.parameters())
                 total_params = gen_params + disc_params
@@ -551,7 +577,6 @@ implementation:
                 print(f"    Discriminator params: {disc_params:,}")
                 print(f"    Total params: {total_params:,}")
                 
-                # Create model info
                 model_info = {
                     'model_type': 'dcgan',
                     'model_source': 'new_build',
@@ -566,7 +591,6 @@ implementation:
                     'use_forward_forward': dcgan_config.use_forward_forward
                 }
                 
-                # Create checkpoint
                 checkpoint = {
                     'config': dcgan_config,
                     'generator_state_dict': generator.state_dict(),
@@ -602,12 +626,10 @@ implementation:
         print("BUILD DCGAN MODEL v10 - WITH SCHEMA & CDN LOADING")
         print("=" * 80)
         
-        # Create output directories
         os.makedirs(os.path.dirname(args.model_out) or '.', exist_ok=True)
         os.makedirs(os.path.dirname(args.config_updated) or '.', exist_ok=True)
         os.makedirs(os.path.dirname(args.model_info_out) or '.', exist_ok=True)
         
-        # Parse master config
         DEFAULT_CONFIG = {
             "model_type": "dcgan",
             "dataset": {"image_size": 32, "channels": 1},
@@ -629,32 +651,37 @@ implementation:
             master_config = DEFAULT_CONFIG
             print("Using default config")
         
-        # MAIN LOGIC
         checkpoint = None
         dcgan_config = None
         model_info = None
         source = "unknown"
         
-        # MODE 1: Load from Schema
         if load_from_schema:
-            print(f"\\nMODE 1: Loading from Schema")
+            print(f"\\n" + "=" * 80)
+            print(f"MODE 1: Loading from Schema")
+            print("=" * 80)
             
             if not all([args.schema_id, args.model_id, args.execution_id, args.bearer_token]):
                 print(" ERROR: schema_id, model_id, execution_id, and bearer_token are required when load_from_schema=true")
                 sys.exit(1)
             
-            # Query schema for weights URL
+            print(f"Schema ID: {args.schema_id}")
+            print(f"Model ID: {args.model_id}")
+            print(f"Execution ID: {args.execution_id}")
+            print(f"Bearer token length: {len(args.bearer_token)} chars")
+            
             weights_url, schema_instance = query_schema_for_weights(
                 args.schema_id, args.model_id, args.execution_id, args.bearer_token
             )
             
             if weights_url:
-                print(f"  Loading model from schema URL...")
+                print(f"\\n" + "=" * 80)
+                print(f"Loading model from schema URL...")
+                print("=" * 80)
                 checkpoint, dcgan_config, model_info = download_and_load_model(weights_url, master_config)
                 source = "schema"
                 
                 if checkpoint:
-                    # Add schema info to model_info
                     model_info['schema_id'] = args.schema_id
                     model_info['model_id'] = args.model_id
                     model_info['execution_id'] = args.execution_id
@@ -663,19 +690,20 @@ implementation:
                             'created_at': schema_instance.get('created_at'),
                             'source': schema_instance.get('source'),
                             'parameter_count': schema_instance.get('parameter_count'),
-                            'original_cdn_url': schema_instance.get('original_cdn_url', weights_url)
+                            'model_type': schema_instance.get('model_specific_config', {}).get('model_type', 'DCGAN')
                         }
-                    print(f" Model loaded from schema successfully")
+                    print(f"\\nSUCCESS - Model loaded from schema successfully")
                 else:
-                    print(f" Failed to load model from schema URL")
+                    print(f"\\nFAILED - Failed to load model from schema URL")
                     sys.exit(1)
             else:
-                print(f" No weights URL found in schema, falling back to build mode")
+                print(f"\\nWARNING - No weights URL found in schema, falling back to build mode")
                 load_from_schema = False
         
-        # MODE 2: Load from direct CDN URL
         if not checkpoint and load_from_cdn:
-            print(f"\\nMODE 2: Loading from CDN URL")
+            print(f"\\n" + "=" * 80)
+            print(f"MODE 2: Loading from CDN URL")
+            print("=" * 80)
             
             if not args.cdn_url:
                 print(" ERROR: cdn_url is required when load_from_cdn=true")
@@ -687,33 +715,32 @@ implementation:
             
             if checkpoint:
                 model_info['cdn_url'] = args.cdn_url
-                print(f" Model loaded from CDN successfully")
+                print(f"SUCCESS - Model loaded from CDN successfully")
             else:
-                print(f" Failed to load model from CDN URL")
+                print(f"FAILED - Failed to load model from CDN URL")
                 sys.exit(1)
         
-        # MODE 3: Build new model
         if not checkpoint:
-            print(f"\\nMODE 3: Building new model")
+            print(f"\\n" + "=" * 80)
+            print(f"MODE 3: Building new model")
+            print("=" * 80)
             checkpoint, dcgan_config, model_info = build_new_model(master_config)
             source = "new_build"
             
             if not checkpoint:
-                print(f" Failed to build new model")
+                print(f"FAILED - Failed to build new model")
                 sys.exit(1)
         
-        # Save outputs
-        print(f"\\nSaving outputs...")
+        print(f"\\n" + "=" * 80)
+        print(f"Saving outputs...")
+        print("=" * 80)
         
         try:
-            # Save model checkpoint
             torch.save(checkpoint, args.model_out)
             model_file_size = get_file_size(args.model_out)
-            print(f" Model saved: {args.model_out} ({model_file_size})")
+            print(f"SUCCESS - Model saved: {args.model_out} ({model_file_size})")
             
-            # Save config updated
             if dcgan_config:
-                # Convert config to dict if needed
                 if hasattr(dcgan_config, 'to_dict'):
                     config_dict = dcgan_config.to_dict()
                 else:
@@ -728,7 +755,6 @@ implementation:
                         'epochs': getattr(dcgan_config, 'epochs', 2)
                     }
                 
-                # Add source info
                 config_dict['model_source'] = source
                 if source == "schema":
                     config_dict['schema_id'] = args.schema_id
@@ -739,25 +765,23 @@ implementation:
                 
                 with open(args.config_updated, 'w') as f:
                     json.dump(config_dict, f, indent=2)
-                print(f" Config saved: {args.config_updated}")
+                print(f"SUCCESS - Config saved: {args.config_updated}")
             else:
-                print(f" No config to save")
+                print(f"WARNING - No config to save")
                 with open(args.config_updated, 'w') as f:
                     json.dump({"error": "No config available"}, f, indent=2)
             
-            # Save model info
             if model_info:
                 model_info['model_file_size'] = model_file_size
                 model_info['model_source'] = source
                 with open(args.model_info_out, 'w') as f:
                     json.dump(model_info, f, indent=2)
-                print(f" Model info saved: {args.model_info_out}")
+                print(f"SUCCESS - Model info saved: {args.model_info_out}")
             else:
-                print(f" No model info to save")
+                print(f"WARNING - No model info to save")
                 with open(args.model_info_out, 'w') as f:
                     json.dump({"error": "No model info available"}, f, indent=2)
             
-            # Final summary
             print(f"\\n" + "=" * 80)
             print(f"BUILD COMPLETED SUCCESSFULLY!")
             print("=" * 80)
@@ -772,7 +796,7 @@ implementation:
             print("=" * 80)
             
         except Exception as e:
-            print(f" Error saving outputs: {e}")
+            print(f"ERROR - Error saving outputs: {e}")
             traceback.print_exc()
             sys.exit(1)
 
