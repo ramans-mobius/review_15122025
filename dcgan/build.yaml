@@ -1,4 +1,4 @@
-name: Build DCGAN Model v14
+name: Build DCGAN Model v15
 description: Builds or loads DCGAN models with schema and CDN support
 inputs:
   - name: master_config
@@ -100,7 +100,7 @@ implementation:
             traceback.print_exc()
         
         def query_schema_for_weights(schema_id, model_id, execution_id, bearer_token):
-            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3/schemas/{schema_id}/instances/list?size=1000"
+            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list?size=1000"
             
             try:
                 execution_id_float = float(execution_id)
