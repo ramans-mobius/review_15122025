@@ -17,7 +17,7 @@ inputs:
     type: String
   - name: dqn_pipeline_id
     type: String
-  name: pipeline_domain
+  - name: pipeline_domain
     type: String
   - name: dqn_experiment_id
     type: String
