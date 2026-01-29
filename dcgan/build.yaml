@@ -1,4 +1,4 @@
-name: Build DCGAN Model v10 
+name: Build DCGAN Model v11 
 description: Builds or loads DCGAN models with schema and CDN support
 inputs:
   - name: master_config
@@ -113,20 +113,29 @@ implementation:
         # ============================================================================
         
         def query_schema_for_weights(schema_id, model_id, execution_id, bearer_token):
-           
+    
             schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list?size=1000"
             
+            try:
+                # Convert execution_id to float (as stored in schema)
+                execution_id_float = float(execution_id)
+            except ValueError:
+                print(f"  ERROR: execution_id must be a number. Got: {execution_id}")
+                return None, None
+            
+            # Build filter - IMPORTANT: match data types with schema
             filter_data = {
                 "dbType": "TIDB",
                 "ownedOnly": True,
                 "filter": {
-                    "model_id": model_id,
-                    "execution_id": int(execution_id)
+                    "model_id": str(model_id),  # Schema stores as string
+                    "execution_id": execution_id_float  # Schema stores as float
                 }
             }
             
             try:
                 print(f"  Querying schema for model weights...")
+                print(f"  Filter: model_id='{model_id}' (string), execution_id={execution_id_float} (float)")
                 
                 headers = {
                     'Authorization': f'Bearer {bearer_token}',
@@ -154,30 +163,59 @@ implementation:
                 )
                 
                 response_json = json.loads(process.stdout)
+                print(f"  Response received: {len(response_json.get('content', []))} items found")
                 
                 if 'content' in response_json and len(response_json['content']) > 0:
                     instance = response_json['content'][0]
                     model_weights_cdn = instance.get('model_weights_cdn')
                     
                     if model_weights_cdn:
-                        print(f"   Found model_weights_cdn: {model_weights_cdn}...")
-                        return model_weights_cdn, instance
+                        print(f"   Found model_weights_cdn: {model_weights_cdn[:100]}...")
+                        
+                        # Check and fix CDN URL format if needed
+                        # Some systems expect _$$_ instead of _$_ in URLs
+                        if '_$_V1_data.' in model_weights_cdn and '_$$_V1_data.' not in model_weights_cdn:
+                            # Try both formats - first try the original
+                            original_url = model_weights_cdn
+                            corrected_url = model_weights_cdn.replace('_$_V1_data.', '_$$_V1_data.')
+                            
+                            print(f"   CDN URL contains _$_ pattern")
+                            print(f"   Original URL: {original_url[:100]}...")
+                            print(f"   Corrected URL (for testing): {corrected_url[:100]}...")
+                            
+                            # We'll try original first, but keep corrected as fallback
+                            # Store both in instance for reference
+                            instance['original_cdn_url'] = original_url
+                            instance['corrected_cdn_url'] = corrected_url
+                            
+                            return original_url, instance
+                        else:
+                            print(f"   Using CDN URL as-is")
+                            return model_weights_cdn, instance
                     else:
                         print(f"   No model_weights_cdn found in schema entry")
                         return None, None
                 else:
                     print(f"   No schema entry found for model_id={model_id}, execution_id={execution_id}")
+                    print(f"   Full response: {json.dumps(response_json, indent=2)[:500]}")
                     return None, None
                     
             except subprocess.CalledProcessError as e:
                 print(f"   Failed to query schema: {e.stderr[:200]}")
+                print(f"   Command: {' '.join(curl_command[:5])}...")
+                return None, None
+            except json.JSONDecodeError as e:
+                print(f"   Failed to parse JSON response: {e}")
+                if 'process' in locals():
+                    print(f"   Response text: {process.stdout[:500]}")
                 return None, None
             except Exception as e:
-                print(f"   Error querying schema: {str(e)[:100]}")
+                print(f"   Error querying schema: {str(e)}")
+                traceback.print_exc()
                 return None, None
         
         def download_and_load_model(weights_url, master_config):
-         
+           
             try:
                 print(f"  Downloading model weights from: {weights_url[:100]}...")
                 
@@ -185,9 +223,30 @@ implementation:
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
                     tmp_path = tmp_file.name
                 
-                urllib.request.urlretrieve(weights_url, tmp_path)
-                file_size = os.path.getsize(tmp_path)
-                print(f"   Downloaded weights ({file_size:,} bytes)")
+                # Try to download with the given URL
+                try:
+                    urllib.request.urlretrieve(weights_url, tmp_path)
+                    file_size = os.path.getsize(tmp_path)
+                    print(f"   Downloaded weights ({file_size:,} bytes)")
+                except Exception as download_error:
+                    print(f"   Failed to download from URL: {download_error}")
+                    
+                    # If URL contains _$_ and download failed, try with _$$_
+                    if '_$_V1_data.' in weights_url:
+                        corrected_url = weights_url.replace('_$_V1_data.', '_$$_V1_data.')
+                        print(f"   Trying corrected URL: {corrected_url[:100]}...")
+                        try:
+                            urllib.request.urlretrieve(corrected_url, tmp_path)
+                            file_size = os.path.getsize(tmp_path)
+                            print(f"   Downloaded weights with corrected URL ({file_size:,} bytes)")
+                            weights_url = corrected_url  # Update to corrected URL
+                        except Exception as corrected_error:
+                            print(f"   Also failed with corrected URL: {corrected_error}")
+                            os.unlink(tmp_path)
+                            return None, None, None
+                    else:
+                        os.unlink(tmp_path)
+                        return None, None, None
                 
                 # Load checkpoint
                 checkpoint = torch.load(tmp_path, map_location='cpu')
@@ -311,7 +370,7 @@ implementation:
                 return None, None, None
         
         def create_valid_dcgan_config(master_config: dict):
-            
+           
             try:
                 # Extract parameters
                 gan_cfg = master_config['gan']
@@ -465,7 +524,7 @@ implementation:
                 return None
         
         def build_new_model(master_config):
-            
+           
             try:
                 print(f"  Building new DCGAN model...")
                 
@@ -584,15 +643,9 @@ implementation:
                 print(" ERROR: schema_id, model_id, execution_id, and bearer_token are required when load_from_schema=true")
                 sys.exit(1)
             
-            try:
-                execution_id_int = int(args.execution_id)
-            except ValueError:
-                print(f" ERROR: execution_id must be an integer. Got: {args.execution_id}")
-                sys.exit(1)
-            
             # Query schema for weights URL
             weights_url, schema_instance = query_schema_for_weights(
-                args.schema_id, args.model_id, execution_id_int, args.bearer_token
+                args.schema_id, args.model_id, args.execution_id, args.bearer_token
             )
             
             if weights_url:
@@ -604,8 +657,14 @@ implementation:
                     # Add schema info to model_info
                     model_info['schema_id'] = args.schema_id
                     model_info['model_id'] = args.model_id
-                    model_info['execution_id'] = execution_id_int
-                    model_info['schema_instance'] = schema_instance
+                    model_info['execution_id'] = args.execution_id
+                    if schema_instance:
+                        model_info['schema_instance'] = {
+                            'created_at': schema_instance.get('created_at'),
+                            'source': schema_instance.get('source'),
+                            'parameter_count': schema_instance.get('parameter_count'),
+                            'original_cdn_url': schema_instance.get('original_cdn_url', weights_url)
+                        }
                     print(f" Model loaded from schema successfully")
                 else:
                     print(f" Failed to load model from schema URL")
