@@ -1,4 +1,4 @@
-name: Build DCGAN Model v12 
+name: Build DCGAN Model v13 
 description: Builds or loads DCGAN models with schema and CDN support
 inputs:
   - name: master_config
@@ -192,7 +192,7 @@ implementation:
                             
                             if 'model_weights_cdn' in item:
                                 weights_url = item['model_weights_cdn']
-                                print(f"\\n    FOUND model_weights_cdn: {weights_url[:150]}...")
+                                print(f"\\n    FOUND model_weights_cdn: {weights_url}...")
                                 
                                 item_model_id = str(item.get('model_id', ''))
                                 item_exec_id = item.get('execution_id')
@@ -215,8 +215,8 @@ implementation:
                                     if '_$_V1_data.' in weights_url:
                                         print(f"    URL contains _$_ pattern")
                                         corrected_url = weights_url.replace('_$_V1_data.', '_$$_V1_data.')
-                                        print(f"    Original URL: {weights_url[:150]}...")
-                                        print(f"    Corrected URL: {corrected_url[:150]}...")
+                                        print(f"    Original URL: {weights_url}...")
+                                        print(f"    Corrected URL: {corrected_url}...")
                                         item['original_cdn_url'] = weights_url
                                         item['corrected_cdn_url'] = corrected_url
                                     
@@ -265,7 +265,7 @@ implementation:
         
         def download_and_load_model(weights_url, master_config):
             try:
-                print(f"  Downloading model weights from: {weights_url[:100]}...")
+                print(f"  Downloading model weights from: {weights_url}...")
                 
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
                     tmp_path = tmp_file.name
@@ -280,7 +280,7 @@ implementation:
                     
                     if '_$_V1_data.' in weights_url:
                         corrected_url = weights_url.replace('_$_V1_data.', '_$$_V1_data.')
-                        print(f"  Attempt 2: Trying corrected URL: {corrected_url[:100]}...")
+                        print(f"  Attempt 2: Trying corrected URL: {corrected_url}...")
                         try:
                             urllib.request.urlretrieve(corrected_url, tmp_path)
                             file_size = os.path.getsize(tmp_path)
@@ -709,7 +709,7 @@ implementation:
                 print(" ERROR: cdn_url is required when load_from_cdn=true")
                 sys.exit(1)
             
-            print(f"  Loading model from CDN URL: {args.cdn_url[:100]}...")
+            print(f"  Loading model from CDN URL: {args.cdn_url}...")
             checkpoint, dcgan_config, model_info = download_and_load_model(args.cdn_url, master_config)
             source = "cdn"
             
