@@ -1,4 +1,4 @@
-name: DCGAN RLAF Loop v22
+name: DCGAN RLAF Loop v23
 description: DCGAN RLAF with PreprocessedDataset, CAFO, and Forward-Forward support
 inputs:
   - name: trained_model
@@ -17,7 +17,7 @@ inputs:
     type: String
   - name: dqn_pipeline_id
     type: String
-  - name: pipeline_domain
+  name: pipeline_domain
     type: String
   - name: dqn_experiment_id
     type: String
@@ -657,6 +657,9 @@ implementation:
                         disc_optimizer.zero_grad()
                         
                         real_output = discriminator(real_data)
+                        if real_output.dim() > 1:
+                            real_output = real_output.view(-1)
+                        
                         if hasattr(discriminator, 'compute_cafo_loss'):
                             d_loss_real = discriminator.compute_cafo_loss(real_output, is_real=True)
                         else:
@@ -666,6 +669,8 @@ implementation:
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z).detach()
                         fake_output = discriminator(fake_data)
+                        if fake_output.dim() > 1:
+                            fake_output = fake_output.view(-1)
                         
                         if hasattr(discriminator, 'compute_cafo_loss'):
                             d_loss_fake = discriminator.compute_cafo_loss(fake_output, is_real=False)
@@ -681,6 +686,8 @@ implementation:
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z)
                         fake_output = discriminator(fake_data)
+                        if fake_output.dim() > 1:
+                            fake_output = fake_output.view(-1)
                         
                         if hasattr(generator, 'compute_cafo_loss'):
                             g_loss = generator.compute_cafo_loss(fake_output)
@@ -694,6 +701,9 @@ implementation:
                         disc_optimizer.zero_grad()
                         
                         real_output = discriminator(real_data)
+                        if real_output.dim() > 1:
+                            real_output = real_output.view(-1)
+                        
                         if hasattr(discriminator, 'compute_goodness'):
                             real_goodness = discriminator.compute_goodness(real_output)
                             d_loss_real = -torch.mean(real_goodness)
@@ -703,6 +713,8 @@ implementation:
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z).detach()
                         fake_output = discriminator(fake_data)
+                        if fake_output.dim() > 1:
+                            fake_output = fake_output.view(-1)
                         
                         if hasattr(discriminator, 'compute_goodness'):
                             fake_goodness = discriminator.compute_goodness(fake_output)
@@ -718,6 +730,8 @@ implementation:
                         z = torch.randn(batch_size_real, latent_dim, device=device)
                         fake_data = generator(z)
                         fake_output = discriminator(fake_data)
+                        if fake_output.dim() > 1:
+                            fake_output = fake_output.view(-1)
                         
                         if hasattr(generator, 'compute_goodness'):
                             fake_goodness = generator.compute_goodness(fake_output)
