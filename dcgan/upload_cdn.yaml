@@ -1,4 +1,4 @@
-name: Upload Data To CDN v13 - FULL SET
+name: Upload Data To CDN v14 - FULL SET
 description: Uploads complete dataset set for next pipeline continuation
 inputs:
   # From Load Raw Dataset v1 - RAW DATA
@@ -79,13 +79,78 @@ implementation:
       - sh
       - -ec
       - |
-        apt-get update > /dev/null && apt-get install -y curl > /dev/null
+        apt-get update > /dev/null && apt-get install -y curl jq > /dev/null
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
         import argparse, subprocess, json, os, uuid, pickle, sys
+        import time
+        import traceback
+        from typing import Dict, Any, Optional, Tuple, List
+        from dataclasses import dataclass
+        import logging
+        
+        # ============================================================================
+        # CONFIGURATION
+        # ============================================================================
+        class UploadConfig:
+            MAX_RETRIES = 3
+            RETRY_DELAY = 5  # seconds
+            CONNECT_TIMEOUT = 30
+            MAX_TIMEOUT = 120
+            CHUNK_SIZE = 8192  # for file reading
+            MAX_ERROR_LENGTH = 500  # truncate long error messages
+        
+        @dataclass
+        class UploadResult:
+            success: bool
+            url: str = ""
+            size_bytes: int = 0
+            size_kb: float = 0.0
+            description: str = ""
+            file_tag: str = ""
+            cdn_filename: str = ""
+            error_message: str = ""
+            retries_used: int = 0
+            curl_command: str = ""
+            response_status: int = 0
+            response_body: str = ""
+        
+        # ============================================================================
+        # LOGGING SETUP
+        # ============================================================================
+        def setup_logging():
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(levelname)s - %(message)s',
+                handlers=[
+                    logging.StreamHandler(),
+                ]
+            )
+            return logging.getLogger(__name__)
+        
+        logger = setup_logging()
+        
+        # ============================================================================
+        # ERROR HANDLING CLASSES
+        # ============================================================================
+        class UploadError(Exception):
+            """Base exception for upload errors"""
+            pass
+        
+        class FileValidationError(UploadError):
+            """File validation failed"""
+            pass
+        
+        class NetworkError(UploadError):
+            """Network-related errors"""
+            pass
+        
+        class CDNResponseError(UploadError):
+            """CDN API response error"""
+            pass
         
         # ============================================================================
         # INCLUDE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
@@ -144,157 +209,212 @@ implementation:
                 }
         
         # ============================================================================
-        # MAIN EXECUTION CODE
+        # UPLOAD UTILITIES
         # ============================================================================
-        parser = argparse.ArgumentParser()
+        def read_bearer_token(token_file: str) -> str:
+            """Read and validate bearer token"""
+            try:
+                with open(token_file, 'r') as f:
+                    token = f.read().strip()
+                
+                if not token:
+                    raise ValueError("Bearer token is empty")
+                
+                if len(token) < 10:  # Basic validation
+                    raise ValueError("Bearer token seems too short")
+                
+                logger.info(f"Bearer token read successfully (length: {len(token)})")
+                return token
+                
+            except Exception as e:
+                logger.error(f"Failed to read bearer token from {token_file}: {str(e)}")
+                raise
         
-        # Raw data from Load Raw Dataset v1
-        parser.add_argument('--raw_train_data', type=str, required=True)
-        parser.add_argument('--raw_test_data', type=str, required=True)
-        parser.add_argument('--dataset_info', type=str, required=True)
-        parser.add_argument('--data_config', type=str, required=True)
-        
-        # Processed data from Preprocess v1
-        parser.add_argument('--processed_train_data', type=str, required=True)
-        parser.add_argument('--preprocess_metadata', type=str, required=True)
-        parser.add_argument('--preprocessor_params', type=str, required=True)  
-        
-        # CDN credentials
-        parser.add_argument('--bearer_token', type=str, required=True)
-        parser.add_argument('--domain', type=str, required=True)
-        parser.add_argument('--get_cdn', type=str, required=True)
-        
-        # Output URLs
-        parser.add_argument('--raw_train_data_url', type=str, required=True)
-        parser.add_argument('--raw_test_data_url', type=str, required=True)
-        parser.add_argument('--dataset_info_url', type=str, required=True)
-        parser.add_argument('--data_config_url', type=str, required=True)
-        parser.add_argument('--processed_train_data_url', type=str, required=True)
-        parser.add_argument('--preprocess_metadata_url', type=str, required=True)
-        parser.add_argument('--preprocessor_params_url', type=str, required=True)  
-        parser.add_argument('--upload_summary', type=str, required=True)
-        parser.add_argument('--upload_summary_url', type=str, required=True)
-        
-        args = parser.parse_args()
-        
-        print("=" * 80)
-        print("UPLOAD DATA TO CDN v12 - COMPLETE SET FOR NEXT PIPELINE")
-        print("=" * 80)
-        
-        # ============================================================================
-        # Create ALL output directories before doing anything
-        # ============================================================================
-        print("\\nCreating output directories...")
-        
-        output_paths = [
-            args.raw_train_data_url,
-            args.raw_test_data_url,
-            args.dataset_info_url,
-            args.data_config_url,
-            args.processed_train_data_url,
-            args.preprocess_metadata_url,
-            args.preprocessor_params_url,
-            args.upload_summary,
-            args.upload_summary_url
-        ]
-        
-        for path in output_paths:
-            if path:
-                dir_path = os.path.dirname(path)
-                if dir_path and not os.path.exists(dir_path):
-                    os.makedirs(dir_path, exist_ok=True)
-                    print(f"  Created: {dir_path}")
-        
-        print("✓ All output directories created")
-        
-        # ============================================================================
-        # Read bearer token
-        # ============================================================================
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
-        
-        upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
-        
-        # ============================================================================
-        # File verification - NOW WITH CLASS DEFINITIONS AVAILABLE
-        # ============================================================================
-        print("\\nVerifying input files...")
-        
-        def check_file(file_path, file_type):
+        def validate_file_exists(file_path: str, description: str) -> bool:
+            """Validate file exists and is accessible"""
             if not os.path.exists(file_path):
-                print(f"✗ Missing: {file_path}")
-                return False, 0
+                logger.error(f"File does not exist: {file_path} ({description})")
+                return False
+            
+            if not os.access(file_path, os.R_OK):
+                logger.error(f"File not readable: {file_path} ({description})")
+                return False
             
             file_size = os.path.getsize(file_path)
-            size_kb = file_size / 1024
+            if file_size == 0:
+                logger.warning(f"File is empty: {file_path} ({description})")
+            
+            return True
+        
+        def validate_pickle_file(file_path: str) -> Tuple[bool, Any, int]:
+            """Validate pickle file and return object"""
+            try:
+                with open(file_path, 'rb') as f:
+                    obj = pickle.load(f)
+                
+                file_size = os.path.getsize(file_path)
+                return True, obj, file_size
+                
+            except pickle.UnpicklingError as e:
+                logger.error(f"Invalid pickle file {file_path}: {str(e)}")
+                return False, None, 0
+            except Exception as e:
+                logger.error(f"Error reading pickle file {file_path}: {str(e)}")
+                return False, None, 0
+        
+        def validate_json_file(file_path: str) -> Tuple[bool, Any, int]:
+            """Validate JSON file and return data"""
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                
+                file_size = os.path.getsize(file_path)
+                return True, data, file_size
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON file {file_path}: {str(e)}")
+                return False, None, 0
+            except Exception as e:
+                logger.error(f"Error reading JSON file {file_path}: {str(e)}")
+                return False, None, 0
+        
+        # ============================================================================
+        # RETRY DECORATOR
+        # ============================================================================
+        def retry_with_backoff(max_retries: int = 3, delay: int = 5):
+            """Decorator for retrying functions with exponential backoff"""
+            def decorator(func):
+                def wrapper(*args, **kwargs):
+                    last_exception = None
+                    
+                    for attempt in range(max_retries + 1):
+                        try:
+                            if attempt > 0:
+                                logger.warning(f"Retry attempt {attempt}/{max_retries} for {func.__name__}")
+                                time.sleep(delay * attempt)  # Exponential backoff
+                            
+                            result = func(*args, **kwargs)
+                            if attempt > 0:
+                                logger.info(f"Success on retry {attempt}")
+                            return result
+                            
+                        except (NetworkError, CDNResponseError) as e:
+                            last_exception = e
+                            logger.warning(f"Attempt {attempt + 1} failed: {str(e)[:100]}")
+                            if attempt == max_retries:
+                                break
+                            continue
+                        except Exception as e:
+                            last_exception = e
+                            logger.error(f"Non-retryable error in {func.__name__}: {str(e)}")
+                            raise
+                    
+                    if last_exception:
+                        logger.error(f"All {max_retries} retries failed for {func.__name__}")
+                        raise last_exception
+                    
+                    raise UploadError(f"Failed after {max_retries} retries")
+                
+                return wrapper
+            return decorator
+        
+        # ============================================================================
+        # CURL UPLOAD WITH RETRY
+        # ============================================================================
+        @retry_with_backoff(max_retries=UploadConfig.MAX_RETRIES, delay=UploadConfig.RETRY_DELAY)
+        def execute_curl_command(curl_command: List[str], description: str) -> Dict[str, Any]:
+            """Execute curl command with comprehensive error handling"""
+            logger.debug(f"Executing curl command for {description}")
             
             try:
-                if file_type == 'pickle':
-                    with open(file_path, 'rb') as f:
-                        obj = pickle.load(f)
-                    class_name = obj.__class__.__name__
-                    if hasattr(obj, '__len__'):
-                        sample_count = len(obj)
-                        print(f"✓ {os.path.basename(file_path)}: {class_name} ({sample_count} samples, {size_kb:.1f} KB)")
-                    else:
-                        print(f"✓ {os.path.basename(file_path)}: {class_name} ({size_kb:.1f} KB)")
-                    return True, size_kb
-                elif file_type == 'json':
-                    with open(file_path, 'r') as f:
-                        json.load(f)
-                    print(f"✓ {os.path.basename(file_path)}: JSON ({size_kb:.1f} KB)")
-                    return True, size_kb
-                else:
-                    print(f"✓ {os.path.basename(file_path)}: ({size_kb:.1f} KB)")
-                    return True, size_kb
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=False,  # We'll handle errors manually
+                    timeout=UploadConfig.MAX_TIMEOUT
+                )
+                
+                # Log full command (without token) for debugging
+                safe_command = ' '.join(
+                    ['[REDACTED]' if 'Authorization' in part else part for part in curl_command]
+                )
+                logger.debug(f"Curl command: {safe_command}")
+                
+                # Check for network/connection errors
+                if process.returncode == 7:  # curl: (7) Failed to connect
+                    raise NetworkError(f"Failed to connect to server for {description}")
+                elif process.returncode == 28:  # curl: (28) Timeout
+                    raise NetworkError(f"Connection timeout for {description}")
+                elif process.returncode == 6:  # curl: (6) Couldn't resolve host
+                    raise NetworkError(f"Could not resolve host for {description}")
+                elif process.returncode != 0:
+                    raise CDNResponseError(f"Curl failed with code {process.returncode}: {process.stderr[:UploadConfig.MAX_ERROR_LENGTH]}")
+                
+                # Parse response
+                try:
+                    response = json.loads(process.stdout)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON response: {process.stdout[:200]}")
+                    raise CDNResponseError(f"Invalid JSON response from CDN: {str(e)}")
+                
+                # Validate response structure
+                if not response.get("cdnUrl"):
+                    logger.error(f"No cdnUrl in response: {response}")
+                    raise CDNResponseError("CDN response missing 'cdnUrl' field")
+                
+                return response
+                
+            except subprocess.TimeoutExpired:
+                raise NetworkError(f"Upload timeout after {UploadConfig.MAX_TIMEOUT} seconds for {description}")
+            except FileNotFoundError:
+                raise UploadError("curl command not found - is curl installed?")
             except Exception as e:
-                print(f"✗ Error in {file_path}: {str(e)[:100]}")
-                return False, size_kb
+                if isinstance(e, (NetworkError, CDNResponseError)):
+                    raise
+                raise UploadError(f"Unexpected error during curl execution: {str(e)}")
         
-        # Check all files
-        files_to_check = [
-            (args.raw_train_data, 'pickle', 'Raw train data'),
-            (args.raw_test_data, 'pickle', 'Raw test data'),
-            (args.dataset_info, 'pickle', 'Dataset info'),
-            (args.data_config, 'json', 'Data config'),
-            (args.processed_train_data, 'pickle', 'Processed train data'),
-            (args.preprocess_metadata, 'json', 'Preprocess metadata'),
-            (args.preprocessor_params, 'json', 'Preprocessor params')  
-        ]
-        
-        all_valid = True
-        total_size = 0
-        
-        for file_path, file_type, description in files_to_check:
-            valid, size_kb = check_file(file_path, file_type)
-            if not valid:
-                all_valid = False
-            total_size += size_kb
-        
-        if not all_valid:
-            print("\\n✗ Some input files are invalid!")
-            sys.exit(1)
-        
-        print(f"\\n✓ All files verified")
-        print(f"  Total size: {total_size:.1f} KB")
-        
-        # ============================================================================
-        # Upload function
-        # ============================================================================
-        def upload_file_to_cdn(file_path, output_url_path, description, file_tag):
-            file_size = os.path.getsize(file_path)
-            size_kb = file_size / 1024
+        def upload_file_with_retry(
+            file_path: str,
+            output_url_path: str,
+            description: str,
+            file_tag: str,
+            upload_url: str,
+            bearer_token: str,
+            cdn_base_url: str
+        ) -> UploadResult:
+            """Upload file with retry mechanism and detailed error reporting"""
+            result = UploadResult(
+                success=False,
+                description=description,
+                file_tag=file_tag
+            )
             
-            print(f"  Uploading {description} ({size_kb:.1f} KB)...")
+            # Initial validation
+            if not validate_file_exists(file_path, description):
+                result.error_message = f"File validation failed: {file_path}"
+                return result
+            
+            file_size = os.path.getsize(file_path)
+            result.size_bytes = file_size
+            result.size_kb = file_size / 1024
+            
+            logger.info(f"Starting upload of {description} ({result.size_kb:.1f} KB)")
             
             # Generate unique filename
             unique_id = str(uuid.uuid4())[:8]
-            timestamp = uuid.uuid4().hex[:6]  # Short timestamp
+            timestamp = uuid.uuid4().hex[:6]
             
-            # Determine extension based on file type
-            file_ext = '.pkl' if file_tag.endswith('_data') or 'dataset' in file_tag else '.json'
+            # Determine extension
+            if file_tag.endswith('_data') or 'dataset' in file_tag:
+                file_ext = '.pkl'
+            else:
+                file_ext = '.json'
+            
             cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}{file_ext}"
+            result.cdn_filename = cdn_filename
             
+            # Build curl command
             curl_command = [
                 "curl",
                 "--location", upload_url,
@@ -303,211 +423,510 @@ implementation:
                 "--form", f"filename={cdn_filename}",
                 "--fail",
                 "--show-error",
-                "--connect-timeout", "30",
-                "--max-time", "120"
+                "--connect-timeout", str(UploadConfig.CONNECT_TIMEOUT),
+                "--max-time", str(UploadConfig.MAX_TIMEOUT),
+                "--silent"  # Suppress progress output but keep errors
+            ]
+            
+            result.curl_command = ' '.join(
+                ['[REDACTED]' if 'Authorization' in part else part for part in curl_command]
+            )
+            
+            try:
+                # Execute with retry
+                response = execute_curl_command(curl_command, description)
+                
+                # Process successful response
+                relative_cdn_url = response.get("cdnUrl", "")
+                full_url = f"{cdn_base_url}{relative_cdn_url}"
+                
+                # Verify URL
+                if not full_url.startswith(('http://', 'https://')):
+                    raise CDNResponseError(f"Generated invalid URL: {full_url}")
+                
+                result.url = full_url
+                result.success = True
+                
+                # Save URL locally
+                try:
+                    with open(output_url_path, "w") as f:
+                        f.write(full_url)
+                    logger.info(f"URL saved locally: {output_url_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save URL locally but upload succeeded: {str(e)}")
+                
+                logger.info(f"Successfully uploaded {description} to {full_url}")
+                
+            except NetworkError as e:
+                result.error_message = f"Network error: {str(e)}"
+                logger.error(f"Network error for {description}: {str(e)}")
+            except CDNResponseError as e:
+                result.error_message = f"CDN response error: {str(e)}"
+                logger.error(f"CDN error for {description}: {str(e)}")
+            except UploadError as e:
+                result.error_message = f"Upload error: {str(e)}"
+                logger.error(f"Upload error for {description}: {str(e)}")
+            except Exception as e:
+                result.error_message = f"Unexpected error: {str(e)}"
+                logger.error(f"Unexpected error for {description}: {str(e)}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            return result
+        
+        # ============================================================================
+        # VALIDATION FUNCTIONS
+        # ============================================================================
+        def validate_all_inputs(args) -> Tuple[bool, Dict[str, Any]]:
+            """Validate all input files comprehensively"""
+            logger.info("=" * 80)
+            logger.info("COMPREHENSIVE INPUT VALIDATION")
+            logger.info("=" * 80)
+            
+            validation_results = {}
+            all_valid = True
+            
+            # Define validation rules
+            validation_rules = [
+                (args.raw_train_data, 'pickle', 'Raw train data', True),
+                (args.raw_test_data, 'pickle', 'Raw test data', True),
+                (args.dataset_info, 'pickle', 'Dataset info', True),
+                (args.data_config, 'json', 'Data config', True),
+                (args.processed_train_data, 'pickle', 'Processed train data', True),
+                (args.preprocess_metadata, 'json', 'Preprocess metadata', True),
+                (args.preprocessor_params, 'json', 'Preprocessor params', True),
+            ]
+            
+            for file_path, file_type, description, critical in validation_rules:
+                try:
+                    # Check file existence and readability
+                    if not validate_file_exists(file_path, description):
+                        validation_results[description] = {
+                            'valid': False,
+                            'error': 'File does not exist or is not readable',
+                            'critical': critical
+                        }
+                        if critical:
+                            all_valid = False
+                        continue
+                    
+                    # Validate content based on file type
+                    if file_type == 'pickle':
+                        is_valid, obj, size = validate_pickle_file(file_path)
+                        if is_valid:
+                            class_name = obj.__class__.__name__
+                            sample_count = len(obj) if hasattr(obj, '__len__') else 'N/A'
+                            validation_results[description] = {
+                                'valid': True,
+                                'size_kb': size / 1024,
+                                'class': class_name,
+                                'samples': sample_count,
+                                'critical': critical
+                            }
+                        else:
+                            validation_results[description] = {
+                                'valid': False,
+                                'error': 'Invalid pickle file',
+                                'critical': critical
+                            }
+                            if critical:
+                                all_valid = False
+                    
+                    elif file_type == 'json':
+                        is_valid, data, size = validate_json_file(file_path)
+                        if is_valid:
+                            validation_results[description] = {
+                                'valid': True,
+                                'size_kb': size / 1024,
+                                'keys': list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                                'critical': critical
+                            }
+                        else:
+                            validation_results[description] = {
+                                'valid': False,
+                                'error': 'Invalid JSON file',
+                                'critical': critical
+                            }
+                            if critical:
+                                all_valid = False
+                    
+                except Exception as e:
+                    logger.error(f"Validation error for {description}: {str(e)}")
+                    validation_results[description] = {
+                        'valid': False,
+                        'error': f'Validation exception: {str(e)}',
+                        'critical': critical
+                    }
+                    if critical:
+                        all_valid = False
+            
+            # Print validation summary
+            logger.info("\nVALIDATION SUMMARY:")
+            logger.info("-" * 80)
+            
+            for desc, result in validation_results.items():
+                status = "✓" if result['valid'] else "✗"
+                critical_mark = " (CRITICAL)" if result['critical'] else ""
+                
+                if result['valid']:
+                    if 'class' in result:
+                        logger.info(f"{status} {desc}{critical_mark}: {result['class']} "
+                                  f"({result['samples']} samples, {result['size_kb']:.1f} KB)")
+                    else:
+                        logger.info(f"{status} {desc}{critical_mark}: Valid JSON "
+                                  f"({result['size_kb']:.1f} KB)")
+                else:
+                    logger.error(f"{status} {desc}{critical_mark}: {result['error']}")
+            
+            logger.info("-" * 80)
+            logger.info(f"Overall status: {'PASS' if all_valid else 'FAIL'}")
+            
+            return all_valid, validation_results
+        
+        def create_output_directories(output_paths: List[str]) -> None:
+            """Create all necessary output directories"""
+            logger.info("\nCreating output directories...")
+            
+            created_dirs = set()
+            for path in output_paths:
+                if path:
+                    dir_path = os.path.dirname(path)
+                    if dir_path and dir_path not in created_dirs:
+                        try:
+                            os.makedirs(dir_path, exist_ok=True)
+                            created_dirs.add(dir_path)
+                            logger.debug(f"Created directory: {dir_path}")
+                        except Exception as e:
+                            logger.error(f"Failed to create directory {dir_path}: {str(e)}")
+                            raise
+            
+            logger.info(f"✓ Created {len(created_dirs)} output directories")
+        
+        # ============================================================================
+        # MAIN EXECUTION
+        # ============================================================================
+        def main():
+            parser = argparse.ArgumentParser(description='Upload Data to CDN with Retry Mechanism')
+            
+            # Raw data from Load Raw Dataset v1
+            parser.add_argument('--raw_train_data', type=str, required=True)
+            parser.add_argument('--raw_test_data', type=str, required=True)
+            parser.add_argument('--dataset_info', type=str, required=True)
+            parser.add_argument('--data_config', type=str, required=True)
+            
+            # Processed data from Preprocess v1
+            parser.add_argument('--processed_train_data', type=str, required=True)
+            parser.add_argument('--preprocess_metadata', type=str, required=True)
+            parser.add_argument('--preprocessor_params', type=str, required=True)  
+            
+            # CDN credentials
+            parser.add_argument('--bearer_token', type=str, required=True)
+            parser.add_argument('--domain', type=str, required=True)
+            parser.add_argument('--get_cdn', type=str, required=True)
+            
+            # Output URLs
+            parser.add_argument('--raw_train_data_url', type=str, required=True)
+            parser.add_argument('--raw_test_data_url', type=str, required=True)
+            parser.add_argument('--dataset_info_url', type=str, required=True)
+            parser.add_argument('--data_config_url', type=str, required=True)
+            parser.add_argument('--processed_train_data_url', type=str, required=True)
+            parser.add_argument('--preprocess_metadata_url', type=str, required=True)
+            parser.add_argument('--preprocessor_params_url', type=str, required=True)  
+            parser.add_argument('--upload_summary', type=str, required=True)
+            parser.add_argument('--upload_summary_url', type=str, required=True)
+            
+            args = parser.parse_args()
+            
+            logger.info("=" * 80)
+            logger.info("UPLOAD DATA TO CDN v13 - COMPLETE SET WITH RETRY MECHANISM")
+            logger.info("=" * 80)
+            
+            # Create output directories
+            output_paths = [
+                args.raw_train_data_url,
+                args.raw_test_data_url,
+                args.dataset_info_url,
+                args.data_config_url,
+                args.processed_train_data_url,
+                args.preprocess_metadata_url,
+                args.preprocessor_params_url,
+                args.upload_summary,
+                args.upload_summary_url
             ]
             
             try:
-                process = subprocess.run(
-                    curl_command,
-                    capture_output=True,
-                    text=True,
-                    check=True
+                create_output_directories(output_paths)
+            except Exception as e:
+                logger.error(f"Failed to create output directories: {str(e)}")
+                sys.exit(1)
+            
+            # Read bearer token
+            try:
+                bearer_token = read_bearer_token(args.bearer_token)
+                upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
+                logger.info(f"Upload URL configured: {upload_url.split('?')[0]}")
+            except Exception as e:
+                logger.error(f"Failed to setup CDN credentials: {str(e)}")
+                sys.exit(1)
+            
+            # Validate all inputs
+            try:
+                all_valid, validation_results = validate_all_inputs(args)
+                if not all_valid:
+                    critical_errors = [
+                        desc for desc, result in validation_results.items()
+                        if not result['valid'] and result['critical']
+                    ]
+                    if critical_errors:
+                        logger.error(f"Critical validation errors: {', '.join(critical_errors)}")
+                        sys.exit(1)
+                    else:
+                        logger.warning("Non-critical validation errors found, continuing...")
+            except Exception as e:
+                logger.error(f"Input validation failed: {str(e)}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                sys.exit(1)
+            
+            # Upload all files
+            logger.info("\n" + "=" * 80)
+            logger.info("UPLOADING COMPLETE DATASET SET")
+            logger.info("=" * 80)
+            
+            files_to_upload = [
+                # Raw data
+                (args.raw_train_data, args.raw_train_data_url, "Raw train dataset", "raw_train_data"),
+                (args.raw_test_data, args.raw_test_data_url, "Raw test dataset", "raw_test_data"),
+                (args.dataset_info, args.dataset_info_url, "Dataset information", "dataset_info"),
+                (args.data_config, args.data_config_url, "Data configuration", "data_config"),
+                
+                # Processed data
+                (args.processed_train_data, args.processed_train_data_url, "Processed train data", "processed_train_data"),
+                (args.preprocess_metadata, args.preprocess_metadata_url, "Preprocessing metadata", "preprocess_metadata"),
+                (args.preprocessor_params, args.preprocessor_params_url, "Preprocessor parameters", "preprocessor_params")
+            ]
+            
+            upload_results = {}
+            failed_uploads = []
+            
+            for file_path, url_path, description, tag in files_to_upload:
+                logger.info(f"\n{'='*60}")
+                logger.info(f"Uploading: {description}")
+                logger.info(f"{'='*60}")
+                
+                result = upload_file_with_retry(
+                    file_path=file_path,
+                    output_url_path=url_path,
+                    description=description,
+                    file_tag=tag,
+                    upload_url=upload_url,
+                    bearer_token=bearer_token,
+                    cdn_base_url=args.get_cdn
                 )
                 
-                response_json = json.loads(process.stdout)
-                relative_cdn_url = response_json.get("cdnUrl", "")
-                
-                if not relative_cdn_url:
-                    print(f"    ✗ Error: No cdnUrl in response")
-                    return None
-                
-                full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"    ✓ Uploaded: {full_url}...")
-                
-                # Save URL locally
-                with open(output_url_path, "w") as f:
-                    f.write(full_url)
-                
-                return {
-                    'url': full_url,
-                    'size_bytes': file_size,
-                    'size_kb': size_kb,
-                    'description': description,
-                    'file_tag': file_tag,
-                    'cdn_filename': cdn_filename
-                }
-                
-            except subprocess.CalledProcessError as e:
-                print(f"    ✗ Upload failed: {e.stderr[:100]}")
-                return None
-            except Exception as e:
-                print(f"    ✗ Error: {str(e)[:100]}")
-                return None
-        
-        # ============================================================================
-        # Upload ALL files needed for next pipeline
-        # ============================================================================
-        print("\\n" + "=" * 80)
-        print("UPLOADING COMPLETE DATASET SET")
-        print("=" * 80)
-        
-        upload_results = {}
-        files_to_upload = [
-            # Raw data (from Load Raw Dataset v1)
-            (args.raw_train_data, args.raw_train_data_url, "Raw train dataset", "raw_train_data"),
-            (args.raw_test_data, args.raw_test_data_url, "Raw test dataset", "raw_test_data"),
-            (args.dataset_info, args.dataset_info_url, "Dataset information", "dataset_info"),
-            (args.data_config, args.data_config_url, "Data configuration", "data_config"),
-            
-            # Processed data (from Preprocess v1)
-            (args.processed_train_data, args.processed_train_data_url, "Processed train data", "processed_train_data"),
-            (args.preprocess_metadata, args.preprocess_metadata_url, "Preprocessing metadata", "preprocess_metadata"),
-            (args.preprocessor_params, args.preprocessor_params_url, "Preprocessor parameters", "preprocessor_params")
-        ]
-        
-        # Upload each file
-        for file_path, url_path, description, tag in files_to_upload:
-            result = upload_file_to_cdn(file_path, url_path, description, tag)
-            if result:
-                upload_results[tag] = result
-            else:
-                print(f"✗ Failed to upload: {tag}")
-        
-        # ============================================================================
-        # Create and upload summary
-        # ============================================================================
-        print("\\nCreating upload summary...")
-        
-        successful = len(upload_results)
-        total_files = len(files_to_upload)
-        total_bytes = sum(r['size_bytes'] for r in upload_results.values() if r)
-        
-        summary = {
-            'pipeline_stage': 'data_loading_preprocessing',
-            'upload_complete': successful == total_files,
-            'total_files': total_files,
-            'successful_uploads': successful,
-            'total_size_bytes': total_bytes,
-            'total_size_kb': total_bytes / 1024,
-            'files': {},
-            'urls': {},
-            'notes': 'Complete dataset set for DCGAN training pipeline continuation',
-            'critical_files': [
-                'raw_test_data',  # For evaluation
-                'processed_train_data',  # For training
-                'preprocessor_params'  # For test preprocessing during evaluation
-            ],
-            'timestamp': uuid.uuid4().hex[:16]
-        }
-        
-        # Add file details
-        for tag, result in upload_results.items():
-            if result:
-                summary['files'][tag] = {
-                    'description': result['description'],
-                    'size_kb': result['size_kb'],
-                    'uploaded': True,
-                    'cdn_filename': result.get('cdn_filename', '')
-                }
-                summary['urls'][tag] = result['url']
-        
-        # Save summary locally
-        with open(args.upload_summary, 'w') as f:
-            json.dump(summary, f, indent=2)
-        
-        summary_size = os.path.getsize(args.upload_summary)
-        print(f"✓ Summary saved: {args.upload_summary} ({summary_size/1024:.1f} KB)")
-        
-        # Upload summary itself
-        print("\\nUploading summary...")
-        summary_result = upload_file_to_cdn(
-            args.upload_summary, args.upload_summary_url,
-            "Upload summary", "upload_summary"
-        )
-        
-        if summary_result:
-            upload_results['upload_summary'] = summary_result
-            summary['urls']['upload_summary'] = summary_result['url']
-            
-            # Update local summary with its own URL
-            with open(args.upload_summary, 'w') as f:
-                json.dump(summary, f, indent=2)
-        
-        # ============================================================================
-        # Final verification
-        # ============================================================================
-        print("\\n" + "=" * 80)
-        print("FINAL VERIFICATION")
-        print("=" * 80)
-        
-        # Check critical files
-        critical_files = ['raw_test_data', 'processed_train_data', 'preprocessor_params']
-        missing_critical = [f for f in critical_files if f not in upload_results]
-        
-        if missing_critical:
-            print("✗ MISSING CRITICAL FILES:")
-            for f in missing_critical:
-                print(f"  - {f}")
-            print("\\n  Next pipeline may fail!")
-        else:
-            print("✓ All critical files uploaded successfully")
-        
-        # Verify URLs are saved
-        url_files = [
-            (args.raw_train_data_url, 'raw_train_data_url'),
-            (args.raw_test_data_url, 'raw_test_data_url'),
-            (args.dataset_info_url, 'dataset_info_url'),
-            (args.data_config_url, 'data_config_url'),
-            (args.processed_train_data_url, 'processed_train_data_url'),
-            (args.preprocess_metadata_url, 'preprocess_metadata_url'),
-            (args.preprocessor_params_url, 'preprocessor_params_url'),  
-            (args.upload_summary_url, 'upload_summary_url')
-        ]
-        
-        url_count = 0
-        for url_path, name in url_files:
-            if os.path.exists(url_path):
-                with open(url_path, 'r') as f:
-                    url = f.read().strip()
-                if url and url.startswith('http'):
-                    url_count += 1
-                    print(f"  ✓ {name}: URL saved")
+                if result.success:
+                    upload_results[tag] = result
+                    logger.info(f"✓ SUCCESS: {description}")
                 else:
-                    print(f"  ✗ {name}: Invalid URL")
+                    failed_uploads.append((tag, description, result.error_message))
+                    logger.error(f"✗ FAILED: {description}")
+                    logger.error(f"  Error: {result.error_message}")
+            
+            # Create and upload summary
+            logger.info("\n" + "=" * 80)
+            logger.info("CREATING UPLOAD SUMMARY")
+            logger.info("=" * 80)
+            
+            try:
+                # Calculate statistics
+                successful = len(upload_results)
+                total_files = len(files_to_upload)
+                total_bytes = sum(r.size_bytes for r in upload_results.values())
+                
+                summary = {
+                    'pipeline_stage': 'data_loading_preprocessing',
+                    'upload_complete': successful == total_files,
+                    'total_files': total_files,
+                    'successful_uploads': successful,
+                    'failed_uploads': len(failed_uploads),
+                    'total_size_bytes': total_bytes,
+                    'total_size_kb': total_bytes / 1024,
+                    'files': {},
+                    'urls': {},
+                    'failed_files': [],
+                    'notes': 'Complete dataset set for DCGAN training pipeline continuation',
+                    'critical_files': [
+                        'raw_test_data',
+                        'processed_train_data',
+                        'preprocessor_params'
+                    ],
+                    'timestamp': uuid.uuid4().hex[:16],
+                    'retry_config': {
+                        'max_retries': UploadConfig.MAX_RETRIES,
+                        'retry_delay': UploadConfig.RETRY_DELAY
+                    }
+                }
+                
+                # Add successful uploads
+                for tag, result in upload_results.items():
+                    summary['files'][tag] = {
+                        'description': result.description,
+                        'size_kb': result.size_kb,
+                        'uploaded': True,
+                        'cdn_filename': result.cdn_filename,
+                        'retries_used': result.retries_used,
+                        'url': result.url
+                    }
+                    summary['urls'][tag] = result.url
+                
+                # Add failed uploads
+                for tag, description, error in failed_uploads:
+                    summary['failed_files'].append({
+                        'tag': tag,
+                        'description': description,
+                        'error': error
+                    })
+                
+                # Save summary locally
+                with open(args.upload_summary, 'w') as f:
+                    json.dump(summary, f, indent=2)
+                
+                logger.info(f"Summary saved locally: {args.upload_summary}")
+                
+                # Upload summary itself
+                if os.path.exists(args.upload_summary):
+                    logger.info("Uploading summary to CDN...")
+                    summary_result = upload_file_with_retry(
+                        file_path=args.upload_summary,
+                        output_url_path=args.upload_summary_url,
+                        description="Upload summary",
+                        file_tag="upload_summary",
+                        upload_url=upload_url,
+                        bearer_token=bearer_token,
+                        cdn_base_url=args.get_cdn
+                    )
+                    
+                    if summary_result.success:
+                        upload_results['upload_summary'] = summary_result
+                        summary['urls']['upload_summary'] = summary_result.url
+                        
+                        # Update local summary with its own URL
+                        with open(args.upload_summary, 'w') as f:
+                            json.dump(summary, f, indent=2)
+                        logger.info("✓ Summary uploaded to CDN")
+                    else:
+                        logger.error(f"Failed to upload summary: {summary_result.error_message}")
+                else:
+                    logger.error("Summary file not found for upload")
+                
+            except Exception as e:
+                logger.error(f"Failed to create summary: {str(e)}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Final verification
+            logger.info("\n" + "=" * 80)
+            logger.info("FINAL VERIFICATION")
+            logger.info("=" * 80)
+            
+            # Check critical files
+            critical_files = ['raw_test_data', 'processed_train_data', 'preprocessor_params']
+            missing_critical = []
+            
+            for critical_file in critical_files:
+                if critical_file not in upload_results:
+                    missing_critical.append(critical_file)
+                    logger.error(f"✗ MISSING CRITICAL: {critical_file}")
+                else:
+                    logger.info(f"✓ CRITICAL PRESENT: {critical_file}")
+            
+            # Verify URLs are saved
+            url_files = [
+                (args.raw_train_data_url, 'raw_train_data_url'),
+                (args.raw_test_data_url, 'raw_test_data_url'),
+                (args.dataset_info_url, 'dataset_info_url'),
+                (args.data_config_url, 'data_config_url'),
+                (args.processed_train_data_url, 'processed_train_data_url'),
+                (args.preprocess_metadata_url, 'preprocess_metadata_url'),
+                (args.preprocessor_params_url, 'preprocessor_params_url'),  
+                (args.upload_summary_url, 'upload_summary_url')
+            ]
+            
+            url_count = 0
+            for url_path, name in url_files:
+                if os.path.exists(url_path):
+                    try:
+                        with open(url_path, 'r') as f:
+                            url = f.read().strip()
+                        if url and url.startswith('http'):
+                            url_count += 1
+                            logger.debug(f"✓ URL saved: {name}")
+                        else:
+                            logger.warning(f"⚠ Invalid URL in {name}")
+                    except Exception as e:
+                        logger.error(f"✗ Error reading URL file {name}: {str(e)}")
+                else:
+                    logger.warning(f"⚠ URL file not created: {name}")
+            
+            logger.info(f"URLs successfully saved: {url_count}/{len(url_files)}")
+            
+            # Final status
+            logger.info("\n" + "=" * 80)
+            logger.info("UPLOAD COMPLETION STATUS")
+            logger.info("=" * 80)
+            
+            if successful == total_files and len(missing_critical) == 0:
+                logger.info("✓ COMPLETE DATASET SET UPLOADED SUCCESSFULLY!")
+                logger.info(f"  All {successful} files uploaded successfully")
+                logger.info(f"  All critical files present")
+                logger.info(f"  Total data size: {total_bytes/1024/1024:.2f} MB")
+                
+                # Print URLs for next pipeline
+                logger.info("\n" + "=" * 80)
+                logger.info("NEXT PIPELINE REQUIREMENTS")
+                logger.info("=" * 80)
+                logger.info("These URLs will be sent to the DCGAN training pipeline:")
+                
+                next_pipeline_files = {
+                    'TRAINING': ['processed_train_data_url', 'preprocess_metadata_url'],
+                    'EVALUATION': ['raw_test_data_url', 'preprocessor_params_url'],
+                    'REFERENCE': ['raw_train_data_url', 'dataset_info_url', 'data_config_url', 'upload_summary_url']
+                }
+                
+                for category, files in next_pipeline_files.items():
+                    logger.info(f"\n{category}:")
+                    for file in files:
+                        url_path = getattr(args, file)
+                        if os.path.exists(url_path):
+                            with open(url_path, 'r') as f:
+                                url = f.read().strip()
+                            logger.info(f"  • {file}: {url[:50]}...")
+                        else:
+                            logger.warning(f"  • {file}: NOT AVAILABLE")
+                
             else:
-                print(f"✗ {name}: File not created")
+                logger.error("✗ UPLOAD INCOMPLETE")
+                logger.error(f"  Successful: {successful}/{total_files}")
+                logger.error(f"  Failed: {len(failed_uploads)}")
+                
+                if missing_critical:
+                    logger.error(f"  Missing critical files: {', '.join(missing_critical)}")
+                    logger.error("  Next pipeline WILL FAIL without these files!")
+                
+                if failed_uploads:
+                    logger.error("\nFailed uploads details:")
+                    for tag, desc, error in failed_uploads:
+                        logger.error(f"  • {desc}: {error[:100]}")
+                
+                sys.exit(1)
         
-        print(f"\\nURLs saved: {url_count}/{len(url_files)}")
-        
-        # ============================================================================
-        # Pipeline continuation instructions
-        # ============================================================================
-        print("\\n" + "=" * 80)
-        print("NEXT PIPELINE REQUIREMENTS")
-        print("=" * 80)
-        print("These URLs will be sent to the DCGAN training pipeline:")
-        print("\\n1. FOR TRAINING:")
-        print("   • processed_train_data_url: Preprocessed training data")
-        print("   • preprocess_metadata_url: Preprocessing details")
-        print("\\n2. FOR EVALUATION:")
-        print("   • raw_test_data_url: Raw test data (will be preprocessed)")
-        print("   • preprocessor_params_url: Parameters for test preprocessing")
-        print("\\n3. FOR REFERENCE:")
-        print("   • raw_train_data_url: Original raw training data")
-        print("   • dataset_info_url: Dataset metadata")
-        print("   • data_config_url: Configuration")
-        print("   • upload_summary_url: This summary")
-        
-        if successful == total_files and summary_result:
-            print("\\n" + "=" * 80)
-            print("✓ COMPLETE DATASET SET UPLOADED SUCCESSFULLY!")
-            print("=" * 80)
-            print(f"All {successful} data files + summary uploaded successfully!")
-        else:
-            print(f"\\n✗ Upload incomplete: {successful}/{total_files} data files")
-            print("  Summary uploaded: " + ("Yes" if summary_result else "No"))
-            sys.exit(1)
+        if __name__ == "__main__":
+            try:
+                main()
+            except KeyboardInterrupt:
+                logger.error("\nUpload interrupted by user")
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f"\nFATAL ERROR: {str(e)}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                sys.exit(1)
         
     args:
       # Raw data inputs
