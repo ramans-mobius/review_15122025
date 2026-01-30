@@ -1,4 +1,4 @@
-name: Upload Data To CDN v17 - SMART TIMEOUTS
+name: Upload Data To CDN v18 - SMART TIMEOUTS
 description: Uploads complete dataset set for next pipeline continuation
 inputs:
   # From Load Raw Dataset v1 - RAW DATA
@@ -447,7 +447,7 @@ implementation:
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
                 upload_time = time.time() - start_time
                 
-                print(f"    ✓ Upload successful in {upload_time:.1f}s: {full_url[:80]}...")
+                print(f"    ✓ Upload successful in {upload_time:.1f}s: {full_url}...")
                 
                 # Save URL locally
                 with open(output_url_path, "w") as f:
