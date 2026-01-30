@@ -1,0 +1,437 @@
+name: Download and Re-upload PT Model v1
+description: Downloads .pt file from CDN, fixes $ characters, verifies .pt format, and re-uploads
+inputs:
+  - name: cdn_url
+    type: String
+    description: "CDN URL of the model file (may have $ character issues)"
+  - name: bearer_token
+    type: String
+    description: "Bearer token for authentication"
+  - name: domain
+    type: String
+    default: "https://ig.gov-cloud.ai"
+    description: "API domain for upload"
+  - name: get_cdn
+    type: String
+    default: "https://cdn-new.gov-cloud.ai"
+    description: "CDN base URL"
+    
+outputs:
+  - name: final_model_pt
+    type: File
+    description: "Final .pt file saved locally"
+  - name: final_cdn_url
+    type: String
+    description: "Final CDN URL of the uploaded .pt file"
+  - name: verification_status
+    type: String
+    description: "Verification status JSON"
+  - name: upload_status
+    type: String
+    description: "Upload status JSON"
+  
+implementation:
+  container:
+    image: python:3.9-slim
+    command:
+      - sh
+      - -ec
+      - |
+        apt-get update > /dev/null && apt-get install -y curl file > /dev/null
+        pip install requests torch > /dev/null 2>&1 || pip install requests > /dev/null
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import json
+        import os
+        import sys
+        import time
+        import hashlib
+        import re
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        import requests
+        
+        parser = argparse.ArgumentParser(description='Download and re-upload .pt model')
+        parser.add_argument('--cdn_url', type=str, required=True)
+        parser.add_argument('--bearer_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, default="https://ig.gov-cloud.ai")
+        parser.add_argument('--get_cdn', type=str, default="https://cdn-new.gov-cloud.ai")
+        parser.add_argument('--final_model_pt', type=str, required=True)
+        parser.add_argument('--final_cdn_url', type=str, required=True)
+        parser.add_argument('--verification_status', type=str, required=True)
+        parser.add_argument('--upload_status', type=str, required=True)
+        
+        args = parser.parse_args()
+        
+        # Create output directories
+        os.makedirs(os.path.dirname(args.final_model_pt), exist_ok=True)
+        os.makedirs(os.path.dirname(args.final_cdn_url), exist_ok=True)
+        os.makedirs(os.path.dirname(args.verification_status), exist_ok=True)
+        os.makedirs(os.path.dirname(args.upload_status), exist_ok=True)
+        
+        print("=" * 80)
+        print("DOWNLOAD AND RE-UPLOAD PT MODEL v1")
+        print("=" * 80)
+        
+        # ============================
+        # STEP 1: PROCESS CDN URL
+        # ============================
+        print("\\n" + "=" * 80)
+        print("1. PROCESSING CDN URL")
+        print("=" * 80)
+        
+        original_url = args.cdn_url.strip()
+        print(f"Original URL: {original_url}")
+        
+        # Fix $ character issues
+        fixed_url = original_url
+        dollar_count = original_url.count('$')
+        
+        print(f"Found {dollar_count} $ character(s) in URL")
+        
+        if dollar_count == 1:
+            fixed_url = original_url.replace('$', '$$')
+            print(f"Fixed 1$ → 2$: {fixed_url}")
+        elif dollar_count == 2:
+            fixed_url = original_url.replace('$$', '$$$')
+            print(f"Fixed 2$ → 3$: {fixed_url}")
+        elif dollar_count == 0:
+            print("✓ No $ characters found, URL is clean")
+        else:
+            print(f"⚠ URL has {dollar_count} $ characters - using as-is")
+        
+        # ============================
+        # STEP 2: DOWNLOAD FILE
+        # ============================
+        print("\\n" + "=" * 80)
+        print("2. DOWNLOADING FILE")
+        print("=" * 80)
+        
+        # Create temp file for download
+        temp_dir = tempfile.mkdtemp()
+        temp_download = os.path.join(temp_dir, "downloaded_model.pt")
+        
+        headers = {'Authorization': f'Bearer {args.bearer_token.strip()}'}
+        
+        try:
+            print(f"Downloading from: {fixed_url}")
+            start_time = time.time()
+            
+            response = requests.get(fixed_url, headers=headers, stream=True, timeout=300)
+            response.raise_for_status()
+            
+            file_size = int(response.headers.get('content-length', 0))
+            print(f"Content length: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+            
+            # Download file
+            downloaded = 0
+            sha256_hash = hashlib.sha256()
+            
+            with open(temp_download, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        sha256_hash.update(chunk)
+                        downloaded += len(chunk)
+                        
+                        if downloaded % (5 * 1024 * 1024) < 8192 and file_size > 0:
+                            percent = (downloaded / file_size) * 100
+                            print(f"  Progress: {downloaded/1024/1024:.1f} MB ({percent:.1f}%)")
+            
+            elapsed_time = time.time() - start_time
+            actual_size = os.path.getsize(temp_download)
+            checksum = sha256_hash.hexdigest()
+            
+            print(f"✓ Download completed in {elapsed_time:.1f} seconds")
+            print(f"✓ File size: {actual_size:,} bytes")
+            print(f"✓ SHA256: {checksum[:16]}...")
+            
+        except Exception as e:
+            print(f"✗ Download failed: {str(e)}")
+            
+            # Try with original URL if fixed URL failed
+            if fixed_url != original_url:
+                print(f"Trying with original URL: {original_url}")
+                try:
+                    response = requests.get(original_url, headers=headers, stream=True, timeout=300)
+                    response.raise_for_status()
+                    
+                    with open(temp_download, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    actual_size = os.path.getsize(temp_download)
+                    print(f"✓ Downloaded using original URL: {actual_size:,} bytes")
+                except Exception as e2:
+                    print(f"✗ Both URL attempts failed: {str(e2)}")
+                    sys.exit(1)
+            else:
+                sys.exit(1)
+        
+        # ============================
+        # STEP 3: VERIFY .PT FILE
+        # ============================
+        print("\\n" + "=" * 80)
+        print("3. VERIFYING .PT FILE")
+        print("=" * 80)
+        
+        verification = {
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'original_url': original_url,
+            'fixed_url': fixed_url,
+            'downloaded_file': temp_download,
+            'file_size': actual_size,
+            'sha256_checksum': checksum,
+            'is_pt_file': False,
+            'pt_verification_method': None,
+            'file_type': None,
+            'verification_details': {}
+        }
+        
+        # Check 1: File extension
+        if not temp_download.lower().endswith('.pt'):
+            print("✗ File doesn't have .pt extension")
+            
+            # Rename to .pt extension
+            pt_file = temp_download + '.pt'
+            os.rename(temp_download, pt_file)
+            temp_download = pt_file
+            print(f"✓ Renamed to: {pt_file}")
+        else:
+            print("✓ File has .pt extension")
+        
+        # Check 2: File command verification
+        try:
+            file_result = subprocess.run(['file', temp_download], capture_output=True, text=True)
+            file_output = file_result.stdout.strip()
+            verification['file_type'] = file_output
+            
+            print(f"✓ File command output: {file_output}")
+            
+            # Check for PyTorch indicators
+            pt_indicators = ['data', 'torch', 'pickle', 'python']
+            is_likely_pt = any(indicator.lower() in file_output.lower() for indicator in pt_indicators)
+            
+            if is_likely_pt:
+                print("✓ File appears to be a PyTorch model (based on file command)")
+                verification['is_pt_file'] = True
+                verification['pt_verification_method'] = 'file_command'
+                verification['verification_details']['file_command_match'] = True
+            else:
+                print(f"⚠ File type doesn't look like PyTorch: {file_output}")
+        except Exception as e:
+            print(f"⚠ Could not run file command: {str(e)}")
+        
+        # Check 3: Try PyTorch load verification
+        if not verification['is_pt_file']:
+            try:
+                import torch
+                model = torch.load(temp_download, map_location='cpu')
+                print(f"✓ PyTorch successfully loaded the file")
+                print(f"  Model type: {type(model)}")
+                
+                verification['is_pt_file'] = True
+                verification['pt_verification_method'] = 'torch_load'
+                verification['verification_details']['torch_load_success'] = True
+                verification['verification_details']['model_type'] = str(type(model))
+                
+                # Check for common model attributes
+                if hasattr(model, 'state_dict'):
+                    verification['verification_details']['has_state_dict'] = True
+                    verification['verification_details']['state_dict_keys'] = len(list(model.state_dict().keys()))
+                    print(f"  Has state_dict with {verification['verification_details']['state_dict_keys']} keys")
+                
+            except Exception as e:
+                print(f"✗ PyTorch failed to load file: {str(e)}")
+                verification['verification_details']['torch_load_error'] = str(e)
+        
+        # Check 4: Magic number check (pickle files)
+        try:
+            with open(temp_download, 'rb') as f:
+                first_bytes = f.read(4)
+            
+            # Check for pickle protocol indicators
+            if first_bytes.startswith(b'\\x80'):
+                print("✓ File starts with pickle protocol marker")
+                verification['verification_details']['is_pickle'] = True
+                
+                if not verification['is_pt_file']:
+                    verification['is_pt_file'] = True
+                    verification['pt_verification_method'] = 'pickle_magic_bytes'
+            else:
+                print(f"⚠ File doesn't start with pickle magic bytes: {first_bytes.hex()}")
+        except Exception as e:
+            print(f"⚠ Could not read magic bytes: {str(e)}")
+        
+        # Final verification status
+        if verification['is_pt_file']:
+            print("\\n" + "=" * 40)
+            print("✓ VERIFICATION PASSED: File is a valid .pt file")
+            print(f"  Method: {verification['pt_verification_method']}")
+            print("=" * 40)
+        else:
+            print("\\n" + "=" * 40)
+            print("✗ VERIFICATION FAILED: File may not be a valid .pt file")
+            print("=" * 40)
+        
+        # Save verification status
+        with open(args.verification_status, 'w') as f:
+            json.dump(verification, f, indent=2)
+        print(f"✓ Verification status saved: {args.verification_status}")
+        
+        # ============================
+        # STEP 4: RE-UPLOAD TO CDN
+        # ============================
+        print("\\n" + "=" * 80)
+        print("4. RE-UPLOADING .PT FILE TO CDN")
+        print("=" * 80)
+        
+        # Prepare upload
+        upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2Fmodels%2F"
+        
+        timestamp = int(time.time())
+        unique_id = str(hashlib.md5(checksum.encode()).hexdigest())[:8]
+        filename = f"verified_model_{timestamp}_{unique_id}.pt"
+        
+        print(f"Generated filename: {filename}")
+        print(f"Source file: {temp_download} ({actual_size:,} bytes)")
+        
+        # Upload using curl
+        curl_command = [
+            "curl",
+            "--location", upload_url,
+            "--header", f"Authorization: Bearer {args.bearer_token.strip()}",
+            "--form", f"file=@{temp_download}",
+            "--form", f"filename={filename}",
+            "--fail",
+            "--show-error",
+            "--connect-timeout", "60",
+            "--max-time", "300"
+        ]
+        
+        upload_response = None
+        final_cdn_url = None
+        
+        try:
+            print("Executing curl upload...")
+            process = subprocess.run(
+                curl_command,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            print(f"Curl exit code: {process.returncode}")
+            
+            if process.returncode == 0:
+                print("✓ Upload successful")
+                upload_response = json.loads(process.stdout)
+                
+                # Extract CDN URL
+                cdn_path = None
+                if 'cdnUrl' in upload_response:
+                    cdn_path = upload_response['cdnUrl']
+                elif 'info' in upload_response and 'cdnUrl' in upload_response['info']:
+                    cdn_path = upload_response['info']['cdnUrl']
+                elif 'url' in upload_response:
+                    cdn_path = upload_response['url']
+                
+                if cdn_path:
+                    if cdn_path.startswith("http"):
+                        final_cdn_url = cdn_path
+                    else:
+                        final_cdn_url = f"{args.get_cdn}{cdn_path}"
+                    
+                    print(f"✓ Final CDN URL: {final_cdn_url}")
+                else:
+                    print("✗ No CDN URL found in upload response")
+                    
+            else:
+                print(f"✗ Upload failed: {process.stderr[:500]}")
+                
+        except Exception as e:
+            print(f"✗ Upload error: {str(e)}")
+        
+        # ============================
+        # STEP 5: SAVE FINAL OUTPUTS
+        # ============================
+        print("\\n" + "=" * 80)
+        print("5. SAVING FINAL OUTPUTS")
+        print("=" * 80)
+        
+        # Save the downloaded .pt file to final location
+        final_model_path = args.final_model_pt
+        if not final_model_path.endswith('.pt'):
+            final_model_path = os.path.join(os.path.dirname(final_model_path), 'model.pt')
+        
+        # Copy file to final location
+        import shutil
+        shutil.copy2(temp_download, final_model_path)
+        print(f"✓ Model saved as: {final_model_path}")
+        
+        # Save final CDN URL
+        with open(args.final_cdn_url, 'w') as f:
+            f.write(final_cdn_url if final_cdn_url else "")
+        print(f"✓ Final CDN URL saved: {args.final_cdn_url}")
+        
+        # Save upload status
+        upload_status = {
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'original_cdn_url': original_url,
+            'final_cdn_url': final_cdn_url,
+            'local_model_path': final_model_path,
+            'filename': filename,
+            'file_size': actual_size,
+            'sha256_checksum': checksum,
+            'upload_success': final_cdn_url is not None,
+            'verification_passed': verification['is_pt_file'],
+            'verification_method': verification['pt_verification_method'],
+            'curl_response': upload_response
+        }
+        
+        with open(args.upload_status, 'w') as f:
+            json.dump(upload_status, f, indent=2)
+        print(f"✓ Upload status saved: {args.upload_status}")
+        
+        # Clean up temp files
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
+        
+        print("\\n" + "=" * 80)
+        if final_cdn_url and verification['is_pt_file']:
+            print("✓ SUCCESS: File downloaded, verified as .pt, and re-uploaded")
+            print(f"  Final CDN URL: {final_cdn_url}")
+        elif final_cdn_url:
+            print("⚠ WARNING: File uploaded but .pt verification inconclusive")
+            print(f"  Final CDN URL: {final_cdn_url}")
+        elif verification['is_pt_file']:
+            print("⚠ PARTIAL: File verified as .pt but upload failed")
+        else:
+            print("✗ FAILED: File not verified as .pt and upload failed")
+        print("=" * 80)
+        
+    args:
+      - --cdn_url
+      - {inputValue: cdn_url}
+      - --bearer_token
+      - {inputValue: bearer_token}
+      - --domain
+      - {inputValue: domain}
+      - --get_cdn
+      - {inputValue: get_cdn}
+      - --final_model_pt
+      - {outputPath: final_model_pt}
+      - --final_cdn_url
+      - {outputPath: final_cdn_url}
+      - --verification_status
+      - {outputPath: verification_status}
+      - --upload_status
+      - {outputPath: upload_status}
