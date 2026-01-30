@@ -1,4 +1,4 @@
-name: Train DCGAN v37 - WITH BLOCK TRAINING AND CONTINUAL LEARNING
+name: Train DCGAN v38 - WITH BLOCK TRAINING AND CONTINUAL LEARNING
 description: Trains DCGAN with Block Training for CAFO/FF and Adversarial Training, with optional Continual Learning via Experience Replay
 inputs:
   - name: data_path
@@ -26,15 +26,12 @@ inputs:
     description: "Enable continual learning with experience replay"
   - name: replay_buffer_path
     type: String
-    default: ""
     description: "Path to saved replay buffer from previous training"
   - name: replay_ratio
     type: Float
-    default: 0.3
-    description: "Probability of using replay per batch (0-1)"
+    description: "Probability of using replay per batch"
   - name: memory_capacity
     type: Integer
-    default: 500
     description: "Maximum samples to store in replay buffer"
   
 outputs:
@@ -52,7 +49,6 @@ outputs:
     type: String
   - name: block_training_logs
     type: String
-    description: "Detailed logs from block training phase"
   - name: updated_replay_buffer
     type: String
     description: "Updated replay buffer for next continual learning session"
@@ -103,14 +99,14 @@ implementation:
         # ============================================================================
         
         class DCGANReplayBuffer:
-            """Simple replay buffer for DCGAN continual learning"""
+        
             def __init__(self, capacity=500):
                 self.capacity = capacity
                 self.buffer = []
                 self.position = 0
             
             def add_batch(self, real_images):
-                """Add real images to buffer"""
+                
                 if not isinstance(real_images, torch.Tensor):
                     return
                 
@@ -126,7 +122,7 @@ implementation:
                     self.position = (self.position + 1) % self.capacity
             
             def sample(self, batch_size):
-                """Sample random images from buffer"""
+           
                 if len(self.buffer) == 0:
                     return None
                 
@@ -137,7 +133,7 @@ implementation:
                 return torch.cat(samples, dim=0)
             
             def save(self, path):
-                """Save buffer to file"""
+             
                 with open(path, 'wb') as f:
                     pickle.dump({
                         'buffer': self.buffer,
@@ -146,7 +142,7 @@ implementation:
                     }, f)
             
             def load(self, path):
-                """Load buffer from file"""
+                
                 if os.path.exists(path):
                     with open(path, 'rb') as f:
                         data = pickle.load(f)
@@ -1400,13 +1396,13 @@ implementation:
         print(f"Generated Samples: {len(samples)}")
         
         if enable_cl:
-            print(f"\\n🚀 CONTINUAL LEARNING SUMMARY:")
+            print(f"\\n CONTINUAL LEARNING SUMMARY:")
             print(f"   Replay Ratio: {replay_ratio}")
             print(f"   Memory Capacity: {memory_capacity}")
             print(f"   Final Buffer Size: {len(replay_buffer) if replay_buffer else 0} samples")
             print(f"   Updated Buffer Saved: {args.updated_replay_buffer}")
         
-        print(f"\\n📂 OUTPUT FILES SAVED:")
+        print(f"\\n OUTPUT FILES SAVED:")
         print(f"   Model: {args.trained_model}")
         print(f"   Training History: {args.training_history}")
         print(f"   Training Metrics: {args.training_metrics}")
