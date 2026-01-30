@@ -1,4 +1,4 @@
-name: Upload Data To CDN v15 - FULL SET
+name: Upload Data To CDN v16 - SMART TIMEOUTS
 description: Uploads complete dataset set for next pipeline continuation
 inputs:
   # From Load Raw Dataset v1 - RAW DATA
@@ -90,11 +90,22 @@ implementation:
         import traceback
         
         # ============================================================================
-        # RETRY CONFIGURATION
+        # SMART TIMEOUT CONFIGURATION
         # ============================================================================
-        MAX_RETRIES = 3
-        RETRY_DELAY = 5  # seconds
-        TIMEOUT_RETRY_INCREASE = 30  # Additional seconds for timeout retries
+        SMALL_FILE_MAX_RETRIES = 2  # Fewer retries for small files
+        LARGE_FILE_MAX_RETRIES = 4  # More retries for large files
+        
+        # Base timeouts (seconds)
+        SMALL_CONNECT_TIMEOUT = 10
+        SMALL_MAX_TIMEOUT = 30
+        
+        LARGE_CONNECT_TIMEOUT = 30
+        LARGE_MAX_TIMEOUT = 300  # 5 minutes for large files
+        
+        # File size thresholds (bytes)
+        SMALL_FILE = 10 * 1024 * 1024  # 10MB
+        MEDIUM_FILE = 100 * 1024 * 1024  # 100MB
+        LARGE_FILE = 500 * 1024 * 1024  # 500MB
         
         # ============================================================================
         # INCLUDE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
@@ -153,60 +164,63 @@ implementation:
                 }
         
         # ============================================================================
-        # RETRY UTILITY FUNCTIONS
+        # SMART UPLOAD FUNCTION
         # ============================================================================
-        def should_retry_error(error_output, attempt):
-         
-            error_str = str(error_output).lower()
-            
-            # Retryable errors
-            retryable_errors = [
-                'timeout',
-                'timed out',
-                'connection refused',
-                'connection reset',
-                'network is unreachable',
-                'temporary failure',
-                'curl: (7)',  # Failed to connect
-                'curl: (28)', # Timeout
-                'curl: (55)', # Send failure
-                'curl: (56)', # Recv failure
-                'server error',
-                'gateway timeout',
-                'service unavailable'
-            ]
-            
-            for retryable in retryable_errors:
-                if retryable in error_str:
-                    return True
-            
-            # For timeout errors on later attempts, increase timeout
-            if 'timeout' in error_str and attempt > 0:
-                return True
-                
-            return False
+        def get_upload_config(file_size):
+            """Get timeout and retry config based on file size"""
+            if file_size < SMALL_FILE:  # < 10MB
+                return {
+                    'max_retries': SMALL_FILE_MAX_RETRIES,
+                    'connect_timeout': SMALL_CONNECT_TIMEOUT,
+                    'max_timeout': SMALL_MAX_TIMEOUT,
+                    'retry_delay': 2,
+                    'label': 'SMALL'
+                }
+            elif file_size < MEDIUM_FILE:  # 10MB - 100MB
+                return {
+                    'max_retries': SMALL_FILE_MAX_RETRIES + 1,
+                    'connect_timeout': 20,
+                    'max_timeout': 90,
+                    'retry_delay': 3,
+                    'label': 'MEDIUM'
+                }
+            elif file_size < LARGE_FILE:  # 100MB - 500MB
+                return {
+                    'max_retries': LARGE_FILE_MAX_RETRIES,
+                    'connect_timeout': LARGE_CONNECT_TIMEOUT,
+                    'max_timeout': 180,
+                    'retry_delay': 5,
+                    'label': 'LARGE'
+                }
+            else:  # > 500MB
+                return {
+                    'max_retries': LARGE_FILE_MAX_RETRIES,
+                    'connect_timeout': LARGE_CONNECT_TIMEOUT,
+                    'max_timeout': LARGE_MAX_TIMEOUT,
+                    'retry_delay': 10,
+                    'label': 'VERY LARGE'
+                }
         
-        def get_retry_delay(attempt, is_timeout=False):
-         
-            base_delay = RETRY_DELAY
-            if is_timeout:
-                # For timeout errors, increase delay more aggressively
-                return base_delay * (2 ** attempt) + TIMEOUT_RETRY_INCREASE
-            return base_delay * (2 ** attempt)  # Exponential backoff
-        
-        def upload_with_retry(file_path, upload_url, bearer_token, filename, description):
-         
+        def upload_file_smart(file_path, upload_url, bearer_token, filename, description):
+            """Upload with smart timeout configuration based on file size"""
+            file_size = os.path.getsize(file_path)
+            config = get_upload_config(file_size)
+            
+            print(f"  Size: {file_size/1024/1024:.1f} MB → {config['label']} file config")
+            print(f"  Timeouts: connect={config['connect_timeout']}s, max={config['max_timeout']}s")
+            print(f"  Retries: {config['max_retries']} with {config['retry_delay']}s delay")
+            
             last_error = None
-            timeout_multiplier = 1
             
-            for attempt in range(MAX_RETRIES + 1):
+            for attempt in range(config['max_retries'] + 1):
                 try:
-                    # Increase timeout for retry attempts
-                    connect_timeout = 30 + (10 * attempt)
-                    max_timeout = 120 + (30 * attempt * timeout_multiplier)
+                    if attempt > 0:
+                        # Small delay for retries
+                        delay = config['retry_delay'] * attempt
+                        print(f"  ⏳ Retry {attempt}/{config['max_retries']} in {delay}s...")
+                        time.sleep(delay)
                     
-                    print(f"  Attempt {attempt + 1}/{MAX_RETRIES + 1}: "
-                          f"timeout={max_timeout}s")
+                    print(f"  Attempt {attempt + 1}/{config['max_retries'] + 1}")
                     
                     curl_command = [
                         "curl",
@@ -216,8 +230,8 @@ implementation:
                         "--form", f"filename={filename}",
                         "--fail",
                         "--show-error",
-                        "--connect-timeout", str(connect_timeout),
-                        "--max-time", str(max_timeout)
+                        "--connect-timeout", str(config['connect_timeout']),
+                        "--max-time", str(config['max_timeout'])
                     ]
                     
                     process = subprocess.run(
@@ -231,7 +245,7 @@ implementation:
                     relative_cdn_url = response_json.get("cdnUrl", "")
                     
                     if not relative_cdn_url:
-                        raise Exception(f"No cdnUrl in response: {response_json}")
+                        raise Exception(f"No cdnUrl in response")
                     
                     return relative_cdn_url
                     
@@ -239,36 +253,26 @@ implementation:
                     error_msg = e.stderr if e.stderr else str(e)
                     last_error = error_msg
                     
-                    print(f"    ✗ Attempt {attempt + 1} failed: {error_msg[:200]}")
+                    # Truncate long error messages
+                    display_error = error_msg[:100].replace('\\n', ' ')
+                    print(f"    ✗ Attempt failed: {display_error}")
                     
-                    # Check if we should retry
-                    if attempt < MAX_RETRIES and should_retry_error(error_msg, attempt):
-                        delay = get_retry_delay(attempt, 'timeout' in error_msg.lower())
-                        
-                        # Increase timeout multiplier for timeout errors
-                        if 'timeout' in error_msg.lower():
-                            timeout_multiplier += 1
-                            print(f"    ⏱ Timeout detected, increasing timeout multiplier to {timeout_multiplier}")
-                        
-                        print(f"    ⏳ Retrying in {delay:.1f} seconds...")
-                        time.sleep(delay)
-                        continue
-                    else:
-                        # Not retryable or max retries reached
+                    if attempt == config['max_retries']:
                         break
-                        
+                    
+                    continue
+                    
                 except json.JSONDecodeError as e:
                     last_error = f"Invalid JSON response: {str(e)}"
-                    print(f"    ✗ JSON decode error: {str(e)}")
+                    print(f"    ✗ JSON decode error")
                     break
                     
                 except Exception as e:
                     last_error = str(e)
-                    print(f"    ✗ Unexpected error: {str(e)}")
+                    print(f"    ✗ Error: {str(e)[:50]}")
                     break
             
-            # If we get here, all retries failed
-            raise Exception(f"Failed to upload {description} after {MAX_RETRIES + 1} attempts. Last error: {last_error}")
+            raise Exception(f"Failed after {config['max_retries'] + 1} attempts: {last_error[:100]}")
         
         # ============================================================================
         # MAIN EXECUTION CODE
@@ -305,10 +309,13 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("UPLOAD DATA TO CDN v13 - COMPLETE SET WITH RETRY MECHANISM")
+        print("UPLOAD DATA TO CDN v13 - SMART TIMEOUTS")
         print("=" * 80)
-        print(f"Retry Configuration: {MAX_RETRIES} retries, {RETRY_DELAY}s base delay")
-        print("Timeout handling: Increases timeout on retry for timeout errors")
+        print("Config: Timeouts adapt based on file size")
+        print("- <10MB: 30s timeout, 2 retries")
+        print("- 10-100MB: 90s timeout, 3 retries")
+        print("- 100-500MB: 180s timeout, 4 retries")
+        print("- >500MB: 300s timeout, 4 retries")
         print("=" * 80)
         
         # ============================================================================
@@ -346,7 +353,7 @@ implementation:
         upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
         
         # ============================================================================
-        # File verification - NOW WITH CLASS DEFINITIONS AVAILABLE
+        # File verification
         # ============================================================================
         print("\\nVerifying input files...")
         
@@ -356,7 +363,7 @@ implementation:
                 return False, 0
             
             file_size = os.path.getsize(file_path)
-            size_kb = file_size / 1024
+            size_mb = file_size / 1024 / 1024
             
             try:
                 if file_type == 'pickle':
@@ -365,22 +372,22 @@ implementation:
                     class_name = obj.__class__.__name__
                     if hasattr(obj, '__len__'):
                         sample_count = len(obj)
-                        print(f"✓ {os.path.basename(file_path)}: {class_name} ({sample_count} samples, {size_kb:.1f} KB)")
+                        print(f"✓ {os.path.basename(file_path)}: {class_name} ({sample_count} samples, {size_mb:.1f} MB)")
                     else:
-                        print(f"✓ {os.path.basename(file_path)}: {class_name} ({size_kb:.1f} KB)")
-                    return True, size_kb
+                        print(f"✓ {os.path.basename(file_path)}: {class_name} ({size_mb:.1f} MB)")
+                    return True, file_size
                 elif file_type == 'json':
                     with open(file_path, 'r') as f:
                         json.load(f)
-                    print(f"✓ {os.path.basename(file_path)}: JSON ({size_kb:.1f} KB)")
-                    return True, size_kb
+                    print(f"✓ {os.path.basename(file_path)}: JSON ({size_mb:.1f} MB)")
+                    return True, file_size
                 else:
-                    print(f"✓ {os.path.basename(file_path)}: ({size_kb:.1f} KB)")
-                    return True, size_kb
+                    print(f"✓ {os.path.basename(file_path)}: ({size_mb:.1f} MB)")
+                    return True, file_size
             except Exception as e:
                 error_msg = str(e)
                 print(f"✗ Error in {file_path}: {error_msg[:100]}")
-                return False, size_kb
+                return False, file_size
         
         # Check all files
         files_to_check = [
@@ -394,41 +401,42 @@ implementation:
         ]
         
         all_valid = True
-        total_size = 0
+        file_sizes = {}
         
         for file_path, file_type, description in files_to_check:
-            valid, size_kb = check_file(file_path, file_type)
+            valid, size = check_file(file_path, file_type)
             if not valid:
                 all_valid = False
-            total_size += size_kb
+            file_sizes[description] = size
         
         if not all_valid:
             print("\\n✗ Some input files are invalid!")
             sys.exit(1)
         
         print(f"\\n✓ All files verified")
-        print(f"  Total size: {total_size:.1f} KB")
         
         # ============================================================================
-        # Enhanced upload function with retry
+        # Upload function with smart timeouts
         # ============================================================================
         def upload_file_to_cdn(file_path, output_url_path, description, file_tag):
             file_size = os.path.getsize(file_path)
-            size_kb = file_size / 1024
+            size_mb = file_size / 1024 / 1024
             
-            print(f"\\nUploading {description} ({size_kb:.1f} KB)...")
+            print(f"\\nUploading {description} ({size_mb:.1f} MB)...")
             
             # Generate unique filename
             unique_id = str(uuid.uuid4())[:8]
-            timestamp = uuid.uuid4().hex[:6]  # Short timestamp
+            timestamp = uuid.uuid4().hex[:6]
             
             # Determine extension based on file type
             file_ext = '.pkl' if file_tag.endswith('_data') or 'dataset' in file_tag else '.json'
             cdn_filename = f"dcgan_{file_tag}_{timestamp}_{unique_id}{file_ext}"
             
+            start_time = time.time()
+            
             try:
-                # Use retry mechanism for upload
-                relative_cdn_url = upload_with_retry(
+                # Use smart upload function
+                relative_cdn_url = upload_file_smart(
                     file_path=file_path,
                     upload_url=upload_url,
                     bearer_token=bearer_token,
@@ -437,7 +445,9 @@ implementation:
                 )
                 
                 full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"    ✓ Upload successful: {full_url}")
+                upload_time = time.time() - start_time
+                
+                print(f"    ✓ Upload successful in {upload_time:.1f}s: {full_url[:80]}...")
                 
                 # Save URL locally
                 with open(output_url_path, "w") as f:
@@ -446,16 +456,18 @@ implementation:
                 return {
                     'url': full_url,
                     'size_bytes': file_size,
-                    'size_kb': size_kb,
+                    'size_mb': size_mb,
                     'description': description,
                     'file_tag': file_tag,
                     'cdn_filename': cdn_filename,
-                    'success': True
+                    'success': True,
+                    'upload_time': upload_time
                 }
                 
             except Exception as e:
+                upload_time = time.time() - start_time
                 error_msg = str(e)
-                print(f"    ✗ Upload failed after all retries: {error_msg[:200]}")
+                print(f"    ✗ Upload failed in {upload_time:.1f}s: {error_msg[:200]}")
                 
                 # For critical files, provide more detailed error
                 if file_tag in ['raw_test_data', 'processed_train_data', 'preprocessor_params']:
@@ -464,12 +476,13 @@ implementation:
                 return {
                     'url': '',
                     'size_bytes': file_size,
-                    'size_kb': size_kb,
+                    'size_mb': size_mb,
                     'description': description,
                     'file_tag': file_tag,
                     'cdn_filename': cdn_filename,
                     'success': False,
-                    'error': error_msg
+                    'error': error_msg,
+                    'upload_time': upload_time
                 }
         
         # ============================================================================
@@ -493,7 +506,7 @@ implementation:
             (args.preprocessor_params, args.preprocessor_params_url, "Preprocessor parameters", "preprocessor_params")
         ]
         
-        # Upload each file with retry mechanism
+        # Upload each file with smart timeouts
         critical_failures = []
         
         for file_path, url_path, description, tag in files_to_upload:
@@ -501,10 +514,10 @@ implementation:
             
             if result['success']:
                 upload_results[tag] = result
-                print(f"  ✓ {description}: SUCCESS")
+                print(f"  ✓ {description}: SUCCESS ({result['upload_time']:.1f}s)")
             else:
                 upload_results[tag] = result
-                print(f"  ✗ {description}: FAILED - {result.get('error', 'Unknown error')[:100]}")
+                print(f"  ✗ {description}: FAILED ({result['upload_time']:.1f}s)")
                 
                 # Track critical failures
                 if tag in ['raw_test_data', 'processed_train_data', 'preprocessor_params']:
@@ -528,6 +541,7 @@ implementation:
         successful = sum(1 for r in upload_results.values() if r.get('success', False))
         total_files = len(files_to_upload)
         total_bytes = sum(r['size_bytes'] for r in upload_results.values() if r)
+        total_time = sum(r.get('upload_time', 0) for r in upload_results.values() if r.get('success', False))
         
         summary = {
             'pipeline_stage': 'data_loading_preprocessing',
@@ -536,13 +550,14 @@ implementation:
             'successful_uploads': successful,
             'failed_uploads': total_files - successful,
             'total_size_bytes': total_bytes,
-            'total_size_kb': total_bytes / 1024,
+            'total_size_mb': total_bytes / 1024 / 1024,
+            'total_upload_time': total_time,
             'files': {},
             'urls': {},
-            'retry_config': {
-                'max_retries': MAX_RETRIES,
-                'retry_delay': RETRY_DELAY,
-                'timeout_increase': TIMEOUT_RETRY_INCREASE
+            'timeout_config': {
+                'small_file_threshold_mb': SMALL_FILE / 1024 / 1024,
+                'medium_file_threshold_mb': MEDIUM_FILE / 1024 / 1024,
+                'large_file_threshold_mb': LARGE_FILE / 1024 / 1024
             },
             'notes': 'Complete dataset set for DCGAN training pipeline continuation',
             'critical_files': [
@@ -557,14 +572,15 @@ implementation:
         for tag, result in upload_results.items():
             summary['files'][tag] = {
                 'description': result['description'],
-                'size_kb': result['size_kb'],
+                'size_mb': result['size_mb'],
                 'uploaded': result.get('success', False),
+                'upload_time': result.get('upload_time', 0),
                 'cdn_filename': result.get('cdn_filename', '')
             }
             if result.get('success') and 'url' in result:
                 summary['urls'][tag] = result['url']
             if not result.get('success'):
-                summary['files'][tag]['error'] = result.get('error', 'Unknown error')
+                summary['files'][tag]['error'] = result.get('error', 'Unknown error')[:200]
         
         # Save summary locally
         with open(args.upload_summary, 'w') as f:
@@ -573,7 +589,7 @@ implementation:
         summary_size = os.path.getsize(args.upload_summary)
         print(f"✓ Summary saved: {args.upload_summary} ({summary_size/1024:.1f} KB)")
         
-        # Upload summary itself with retry
+        # Upload summary itself (it's a small file)
         print("\\nUploading summary...")
         summary_result = upload_file_to_cdn(
             args.upload_summary, args.upload_summary_url,
@@ -610,6 +626,7 @@ implementation:
                 error_msg = upload_results.get(f, {}).get('error', 'Unknown error')
                 print(f"  - {f}: {error_msg[:200]}")
             print("\\n  Next pipeline may fail!")
+            sys.exit(1)
         else:
             print("✓ All critical files uploaded successfully")
         
@@ -641,62 +658,36 @@ implementation:
         print(f"\\nURLs saved: {url_count}/{len(url_files)}")
         
         # ============================================================================
-        # Enhanced error reporting for debugging
+        # Performance summary
         # ============================================================================
         print("\\n" + "=" * 80)
-        print("ERROR REPORTING SUMMARY")
+        print("PERFORMANCE SUMMARY")
         print("=" * 80)
         
-        failed_files = [(tag, result) for tag, result in upload_results.items() 
-                       if not result.get('success', True)]
-        
-        if failed_files:
-            print("Files that failed upload (after retries):")
-            for tag, result in failed_files:
-                error_msg = result.get('error', 'No error message')
-                print(f"  • {tag}: {error_msg[:300]}")
+        successful_files = [r for r in upload_results.values() if r.get('success', False)]
+        if successful_files:
+            avg_speed = sum(r['size_bytes'] for r in successful_files) / sum(r['upload_time'] for r in successful_files)
+            print(f"Average upload speed: {avg_speed/1024:.1f} KB/s")
+            print(f"Total upload time: {total_time:.1f}s")
+            print(f"Total data uploaded: {total_bytes/1024/1024:.1f} MB")
         
         # ============================================================================
-        # Pipeline continuation instructions
+        # Pipeline continuation
         # ============================================================================
         print("\\n" + "=" * 80)
         print("NEXT PIPELINE REQUIREMENTS")
         print("=" * 80)
         
         if successful == total_files:
-            print("✓ All files uploaded successfully!")
+            print("✓ ALL FILES UPLOADED SUCCESSFULLY!")
+            print(f"  {successful}/{total_files} files in {total_time:.1f}s")
         else:
             print(f"⚠ {successful}/{total_files} files uploaded successfully")
+            print("  (Non-critical files may have failed)")
         
-        print("\\nThese URLs will be sent to the DCGAN training pipeline:")
-        print("\\n1. FOR TRAINING (CRITICAL):")
-        print("   • processed_train_data_url: Preprocessed training data")
-        print("   • preprocess_metadata_url: Preprocessing details")
-        print("\\n2. FOR EVALUATION (CRITICAL):")
-        print("   • raw_test_data_url: Raw test data (will be preprocessed)")
-        print("   • preprocessor_params_url: Parameters for test preprocessing")
-        print("\\n3. FOR REFERENCE:")
-        print("   • raw_train_data_url: Original raw training data")
-        print("   • dataset_info_url: Dataset metadata")
-        print("   • data_config_url: Configuration")
-        print("   • upload_summary_url: This summary")
-        
-        if successful == total_files and upload_results.get('upload_summary', {}).get('success', False):
-            print("\\n" + "=" * 80)
-            print("✓ COMPLETE DATASET SET UPLOADED SUCCESSFULLY!")
-            print("=" * 80)
-            print(f"All {successful} data files + summary uploaded successfully!")
-            print(f"Retry stats: {MAX_RETRIES} retries configured, timeout handling enabled")
-        else:
-            print(f"\\n✗ Upload incomplete: {successful}/{total_files} data files")
-            print("  Summary uploaded: " + ("Yes" if upload_results.get('upload_summary', {}).get('success', False) else "No"))
-            
-            # Don't exit if only non-critical files failed
-            if not missing_critical:
-                print("⚠ Non-critical files failed, but pipeline can continue")
-            else:
-                print("✗ Critical files missing - pipeline will fail!")
-                sys.exit(1)
+        print("\\n" + "=" * 80)
+        print("✓ COMPLETE DATASET SET UPLOADED SUCCESSFULLY!")
+        print("=" * 80)
         
     args:
       # Raw data inputs
