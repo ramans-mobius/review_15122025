@@ -1,4 +1,4 @@
-name: Train DCGAN v38 - WITH BLOCK TRAINING AND CONTINUAL LEARNING
+name: Train DCGAN v39 - WITH BLOCK TRAINING AND CONTINUAL LEARNING
 description: Trains DCGAN with Block Training for CAFO/FF and Adversarial Training, with optional Continual Learning via Experience Replay
 inputs:
   - name: data_path
@@ -353,7 +353,7 @@ implementation:
         replay_buffer = None
         
         if enable_cl:
-            print(f"🚀 CONTINUAL LEARNING ENABLED")
+            print(f" CONTINUAL LEARNING ENABLED")
             print(f"   Replay ratio: {replay_ratio}")
             print(f"   Memory capacity: {memory_capacity}")
             print(f"   Replay buffer path: {args.replay_buffer_path}")
@@ -365,14 +365,14 @@ implementation:
             if args.replay_buffer_path and os.path.exists(args.replay_buffer_path):
                 try:
                     replay_buffer.load(args.replay_buffer_path)
-                    print(f"   ✅ Loaded {len(replay_buffer)} samples from replay buffer")
+                    print(f"    Loaded {len(replay_buffer)} samples from replay buffer")
                 except Exception as e:
-                    print(f"   ⚠️ Could not load replay buffer: {e}")
+                    print(f"    Could not load replay buffer: {e}")
                     print("   Starting with empty buffer")
             else:
                 print("   Starting with empty replay buffer")
         else:
-            print("📝 STANDARD TRAINING (Continual Learning disabled)")
+            print(" STANDARD TRAINING (Continual Learning disabled)")
         
         # ============================================================================
         # CREATE ALL OUTPUT DIRECTORIES FIRST
