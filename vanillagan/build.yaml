@@ -1,0 +1,1195 @@
+name: Build Vanilla GAN Model v1
+description: Builds Vanilla GAN model using master config with fully connected architecture, with schema and CDN loading support
+inputs:
+  - name: gan_config_json
+    type: String
+    description: Master GAN configuration as JSON string
+  - name: model_name
+    type: String
+    description: Model name (vanilla_gan)
+  - name: load_from_schema
+    type: String
+    default: "false"
+    description: Whether to load from schema
+  - name: schema_id
+    type: String
+    default: ""
+    description: Schema ID for loading weights
+  - name: model_id
+    type: String
+    default: ""
+    description: Model ID for loading weights
+  - name: execution_id
+    type: String
+    default: ""
+    description: Execution ID for loading weights
+  - name: bearer_token
+    type: String
+    default: ""
+    description: Bearer token for API authentication
+  - name: load_from_cdn
+    type: String
+    default: "false"
+    description: Whether to load from CDN URL
+  - name: cdn_url
+    type: String
+    default: ""
+    description: CDN URL for loading model weights
+outputs:
+  - name: model_out
+    type: Model
+  - name: gan_config_base64_updated
+    type: String
+    description: Updated master GAN configuration (base64 encoded)
+  - name: model_info
+    type: String
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        pip install torchvision==0.15.2 requests --quiet
+        echo "Dependencies installed"
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import sys
+        import json
+        import pickle
+        import base64
+        import traceback
+        import time
+        import importlib.util
+        import urllib.request
+        import urllib.parse
+        import requests
+        import subprocess
+        import tempfile
+        
+        def get_file_size(file_path):
+            size_bytes = os.path.getsize(file_path)
+            for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                if size_bytes < 1024.0:
+                    return f"{size_bytes:.2f} {unit}"
+                size_bytes /= 1024.0
+            return f"{size_bytes:.2f} PB"
+        
+        def deep_merge(base_dict, override_dict):
+            result = base_dict.copy()
+            for key, value in override_dict.items():
+                if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = deep_merge(result[key], value)
+                else:
+                    result[key] = value
+            return result
+        
+        def decode_url(url):
+         
+            if not url:
+                return url
+            
+            # Remove newlines and extra spaces
+            url = url.replace('\\n', '').replace('\\r', '').replace('\\n', '').replace('\\r', '').strip()
+            
+            # First, decode standard URL encoding
+            decoded = urllib.parse.unquote(url)
+            
+            # Ensure we have exactly 2 $ signs before _V1_data.
+            # Replace any pattern with exactly 2 dollar signs
+            if '_$$_V1_data.' in decoded:
+                # Already has 2 dollar signs, keep as is
+                pass
+            elif '_%24%24_V1_data.' in decoded:
+                # Has encoded dollar signs, decode them
+                decoded = decoded.replace('_%24%24_V1_data.', '_$$_V1_data.')
+            elif '_$_V1_data.' in decoded:
+                # Has only 1 dollar sign, add another
+                decoded = decoded.replace('_$_V1_data.', '_$$_V1_data.')
+            elif '_$$$_V1_data.' in decoded:
+                # Has 3 dollar signs, reduce to 2
+                decoded = decoded.replace('_$$$_V1_data.', '_$$_V1_data.')
+            elif '_V1_data.' in decoded and '_$$_V1_data.' not in decoded:
+                # No dollar signs, add 2
+                decoded = decoded.replace('_V1_data.', '_$$_V1_data.')
+            
+            # Also handle parentheses encoding
+            decoded = decoded.replace('%28', '(')
+            decoded = decoded.replace('%29', ')')
+            
+            return decoded
+        
+        def query_schema_for_weights(schema_id, model_id, execution_id, bearer_token):
+            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list?size=1000"
+            
+            try:
+                execution_id_float = float(execution_id)
+                print(f"  Looking for execution_id: {execution_id_float} (as float)")
+            except ValueError:
+                print(f"  ERROR: execution_id must be a number. Got: {execution_id}")
+                return None, None
+            
+            filter_data = {
+                "dbType": "TIDB",
+                "ownedOnly": True,
+                "filter": {
+                    "model_id": str(model_id),
+                    "execution_id": execution_id_float
+                }
+            }
+            
+            try:
+                print(f"  Querying schema for model weights...")
+                print(f"  Schema URL: {schema_url}")
+                
+                curl_command = [
+                    "curl",
+                    "--location", schema_url,
+                    "--header", f"Authorization: Bearer {bearer_token}",
+                    "--header", "Content-Type: application/json",
+                    "--data", json.dumps(filter_data),
+                    "--fail",
+                    "--show-error",
+                    "--connect-timeout", "30",
+                    "--max-time", "120",
+                    "--silent"
+                ]
+                
+                print(f"  Executing curl command...")
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                
+                print(f"  Curl exit code: {process.returncode}")
+                
+                if process.returncode != 0:
+                    print(f"  Curl command failed with exit code {process.returncode}")
+                    print(f"  Stderr: {process.stderr[:500]}")
+                    return None, None
+                
+                print(f"  Raw response length: {len(process.stdout)} characters")
+                
+                try:
+                    response_json = json.loads(process.stdout)
+                    print(f"  Successfully parsed JSON response")
+                except json.JSONDecodeError as e:
+                    print(f"  FAILED to parse JSON response: {e}")
+                    print(f"  Response text (first 500 chars): {process.stdout[:500]}")
+                    return None, None
+                
+                if 'content' in response_json and len(response_json['content']) > 0:
+                    item = response_json['content'][0]
+                    
+                    if 'model_weights_cdn' in item:
+                        weights_url = item['model_weights_cdn']
+                        print(f"  Found model_weights_cdn in schema")
+                        print(f"  Original URL from schema: {weights_url[:100]}...")
+                        
+                        item_model_id = str(item.get('model_id', ''))
+                        item_exec_id = item.get('execution_id')
+                        
+                        try:
+                            item_exec_float = float(item_exec_id) if item_exec_id is not None else None
+                        except (ValueError, TypeError):
+                            item_exec_float = None
+                        
+                        if (item_model_id == str(model_id) and 
+                            item_exec_float is not None and
+                            abs(item_exec_float - execution_id_float) < 0.1):
+                            print(f"  Perfect match found!")
+                            print(f"  model_id: {item_model_id}, execution_id: {item_exec_float}")
+                            
+                            # Decode the URL, ensuring 2 dollar signs
+                            decoded_url = decode_url(weights_url)
+                            print(f"  Decoded URL (with 2 $$): {decoded_url[:100]}...")
+                            
+                            # Verify we have 2 dollar signs
+                            if '_$$_V1_data.' not in decoded_url:
+                                print(f"  WARNING: Decoded URL doesn't have _$$_V1_data. pattern")
+                                print(f"  URL contains: {decoded_url}")
+                            
+                            # Store both original and decoded
+                            item['original_cdn_url'] = weights_url
+                            item['decoded_cdn_url'] = decoded_url
+                            
+                            return decoded_url, item
+                        else:
+                            print(f"  Schema entry doesn't match criteria")
+                            print(f"  Expected: model_id={model_id}, execution_id={execution_id_float}")
+                            print(f"  Got: model_id={item_model_id}, execution_id={item_exec_id}")
+                    else:
+                        print(f"  No model_weights_cdn field in schema entry")
+                        print(f"  Available fields: {list(item.keys())}")
+                else:
+                    print(f"  No content found in schema response")
+                
+                return None, None
+                
+            except Exception as e:
+                print(f"  Error querying schema: {str(e)}")
+                traceback.print_exc()
+                return None
+        
+        def download_and_load_model(weights_url, gan_config):
+            try:
+                print(f"  Downloading model weights...")
+                print(f"  URL to download: {weights_url[:200]}...")
+                
+                # Ensure URL is properly decoded with 2 dollar signs
+                weights_url = decode_url(weights_url)
+                print(f"  Decoded URL (ensured 2 $$): {weights_url[:200]}...")
+                
+                # Verify we have the correct pattern
+                if '_$$_V1_data.' not in weights_url:
+                    print(f"  WARNING: URL doesn't contain _$$_V1_data. pattern")
+                    print(f"  URL pattern check: {weights_url}")
+                    # Try to fix it
+                    if '_V1_data.' in weights_url:
+                        weights_url = weights_url.replace('_V1_data.', '_$$_V1_data.')
+                        print(f"  Fixed URL pattern: {weights_url[:200]}...")
+                
+                # Clean any newlines
+                weights_url = weights_url.replace('\\n', '').replace('\\r', '').replace('\\n', '').replace('\\r', '').strip()
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
+                    tmp_path = tmp_file.name
+                
+                # Try multiple URL variations, all with 2 dollar signs
+                url_variations = []
+                
+                # Primary: The decoded URL with 2 $$
+                url_variations.append(("Decoded URL (2 $$)", weights_url))
+                
+                # Try with .pth extension if not present
+                if not weights_url.endswith('.pth'):
+                    pth_url = weights_url + '.pth'
+                    url_variations.append(("With .pth extension", pth_url))
+                    # Also try without _V1_data. suffix
+                    if '_$$_V1_data.' in pth_url:
+                        no_suffix = pth_url.replace('_$$_V1_data.', '')
+                        url_variations.append(("No _V1_data. suffix", no_suffix))
+                
+                # Try with 1 $ (just in case)
+                if '_$$_V1_data.' in weights_url:
+                    single_dollar = weights_url.replace('_$$_V1_data.', '_$_V1_data.')
+                    url_variations.append(("Single $", single_dollar))
+                
+                # Try with 3 $$$
+                if '_$$_V1_data.' in weights_url:
+                    triple_dollar = weights_url.replace('_$$_V1_data.', '_$$$_V1_data.')
+                    url_variations.append(("Triple $$$", triple_dollar))
+                
+                success = False
+                final_url = weights_url
+                file_size = 0
+                
+                for variation_name, test_url in url_variations:
+                    print(f"\\n  Attempt: {variation_name}")
+                    print(f"  Testing URL: {test_url[:200]}...")
+                    
+                    try:
+                        # Try with timeout
+                        for retry in range(2):
+                            try:
+                                print(f"   Retry {retry + 1}/2...")
+                                
+                                # Create request with headers
+                                req = urllib.request.Request(
+                                    test_url,
+                                    headers={
+                                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                                    }
+                                )
+                                
+                                with urllib.request.urlopen(req, timeout=30) as response:
+                                    with open(tmp_path, 'wb') as f:
+                                        f.write(response.read())
+                                
+                                file_size = os.path.getsize(tmp_path)
+                                
+                                if file_size > 1000:
+                                    print(f"   SUCCESS - Downloaded {file_size:,} bytes")
+                                    final_url = test_url
+                                    success = True
+                                    break
+                                else:
+                                    print(f"   WARNING - File too small ({file_size} bytes)")
+                                    if os.path.exists(tmp_path):
+                                        os.unlink(tmp_path)
+                                    continue
+                            except Exception as retry_error:
+                                if retry < 1:
+                                    print(f"   Retry failed: {retry_error}")
+                                    import time
+                                    time.sleep(1)
+                                else:
+                                    raise retry_error
+                        
+                        if success:
+                            break
+                            
+                    except Exception as e:
+                        print(f"   FAILED - {e}")
+                        if os.path.exists(tmp_path):
+                            try:
+                                os.unlink(tmp_path)
+                            except:
+                                pass
+                
+                if not success:
+                    print(f"  All URL variations failed")
+                    return None, None, None
+                
+                print(f"  Loading checkpoint...")
+                
+                try:
+                    import torch
+                    checkpoint = torch.load(tmp_path, map_location='cpu')
+                except ImportError:
+                    print(f"  PyTorch not available, using pickle")
+                    import pickle
+                    with open(tmp_path, 'rb') as f:
+                        checkpoint = pickle.load(f)
+                
+                print(f"  Checkpoint type: {type(checkpoint)}")
+                if isinstance(checkpoint, dict):
+                    print(f"  Checkpoint keys: {list(checkpoint.keys())}")
+                
+                # Extract model info from checkpoint
+                model_info = {}
+                if isinstance(checkpoint, dict):
+                    if 'model_info' in checkpoint:
+                        model_info = checkpoint['model_info']
+                    elif 'config' in checkpoint:
+                        config_dict = checkpoint['config']
+                        if isinstance(config_dict, dict):
+                            model_info = {
+                                'model_type': config_dict.get('model_type', 'vanilla_gan'),
+                                'input_dim': config_dict.get('input_dim', 784),
+                                'latent_dim': config_dict.get('latent_dim', 100),
+                                'generator_layers': config_dict.get('generator_layers', [256, 512, 1024]),
+                                'discriminator_layers': config_dict.get('discriminator_layers', [1024, 512, 256]),
+                                'training_algorithm': config_dict.get('training_algorithm', 'backprop'),
+                                'generator_params': config_dict.get('generator_params', 0),
+                                'discriminator_params': config_dict.get('discriminator_params', 0)
+                            }
+                
+                loaded_checkpoint = {
+                    'checkpoint': checkpoint,
+                    'model_info': model_info,
+                    'weights_url': final_url,
+                    'file_size': file_size
+                }
+                
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                print(f"  Model loaded successfully")
+                
+                return loaded_checkpoint, model_info
+                
+            except Exception as e:
+                print(f" Error loading model: {e}")
+                traceback.print_exc()
+                if 'tmp_path' in locals():
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.unlink(tmp_path)
+                    except:
+                        pass
+                return None, None
+        
+        parser = argparse.ArgumentParser(description='Vanilla GAN Model Builder')
+        parser.add_argument('--gan_config_json', type=str, required=True, help='Master GAN config as JSON string')
+        parser.add_argument('--model_name', type=str, required=True, help='Model name (vanilla_gan)')
+        parser.add_argument('--load_from_schema', type=str, default='false', help='Whether to load from schema')
+        parser.add_argument('--schema_id', type=str, default='', help='Schema ID for loading weights')
+        parser.add_argument('--model_id', type=str, default='', help='Model ID for loading weights')
+        parser.add_argument('--execution_id', type=str, default='', help='Execution ID for loading weights')
+        parser.add_argument('--bearer_token', type=str, default='', help='Bearer token for API authentication')
+        parser.add_argument('--load_from_cdn', type=str, default='false', help='Whether to load from CDN URL')
+        parser.add_argument('--cdn_url', type=str, default='', help='CDN URL for loading model weights')
+        parser.add_argument('--model_out', type=str, required=True, help='Output path for model')
+        parser.add_argument('--gan_config_base64_updated', type=str, required=True, help='Output path for updated config (base64)')
+        parser.add_argument('--model_info', type=str, required=True, help='Output path for model info')
+        args = parser.parse_args()
+        
+        print("VANILLA GAN MODEL BUILDER STARTING")
+        print("="*60)
+        print(f"gan_config_json length: {len(args.gan_config_json)}")
+        print(f"model_name: {args.model_name}")
+        print(f"load_from_schema: {args.load_from_schema}")
+        print(f"load_from_cdn: {args.load_from_cdn}")
+        
+        load_from_schema = args.load_from_schema.lower() == 'true'
+        load_from_cdn = args.load_from_cdn.lower() == 'true'
+        
+        # Parse JSON config
+        try:
+            gan_config = json.loads(args.gan_config_json)
+            print("Master GAN config parsed successfully")
+        except Exception as e:
+            print(f"Failed to parse JSON config: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        model_config = gan_config.get('model', {})
+        
+        # Force model type to vanilla_gan
+        model_config['gan_type'] = 'vanilla_gan'
+        model_type = 'vanilla_gan'
+        
+        # Import torch
+        try:
+            import torch
+            import torch.nn as nn
+            import torch.nn.functional as F
+            print(f"PyTorch version: {torch.__version__}")
+            print(f"CUDA available: {torch.cuda.is_available()}")
+        except ImportError as e:
+            print(f"Failed to import torch: {e}")
+            sys.exit(1)
+        
+        # Define Vanilla GAN architecture directly
+        class VanillaGenerator(nn.Module):
+            def __init__(self, latent_dim, output_dim, hidden_layers=[256, 512, 1024]):
+                super(VanillaGenerator, self).__init__()
+                self.latent_dim = latent_dim
+                self.output_dim = output_dim
+                
+                layers = []
+                input_dim = latent_dim
+                
+                # Hidden layers
+                for hidden_dim in hidden_layers:
+                    layers.append(nn.Linear(input_dim, hidden_dim))
+                    layers.append(nn.ReLU())
+                    input_dim = hidden_dim
+                
+                # Output layer
+                layers.append(nn.Linear(input_dim, output_dim))
+                layers.append(nn.Tanh())  # Output in range [-1, 1]
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, z):
+                return self.model(z)
+        
+        class VanillaDiscriminator(nn.Module):
+            def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
+                super(VanillaDiscriminator, self).__init__()
+                self.input_dim = input_dim
+                
+                layers = []
+                current_dim = input_dim
+                
+                # Hidden layers
+                for hidden_dim in hidden_layers:
+                    layers.append(nn.Linear(current_dim, hidden_dim))
+                    layers.append(nn.LeakyReLU(0.2))
+                    layers.append(nn.Dropout(0.3))
+                    current_dim = hidden_dim
+                
+                # Output layer
+                layers.append(nn.Linear(current_dim, 1))
+                layers.append(nn.Sigmoid())  # Output probability
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, x):
+                return self.model(x)
+        
+        # =============================================================================
+        # FORWARD-FORWARD DISCRIMINATOR IMPLEMENTATION
+        # =============================================================================
+        
+        class ForwardForwardDiscriminatorBlock(nn.Module):
+            def __init__(self, input_dim, output_dim, config):
+                super(ForwardForwardDiscriminatorBlock, self).__init__()
+                self.config = config
+                
+                # Main transformation
+                self.linear = nn.Linear(input_dim, output_dim)
+                self.activation = nn.LeakyReLU(0.2)
+                self.dropout = nn.Dropout(config.get('discriminator_dropout', 0.3))
+                
+                # Local predictor for this block
+                self.local_predictor = nn.Sequential(
+                    nn.Linear(output_dim, 128),
+                    nn.ReLU(),
+                    nn.Linear(128, 1),
+                    nn.Sigmoid()
+                )
+            
+            def forward(self, x):
+                x = self.linear(x)
+                x = self.activation(x)
+                x = self.dropout(x)
+                return x
+            
+            def compute_goodness(self, x):
+                # Goodness based on squared activations (power/activity level)
+                return torch.sum(x**2, dim=-1)
+            
+            def forward_forward_loss(self, pos_goodness, neg_goodness):
+                theta = self.config.get('ff_theta', 2.0)
+                pos_margin = self.config.get('ff_positive_margin', 2.0)
+                neg_margin = self.config.get('ff_negative_margin', 0.0)
+                
+                pos_loss = torch.log(1 + torch.exp(-(pos_goodness - theta - pos_margin)))
+                neg_loss = torch.log(1 + torch.exp(neg_goodness - theta + neg_margin))
+                
+                return pos_loss.mean() + neg_loss.mean()
+        
+        class ForwardForwardDiscriminator(nn.Module):
+            def __init__(self, input_dim, hidden_layers, config):
+                super(ForwardForwardDiscriminator, self).__init__()
+                self.config = config
+                self.ff_trained = False
+                
+                # Create FF blocks
+                self.blocks = nn.ModuleList()
+                current_dim = input_dim
+                
+                for hidden_dim in hidden_layers:
+                    block = ForwardForwardDiscriminatorBlock(current_dim, hidden_dim, config)
+                    self.blocks.append(block)
+                    current_dim = hidden_dim
+                
+                # Final classification layer
+                self.final_layer = nn.Sequential(
+                    nn.Linear(current_dim, 1),
+                    nn.Sigmoid()
+                )
+            
+            def forward(self, x, return_layers=False):
+                x = x.view(x.size(0), -1)
+                
+                if return_layers:
+                    layer_outputs = []
+                
+                h = x
+                for block in self.blocks:
+                    h = block(h)
+                    if return_layers:
+                        layer_outputs.append(h)
+                
+                output = self.final_layer(h).view(-1)
+                
+                if return_layers:
+                    return output, layer_outputs
+                return output
+            
+            def forward_single_block(self, x, block_idx):
+                x = x.view(x.size(0), -1)
+                
+                h = x
+                for i in range(block_idx + 1):
+                    h = self.blocks[i](h)
+                return h
+        
+        # =============================================================================
+        # CAFO DISCRIMINATOR IMPLEMENTATION
+        # =============================================================================
+        
+        class CAFODiscriminatorBlock(nn.Module):
+            def __init__(self, input_dim, output_dim, config):
+                super(CAFODiscriminatorBlock, self).__init__()
+                self.config = config
+                
+                # Main transformation
+                self.linear = nn.Linear(input_dim, output_dim)
+                self.activation = nn.LeakyReLU(0.2)
+                self.dropout = nn.Dropout(config.get('discriminator_dropout', 0.3))
+                
+                # Local predictor for this block
+                self.local_predictor = nn.Sequential(
+                    nn.Linear(output_dim, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, 1),
+                    nn.Sigmoid()
+                )
+            
+            def forward(self, x):
+                x = self.linear(x)
+                x = self.activation(x)
+                x = self.dropout(x)
+                return x
+        
+        class CAFODiscriminator(nn.Module):
+            def __init__(self, input_dim, hidden_layers, config):
+                super(CAFODiscriminator, self).__init__()
+                self.config = config
+                self.cafo_trained = False
+                
+                # Create CAFO blocks
+                self.blocks = nn.ModuleList()
+                current_dim = input_dim
+                
+                for hidden_dim in hidden_layers:
+                    block = CAFODiscriminatorBlock(current_dim, hidden_dim, config)
+                    self.blocks.append(block)
+                    current_dim = hidden_dim
+                
+                # Final classification layer
+                self.final_layer = nn.Sequential(
+                    nn.Linear(current_dim, 1),
+                    nn.Sigmoid()
+                )
+            
+            def forward(self, x):
+                x = x.view(x.size(0), -1)
+                
+                h = x
+                for block in self.blocks:
+                    h = block(h)
+                
+                return self.final_layer(h).view(-1)
+        
+        class VanillaGANConfig:
+            def __init__(self, input_dim=784, latent_dim=100, generator_layers=[256, 512, 1024], 
+                         discriminator_layers=[1024, 512, 256], lr=0.0002, batch_size=64, 
+                         epochs=200, device='cpu', **kwargs):
+                self.input_dim = input_dim
+                self.latent_dim = latent_dim
+                self.generator_layers = generator_layers
+                self.discriminator_layers = discriminator_layers
+                self.lr = lr
+                self.batch_size = batch_size
+                self.epochs = epochs
+                self.device = device
+                
+                # Additional config items
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+        
+        class VanillaGAN:
+            def __init__(self, config):
+                self.config = config
+                self.device = torch.device(config.device)
+                
+                # Create generator
+                self.generator = VanillaGenerator(
+                    config.latent_dim, 
+                    config.input_dim, 
+                    config.generator_layers
+                ).to(self.device)
+                
+                # Create discriminator based on algorithm
+                algorithm = getattr(config, 'training_algorithm', 'backprop')
+                if algorithm == 'forward_forward':
+                    self.discriminator = ForwardForwardDiscriminator(
+                        config.input_dim, 
+                        config.discriminator_layers,
+                        config.__dict__
+                    ).to(self.device)
+                    print(f"Created Forward-Forward discriminator with {len(config.discriminator_layers)} blocks")
+                elif algorithm == 'cafo':
+                    self.discriminator = CAFODiscriminator(
+                        config.input_dim, 
+                        config.discriminator_layers,
+                        config.__dict__
+                    ).to(self.device)
+                    print(f"Created CAFO discriminator with {len(config.discriminator_layers)} blocks")
+                else:
+                    self.discriminator = VanillaDiscriminator(
+                        config.input_dim, 
+                        config.discriminator_layers
+                    ).to(self.device)
+                    print("Created standard Vanilla discriminator")
+                
+                # Initialize weights
+                self._initialize_weights()
+                
+                # Optimizers
+                self.g_optimizer = torch.optim.Adam(
+                    self.generator.parameters(), 
+                    lr=config.lr, 
+                    betas=(0.5, 0.999)
+                )
+                self.d_optimizer = torch.optim.Adam(
+                    self.discriminator.parameters(), 
+                    lr=config.lr, 
+                    betas=(0.5, 0.999)
+                )
+                
+                # Loss function
+                self.criterion = nn.BCELoss()
+                
+                print(f"Vanilla GAN initialized:")
+                print(f"  Generator: {sum(p.numel() for p in self.generator.parameters())} parameters")
+                print(f"  Discriminator: {sum(p.numel() for p in self.discriminator.parameters())} parameters")
+                print(f"  Device: {self.device}")
+            
+            def _initialize_weights(self):
+                for module in [self.generator, self.discriminator]:
+                    for m in module.modules():
+                        if isinstance(m, nn.Linear):
+                            nn.init.normal_(m.weight.data, 0.0, 0.02)
+                            if m.bias is not None:
+                                nn.init.constant_(m.bias.data, 0)
+            
+            def generate_samples(self, num_samples):
+                self.generator.eval()
+                with torch.no_grad():
+                    z = torch.randn(num_samples, self.config.latent_dim, device=self.device)
+                    samples = self.generator(z)
+                return samples
+            
+            def get_model_info(self):
+                algorithm = getattr(self.config, 'training_algorithm', 'backprop')
+                discriminator_type = 'standard'
+                if algorithm == 'forward_forward':
+                    discriminator_type = 'forward_forward'
+                elif algorithm == 'cafo':
+                    discriminator_type = 'cafo'
+                
+                return {
+                    'model_type': 'vanilla_gan',
+                    'input_dim': self.config.input_dim,
+                    'latent_dim': self.config.latent_dim,
+                    'generator_layers': self.config.generator_layers,
+                    'discriminator_layers': self.config.discriminator_layers,
+                    'training_algorithm': algorithm,
+                    'discriminator_type': discriminator_type,
+                    'use_forward_forward': getattr(self.config, 'use_forward_forward', False),
+                    'use_cafo': getattr(self.config, 'use_cafo', False),
+                    'device': str(self.device),
+                    'generator_params': sum(p.numel() for p in self.generator.parameters()),
+                    'discriminator_params': sum(p.numel() for p in self.discriminator.parameters())
+                }
+        
+        model = None
+        source = "new_build"
+        loaded_checkpoint_info = None
+        model_info_data = {}
+        
+        # Handle schema/CDN loading
+        if load_from_schema:
+            print(f"\\n" + "=" * 80)
+            print(f"MODE 1: Loading from Schema")
+            print("=" * 80)
+            
+            if not all([args.schema_id, args.model_id, args.execution_id, args.bearer_token]):
+                print(" ERROR: schema_id, model_id, execution_id, and bearer_token are required when load_from_schema=true")
+                sys.exit(1)
+            
+            print(f"Schema ID: {args.schema_id}")
+            print(f"Model ID: {args.model_id}")
+            print(f"Execution ID: {args.execution_id}")
+            
+            weights_url, schema_instance = query_schema_for_weights(
+                args.schema_id, args.model_id, args.execution_id, args.bearer_token
+            )
+            
+            if weights_url:
+                print(f"\\n" + "=" * 80)
+                print(f"Loading model from schema URL...")
+                print("=" * 80)
+                loaded_checkpoint, loaded_model_info = download_and_load_model(weights_url, gan_config)
+                source = "schema"
+                
+                if loaded_checkpoint:
+                    loaded_checkpoint_info = loaded_checkpoint
+                    model_info_data = loaded_model_info
+                    model_info_data['schema_id'] = args.schema_id
+                    model_info_data['model_id'] = args.model_id
+                    model_info_data['execution_id'] = args.execution_id
+                    if schema_instance:
+                        model_info_data['schema_instance'] = {
+                            'created_at': schema_instance.get('created_at'),
+                            'source': schema_instance.get('source'),
+                            'parameter_count': schema_instance.get('parameter_count')
+                        }
+                    print(f"\\nSUCCESS - Model loaded from schema successfully")
+                else:
+                    print(f"\\nFAILED - Failed to load model from schema URL")
+                    sys.exit(1)
+            else:
+                print(f"\\nWARNING - No weights URL found in schema, falling back to build mode")
+                load_from_schema = False
+        
+        if not loaded_checkpoint_info and load_from_cdn:
+            print(f"\\n" + "=" * 80)
+            print(f"MODE 2: Loading from CDN URL")
+            print("=" * 80)
+            
+            if not args.cdn_url:
+                print(" ERROR: cdn_url is required when load_from_cdn=true")
+                sys.exit(1)
+            
+            print(f"  Loading model from CDN URL: {args.cdn_url[:200]}...")
+            # Decode the CDN URL, ensuring 2 dollar signs
+            cdn_url_decoded = decode_url(args.cdn_url)
+            loaded_checkpoint, loaded_model_info = download_and_load_model(cdn_url_decoded, gan_config)
+            source = "cdn"
+            
+            if loaded_checkpoint:
+                loaded_checkpoint_info = loaded_checkpoint
+                model_info_data = loaded_model_info
+                model_info_data['cdn_url'] = args.cdn_url
+                model_info_data['cdn_url_decoded'] = cdn_url_decoded
+                print(f"SUCCESS - Model loaded from CDN successfully")
+            else:
+                print(f"FAILED - Failed to load model from CDN URL")
+                sys.exit(1)
+        
+        # Get algorithm configuration
+        algorithm = model_config.get('training_algorithm', 'backprop')
+        use_forward_forward = model_config.get('use_forward_forward', False)
+        use_cafo = model_config.get('use_cafo', False)
+        
+        # Handle boolean overrides
+        if use_forward_forward:
+            algorithm = 'forward_forward'
+        elif use_cafo:
+            algorithm = 'cafo'
+        
+        print(f"Building {model_type.upper()} with {algorithm.upper()} algorithm")
+        print(f"Forward-Forward: {use_forward_forward}, CAFO: {use_cafo}")
+        
+        # Build or load Vanilla GAN model
+        if loaded_checkpoint_info:
+            print(f"\\n" + "=" * 80)
+            print(f"Using loaded model from {source}")
+            print("=" * 80)
+            
+            try:
+                # Extract config from loaded model info or use defaults
+                if model_info_data:
+                    input_dim = model_info_data.get('input_dim', model_config.get('input_dim', 784))
+                    latent_dim = model_info_data.get('latent_dim', model_config.get('latent_dim', 100))
+                    generator_layers = model_info_data.get('generator_layers', model_config.get('generator_layers', [256, 512, 1024]))
+                    discriminator_layers = model_info_data.get('discriminator_layers', model_config.get('discriminator_layers', [1024, 512, 256]))
+                    training_algorithm = model_info_data.get('training_algorithm', algorithm)
+                else:
+                    input_dim = model_config.get('input_dim', 784)
+                    latent_dim = model_config.get('latent_dim', 100)
+                    generator_layers = model_config.get('generator_layers', [256, 512, 1024])
+                    discriminator_layers = model_config.get('discriminator_layers', [1024, 512, 256])
+                    training_algorithm = algorithm
+                
+                # Create config
+                vanilla_config_dict = {
+                    'input_dim': input_dim,
+                    'latent_dim': latent_dim,
+                    'generator_layers': generator_layers,
+                    'discriminator_layers': discriminator_layers,
+                    'lr': model_config.get('learning_rate', 0.0002),
+                    'batch_size': model_config.get('batch_size', 64),
+                    'epochs': model_config.get('epochs', 200),
+                    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+                    'training_algorithm': training_algorithm,
+                    'use_forward_forward': use_forward_forward,
+                    'use_cafo': use_cafo,
+                    'use_wgan': model_config.get('use_wgan', False),
+                    'ff_theta': model_config.get('ff_theta', 2.0),
+                    'ff_positive_margin': model_config.get('ff_positive_margin', 2.0),
+                    'ff_negative_margin': model_config.get('ff_negative_margin', 0.0),
+                    'ff_blocks': model_config.get('ff_blocks', 3),
+                    'ff_epochs_per_block': model_config.get('ff_epochs_per_block', 10),
+                    'cafo_blocks': model_config.get('cafo_blocks', 3),
+                    'epochs_per_block': model_config.get('epochs_per_block', 10),
+                    'block_lr': model_config.get('block_lr', 0.001),
+                    'discriminator_dropout': model_config.get('discriminator_dropout', 0.3)
+                }
+                
+                vanilla_config = VanillaGANConfig(**vanilla_config_dict)
+                model = VanillaGAN(vanilla_config)
+                
+                # Load weights from checkpoint
+                checkpoint = loaded_checkpoint_info['checkpoint']
+                if isinstance(checkpoint, dict):
+                    if 'generator_state_dict' in checkpoint:
+                        model.generator.load_state_dict(checkpoint['generator_state_dict'])
+                        print(f"   Loaded generator weights")
+                    
+                    if 'discriminator_state_dict' in checkpoint:
+                        model.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+                        print(f"   Loaded discriminator weights")
+                    
+                    if 'model_state_dict' in checkpoint:
+                        try:
+                            model.generator.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                            print(f"   Loaded model_state_dict (generator)")
+                        except:
+                            print(f"   Could not load model_state_dict")
+                else:
+                    try:
+                        model.generator.load_state_dict(checkpoint)
+                        print(f"   Loaded checkpoint as generator weights")
+                    except:
+                        print(f"   Could not load weights directly")
+                
+                print(f"Model loaded from {source} successfully")
+                    
+            except Exception as e:
+                print(f"Failed to load model from {source}: {e}")
+                traceback.print_exc()
+                print("Falling back to building new model")
+                loaded_checkpoint_info = None
+        
+        if not model:
+            print(f"\\n" + "=" * 80)
+            print(f"MODE 3: Building new model")
+            print("=" * 80)
+            
+            try:
+                print("Creating Vanilla GAN model...")
+                
+                # Extract configuration from master config
+                vanilla_config_dict = {
+                    'input_dim': model_config.get('input_dim', 784),
+                    'latent_dim': model_config.get('latent_dim', 100),
+                    'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
+                    'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
+                    'lr': model_config.get('learning_rate', 0.0002),
+                    'batch_size': model_config.get('batch_size', 64),
+                    'epochs': model_config.get('epochs', 200),
+                    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+                    'training_algorithm': algorithm,
+                    'use_forward_forward': use_forward_forward,
+                    'use_cafo': use_cafo,
+                    'use_wgan': model_config.get('use_wgan', False),
+                    'ff_theta': model_config.get('ff_theta', 2.0),
+                    'ff_positive_margin': model_config.get('ff_positive_margin', 2.0),
+                    'ff_negative_margin': model_config.get('ff_negative_margin', 0.0),
+                    'ff_blocks': model_config.get('ff_blocks', 3),
+                    'ff_epochs_per_block': model_config.get('ff_epochs_per_block', 10),
+                    'cafo_blocks': model_config.get('cafo_blocks', 3),
+                    'epochs_per_block': model_config.get('epochs_per_block', 10),
+                    'block_lr': model_config.get('block_lr', 0.001),
+                    'discriminator_dropout': model_config.get('discriminator_dropout', 0.3)
+                }
+                
+                print(f"Vanilla GAN config: {vanilla_config_dict}")
+                vanilla_config = VanillaGANConfig(**vanilla_config_dict)
+                model = VanillaGAN(vanilla_config)
+                
+                print("Vanilla GAN model created successfully")
+                    
+            except Exception as e:
+                print(f"Failed to create Vanilla GAN model: {e}")
+                traceback.print_exc()
+                sys.exit(1)
+        
+        if model is None:
+            print("Model creation failed")
+            sys.exit(1)
+        
+        # Test model
+        print("Testing Vanilla GAN model...")
+        try:
+            # Test generator
+            z = torch.randn(4, model.config.latent_dim, device=model.device)
+            with torch.no_grad():
+                samples = model.generator(z)
+            print(f"Generator test passed. Output shape: {samples.shape}")
+            
+            # Test discriminator
+            fake_data = torch.randn(4, model.config.input_dim, device=model.device)
+            with torch.no_grad():
+                pred = model.discriminator(fake_data)
+            print(f"Discriminator test passed. Output shape: {pred.shape}")
+            
+        except Exception as e:
+            print(f"Model test failed: {e}")
+            traceback.print_exc()
+        
+        # Update master config with build information
+        model_info = model.get_model_info()
+        gan_config['model'].update({
+            'model_built': True,
+            'model_class': 'VanillaGAN',
+            'architecture': 'fully_connected',
+            'latent_dim': model.config.latent_dim,
+            'input_dim': model.config.input_dim,
+            'generator_layers': model.config.generator_layers,
+            'discriminator_layers': model.config.discriminator_layers,
+            'training_algorithm': algorithm,
+            'discriminator_type': model_info['discriminator_type'],
+            'use_forward_forward': use_forward_forward,
+            'use_cafo': use_cafo,
+            'generator_params': sum(p.numel() for p in model.generator.parameters()),
+            'discriminator_params': sum(p.numel() for p in model.discriminator.parameters()),
+            'built_timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'device': str(model.device),
+            'model_source': source
+        })
+        
+        if source == "schema":
+            gan_config['model']['schema_id'] = args.schema_id
+            gan_config['model']['model_id'] = args.model_id
+            gan_config['model']['execution_id'] = args.execution_id
+        elif source == "cdn":
+            gan_config['model']['cdn_url'] = args.cdn_url
+        
+        gan_config['metadata'].update({
+            'built_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'build_step': 'completed',
+            'model_created': True,
+            'model_type': 'vanilla_gan',
+            'architecture_type': 'fully_connected',
+            'model_source': source
+        })
+        
+        # Create detailed model info
+        model_info_data = {
+            'model_type': 'vanilla_gan',
+            'model_name': args.model_name,
+            'build_status': 'success',
+            'model_class': 'VanillaGAN',
+            'architecture': 'fully_connected',
+            'latent_dim': model.config.latent_dim,
+            'input_dim': model.config.input_dim,
+            'generator_layers': model.config.generator_layers,
+            'discriminator_layers': model.config.discriminator_layers,
+            'training_algorithm': algorithm,
+            'discriminator_type': model_info['discriminator_type'],
+            'model_source': source,
+            'algorithm_config': {
+                'use_forward_forward': use_forward_forward,
+                'use_cafo': use_cafo,
+                'ff_theta': vanilla_config_dict.get('ff_theta', 2.0),
+                'ff_positive_margin': vanilla_config_dict.get('ff_positive_margin', 2.0),
+                'ff_negative_margin': vanilla_config_dict.get('ff_negative_margin', 0.0),
+                'ff_blocks': vanilla_config_dict.get('ff_blocks', 3),
+                'cafo_blocks': vanilla_config_dict.get('cafo_blocks', 3)
+            },
+            'total_parameters': {
+                'generator': sum(p.numel() for p in model.generator.parameters()),
+                'discriminator': sum(p.numel() for p in model.discriminator.parameters()),
+                'total': sum(p.numel() for p in model.generator.parameters()) + sum(p.numel() for p in model.discriminator.parameters())
+            },
+            'config': vanilla_config_dict,
+            'pytorch_version': torch.__version__,
+            'cuda_available': torch.cuda.is_available(),
+            'device': str(model.device),
+            'build_timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'data_format': 'flattened_vectors'
+        }
+        
+        if source == "schema":
+            model_info_data['schema_id'] = args.schema_id
+            model_info_data['model_id'] = args.model_id
+            model_info_data['execution_id'] = args.execution_id
+            if loaded_checkpoint_info:
+                model_info_data['weights_url'] = loaded_checkpoint_info.get('weights_url', '')
+                model_info_data['weights_url_original'] = schema_instance.get('original_cdn_url', '') if schema_instance else ''
+                model_info_data['downloaded_file_size'] = loaded_checkpoint_info.get('file_size', 0)
+        elif source == "cdn":
+            model_info_data['cdn_url'] = args.cdn_url
+            model_info_data['cdn_url_decoded'] = decode_url(args.cdn_url) if args.cdn_url else ''
+            if loaded_checkpoint_info:
+                model_info_data['weights_url'] = loaded_checkpoint_info.get('weights_url', '')
+                model_info_data['downloaded_file_size'] = loaded_checkpoint_info.get('file_size', 0)
+        
+        # Encode updated config to base64
+        updated_config_json = json.dumps(gan_config, indent=2)
+        updated_config_base64 = base64.b64encode(updated_config_json.encode('utf-8')).decode('utf-8')
+        
+        # Save outputs with better error handling
+        print("Saving model outputs...")
+        
+        # Save model
+        os.makedirs(os.path.dirname(args.model_out) or '.', exist_ok=True)
+        try:
+            # Create a simplified model wrapper for reliable pickling
+            class VanillaGANWrapper:
+                def __init__(self, model_obj, source_info=None):
+                    self.model_type = 'vanilla_gan'
+                    self.config = model_obj.config.__dict__
+                    self.generator_state = model_obj.generator.state_dict()
+                    self.discriminator_state = model_obj.discriminator.state_dict()
+                    self.generator_arch = model_obj.generator
+                    self.discriminator_arch = model_obj.discriminator
+                    self.device = str(model_obj.device)
+                    self.model_info = model_obj.get_model_info()
+                    self.source = source
+                    if source_info:
+                        self.source_info = source_info
+            
+            wrapper = VanillaGANWrapper(model, loaded_checkpoint_info)
+            with open(args.model_out, 'wb') as f:
+                pickle.dump(wrapper, f, protocol=pickle.HIGHEST_PROTOCOL)
+            model_file_size = get_file_size(args.model_out)
+            print(f"Model saved successfully: {args.model_out} ({model_file_size})")
+            
+        except Exception as e:
+            print(f"Failed to save full model, saving state dict: {e}")
+            # Fallback: save only state dicts and config
+            model_state = {
+                'model_type': 'vanilla_gan',
+                'config': vanilla_config_dict,
+                'generator_state_dict': model.generator.state_dict(),
+                'discriminator_state_dict': model.discriminator.state_dict(),
+                'model_info': model.get_model_info(),
+                'source': source,
+                'source_info': loaded_checkpoint_info
+            }
+            with open(args.model_out, 'wb') as f:
+                pickle.dump(model_state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            model_file_size = get_file_size(args.model_out)
+            print(f"Model state saved: {args.model_out} ({model_file_size})")
+        
+        # Save updated config
+        os.makedirs(os.path.dirname(args.gan_config_base64_updated) or '.', exist_ok=True)
+        with open(args.gan_config_base64_updated, 'w') as f:
+            f.write(updated_config_base64)
+        
+        # Save model info
+        os.makedirs(os.path.dirname(args.model_info) or '.', exist_ok=True)
+        model_info_data['model_file_size'] = model_file_size
+        with open(args.model_info, 'w') as f:
+            json.dump(model_info_data, f, indent=2)
+        
+        print("="*60)
+        print("Vanilla GAN Build completed successfully")
+        print(f"Source: {source.upper()}")
+        print(f"Algorithm: {algorithm.upper()}")
+        print(f"Discriminator Type: {model_info['discriminator_type']}")
+        print(f"Forward-Forward: {use_forward_forward}")
+        print(f"CAFO: {use_cafo}")
+        print(f"Model saved: {args.model_out}")
+        print(f"Model file size: {model_file_size}")
+        print(f"Config (base64) saved: {args.gan_config_base64_updated}")
+        print(f"Model info saved: {args.model_info}")
+        print(f"Generator parameters: {sum(p.numel() for p in model.generator.parameters()):,}")
+        print(f"Discriminator parameters: {sum(p.numel() for p in model.discriminator.parameters()):,}")
+        print(f"Total parameters: {sum(p.numel() for p in model.generator.parameters()) + sum(p.numel() for p in model.discriminator.parameters()):,}")
+        print(f"Device: {model.device}")
+        print("="*60)
+
+    args:
+      - --gan_config_json
+      - {inputValue: gan_config_json}
+      - --model_name
+      - {inputValue: model_name}
+      - --load_from_schema
+      - {inputValue: load_from_schema}
+      - --schema_id
+      - {inputValue: schema_id}
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --bearer_token
+      - {inputValue: bearer_token}
+      - --load_from_cdn
+      - {inputValue: load_from_cdn}
+      - --cdn_url
+      - {inputValue: cdn_url}
+      - --model_out
+      - {outputPath: model_out}
+      - --gan_config_base64_updated
+      - {outputPath: gan_config_base64_updated}
+      - --model_info
+      - {outputPath: model_info}
