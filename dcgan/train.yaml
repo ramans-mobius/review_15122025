@@ -1,4 +1,4 @@
-name: Train DCGAN v39 - WITH BLOCK TRAINING AND CONTINUAL LEARNING
+name: Train DCGAN v40 - WITH BLOCK TRAINING AND CONTINUAL LEARNING
 description: Trains DCGAN with Block Training for CAFO/FF and Adversarial Training, with optional Continual Learning via Experience Replay
 inputs:
   - name: data_path
@@ -94,10 +94,6 @@ implementation:
         print(f"Python version: {sys.version}")
         print(f"Torch version: {torch.__version__}")
         
-        # ============================================================================
-        # CONTINUAL LEARNING COMPONENTS (ADDED)
-        # ============================================================================
-        
         class DCGANReplayBuffer:
         
             def __init__(self, capacity=500):
@@ -152,11 +148,7 @@ implementation:
             
             def __len__(self):
                 return len(self.buffer)
-        
-        # ============================================================================
-        # CREATE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
-        # ============================================================================
-        
+                
         print("\\n" + "-" * 40)
         print("DEFINING COMPATIBILITY CLASSES")
         print("-" * 40)
@@ -251,11 +243,7 @@ implementation:
                 return img
         
         print("COMPATIBILITY: Compatibility classes defined")
-        
-        # ============================================================================
-        # IMPORT DCGAN WITH FALLBACKS
-        # ============================================================================
-        
+
         print("\\n" + "-" * 40)
         print("IMPORTING DCGAN MODULES")
         print("-" * 40)
@@ -312,10 +300,6 @@ implementation:
             traceback.print_exc()
             sys.exit(1)
         
-        # ============================================================================
-        # MAIN CODE
-        # ============================================================================
-        
         parser = argparse.ArgumentParser()
         # Existing parameters
         parser.add_argument("--data_path", required=True)
@@ -342,11 +326,7 @@ implementation:
         print("\\n" + "="*80)
         print("DCGAN TRAINING v36 - WITH CONTINUAL LEARNING")
         print("="*80)
-        
-        # ============================================================================
-        # SETUP CONTINUAL LEARNING (ADDED)
-        # ============================================================================
-        
+
         enable_cl = args.enable_continual_learning.lower() == 'true'
         replay_ratio = float(args.replay_ratio)
         memory_capacity = int(args.memory_capacity)
@@ -373,10 +353,7 @@ implementation:
                 print("   Starting with empty replay buffer")
         else:
             print(" STANDARD TRAINING (Continual Learning disabled)")
-        
-        # ============================================================================
-        # CREATE ALL OUTPUT DIRECTORIES FIRST
-        # ============================================================================
+
         print("\\n" + "-" * 40)
         print("CREATING OUTPUT DIRECTORIES")
         print("-" * 40)
@@ -398,10 +375,6 @@ implementation:
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
                     print(f"  DIRECTORY: Created: {dir_path}")
-        
-        # ============================================================================
-        # PARSE CONFIG AND SETUP
-        # ============================================================================
         
         print("\\n" + "-" * 40)
         print("PARSING MASTER CONFIG")
@@ -425,10 +398,6 @@ implementation:
             print(f"ERROR: parsing master_config: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
-        # ============================================================================
-        # LOAD DATASET - COMPATIBLE WITH PREPROCESS v1 OUTPUT
-        # ============================================================================
         
         print("\\n" + "-" * 40)
         print("LOADING DATASET")
@@ -560,10 +529,7 @@ implementation:
         print(f"   SIZE: Dataset size: {len(train_dataset)}")
         print(f"   BATCH: Batch size: {actual_batch_size}")
         print(f"   BATCHES: Batches per epoch: {len(dataloader)}")
-        
-        # ============================================================================
-        # LOAD MODEL AND SETUP TRAINER
-        # ============================================================================
+
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"\\n" + "-" * 40)
@@ -706,10 +672,6 @@ implementation:
             print(f"ERROR: setting up trainer: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
-        # ============================================================================
-        # PHASE 1: BLOCK TRAINING (For CAFO and Forward-Forward)
-        # ============================================================================
         
         block_training_results = {}
         
@@ -966,10 +928,6 @@ implementation:
                 traceback.print_exc()
                 block_training_results['error'] = str(e)
         
-        # ============================================================================
-        # PHASE 2: ADVERSARIAL TRAINING WITH CONTINUAL LEARNING SUPPORT
-        # ============================================================================
-        
         print(f"\\n" + "="*60)
         print(f"PHASE 2: ADVERSARIAL TRAINING")
         if enable_cl:
@@ -1010,11 +968,7 @@ implementation:
                     # Get real data
                     real_data = batch_data.to(device)
                     batch_size_real = real_data.size(0)
-                    
-                    # ====================================================================
-                    # TRAIN DISCRIMINATOR WITH CONTINUAL LEARNING SUPPORT
-                    # ====================================================================
-                    
+
                     if hasattr(trainer, 'disc_optimizer'):
                         trainer.disc_optimizer.zero_grad()
                     
@@ -1069,9 +1023,6 @@ implementation:
                     if hasattr(trainer, 'disc_optimizer'):
                         trainer.disc_optimizer.step()
                     
-                    # ====================================================================
-                    # TRAIN GENERATOR (No changes needed for CL)
-                    # ====================================================================
                     
                     if hasattr(trainer, 'gen_optimizer'):
                         trainer.gen_optimizer.zero_grad()
@@ -1137,10 +1088,7 @@ implementation:
             print(f"ERROR: during training: {e}")
             traceback.print_exc()
             training_success = False
-        
-        # ============================================================================
-        # GENERATE SAMPLES
-        # ============================================================================
+
         
         print(f"\\nGENERATING SAMPLES...")
         
@@ -1164,10 +1112,7 @@ implementation:
             print(f"ERROR: generating samples: {e}")
             traceback.print_exc()
             samples = torch.randn(16, channels, image_size, image_size) * 0.5 + 0.5
-        
-        # ============================================================================
-        # SAVE BLOCK TRAINING LOGS
-        # ============================================================================
+
         
         print(f"\\nSAVING BLOCK TRAINING LOGS...")
         
@@ -1179,10 +1124,7 @@ implementation:
             
         except Exception as e:
             print(f"ERROR: saving block training logs: {e}")
-        
-        # ============================================================================
-        # SAVE REPLAY BUFFER FOR CONTINUAL LEARNING (ADDED)
-        # ============================================================================
+
         
         print(f"\\nSAVING REPLAY BUFFER...")
         
@@ -1198,11 +1140,7 @@ implementation:
                 print(f"SAVED: Empty replay buffer saved (continual learning disabled)")
         except Exception as e:
             print(f"ERROR: saving replay buffer: {e}")
-        
-        # ============================================================================
-        # SAVE ALL OTHER OUTPUT FILES
-        # ============================================================================
-        
+
         print(f"\\nSAVING ALL OUTPUT FILES...")
         
         # 1. Save trained model
@@ -1379,11 +1317,7 @@ implementation:
             print(f"SAVED: Training images summary saved: {args.training_images_summary}")
         except Exception as e:
             print(f"ERROR: saving training images summary: {e}")
-        
-        # ============================================================================
-        # PRINT FINAL SUMMARY
-        # ============================================================================
-        
+
         print(f"\\n" + "="*80)
         print(f"TRAINING COMPLETE - ALL OUTPUTS SAVED")
         print("="*80)
