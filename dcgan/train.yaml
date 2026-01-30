@@ -1,5 +1,5 @@
-name: Train DCGAN v36 - WITH BLOCK TRAINING
-description: Trains DCGAN with Block Training for CAFO/FF and Adversarial Training
+name: Train DCGAN v37 - WITH BLOCK TRAINING AND CONTINUAL LEARNING
+description: Trains DCGAN with Block Training for CAFO/FF and Adversarial Training, with optional Continual Learning via Experience Replay
 inputs:
   - name: data_path
     type: Dataset
@@ -19,6 +19,23 @@ inputs:
   - name: get_cdn
     type: String
     description: "CDN download prefix"
+  # Continual Learning Parameters
+  - name: enable_continual_learning
+    type: String
+    default: "false"
+    description: "Enable continual learning with experience replay"
+  - name: replay_buffer_path
+    type: String
+    default: ""
+    description: "Path to saved replay buffer from previous training"
+  - name: replay_ratio
+    type: Float
+    default: 0.3
+    description: "Probability of using replay per batch (0-1)"
+  - name: memory_capacity
+    type: Integer
+    default: 500
+    description: "Maximum samples to store in replay buffer"
   
 outputs:
   - name: trained_model
@@ -36,6 +53,9 @@ outputs:
   - name: block_training_logs
     type: String
     description: "Detailed logs from block training phase"
+  - name: updated_replay_buffer
+    type: String
+    description: "Updated replay buffer for next continual learning session"
 
 implementation:
   container:
@@ -73,10 +93,69 @@ implementation:
         matplotlib.use('Agg')
         
         print("=" * 80)
-        print("TRAIN DCGAN v29 - WITH BLOCK TRAINING")
+        print("TRAIN DCGAN v36 - WITH BLOCK TRAINING AND CONTINUAL LEARNING")
         print("=" * 80)
         print(f"Python version: {sys.version}")
         print(f"Torch version: {torch.__version__}")
+        
+        # ============================================================================
+        # CONTINUAL LEARNING COMPONENTS (ADDED)
+        # ============================================================================
+        
+        class DCGANReplayBuffer:
+            """Simple replay buffer for DCGAN continual learning"""
+            def __init__(self, capacity=500):
+                self.capacity = capacity
+                self.buffer = []
+                self.position = 0
+            
+            def add_batch(self, real_images):
+                """Add real images to buffer"""
+                if not isinstance(real_images, torch.Tensor):
+                    return
+                
+                batch_size = real_images.size(0)
+                for i in range(batch_size):
+                    img = real_images[i].unsqueeze(0)  # Keep as [1, C, H, W]
+                    
+                    if len(self.buffer) < self.capacity:
+                        self.buffer.append(img)
+                    else:
+                        self.buffer[self.position] = img
+                    
+                    self.position = (self.position + 1) % self.capacity
+            
+            def sample(self, batch_size):
+                """Sample random images from buffer"""
+                if len(self.buffer) == 0:
+                    return None
+                
+                actual_size = min(batch_size, len(self.buffer))
+                indices = np.random.choice(len(self.buffer), actual_size, replace=False)
+                samples = [self.buffer[i] for i in indices]
+                
+                return torch.cat(samples, dim=0)
+            
+            def save(self, path):
+                """Save buffer to file"""
+                with open(path, 'wb') as f:
+                    pickle.dump({
+                        'buffer': self.buffer,
+                        'capacity': self.capacity,
+                        'position': self.position
+                    }, f)
+            
+            def load(self, path):
+                """Load buffer from file"""
+                if os.path.exists(path):
+                    with open(path, 'rb') as f:
+                        data = pickle.load(f)
+                        self.buffer = data['buffer']
+                        self.capacity = data.get('capacity', 500)
+                        self.position = data.get('position', 0)
+            
+            def __len__(self):
+                return len(self.buffer)
         
         # ============================================================================
         # CREATE ALL NECESSARY CLASS DEFINITIONS FROM PREVIOUS BRICKS
@@ -242,6 +321,7 @@ implementation:
         # ============================================================================
         
         parser = argparse.ArgumentParser()
+        # Existing parameters
         parser.add_argument("--data_path", required=True)
         parser.add_argument("--master_config", required=True)
         parser.add_argument("--model_input", required=True)
@@ -255,11 +335,48 @@ implementation:
         parser.add_argument("--bearer_token", required=True)
         parser.add_argument("--domain", required=True)
         parser.add_argument("--get_cdn", required=True)
+        # Continual Learning parameters (ADDED)
+        parser.add_argument("--enable_continual_learning", type=str, default="false")
+        parser.add_argument("--replay_buffer_path", type=str, default="")
+        parser.add_argument("--replay_ratio", type=float, default=0.3)
+        parser.add_argument("--memory_capacity", type=int, default=500)
+        parser.add_argument("--updated_replay_buffer", required=True)
         args = parser.parse_args()
         
         print("\\n" + "="*80)
-        print("DCGAN TRAINING v29 - WITH BLOCK TRAINING")
+        print("DCGAN TRAINING v36 - WITH CONTINUAL LEARNING")
         print("="*80)
+        
+        # ============================================================================
+        # SETUP CONTINUAL LEARNING (ADDED)
+        # ============================================================================
+        
+        enable_cl = args.enable_continual_learning.lower() == 'true'
+        replay_ratio = float(args.replay_ratio)
+        memory_capacity = int(args.memory_capacity)
+        replay_buffer = None
+        
+        if enable_cl:
+            print(f"🚀 CONTINUAL LEARNING ENABLED")
+            print(f"   Replay ratio: {replay_ratio}")
+            print(f"   Memory capacity: {memory_capacity}")
+            print(f"   Replay buffer path: {args.replay_buffer_path}")
+            
+            # Initialize replay buffer
+            replay_buffer = DCGANReplayBuffer(capacity=memory_capacity)
+            
+            # Load existing buffer if provided
+            if args.replay_buffer_path and os.path.exists(args.replay_buffer_path):
+                try:
+                    replay_buffer.load(args.replay_buffer_path)
+                    print(f"   ✅ Loaded {len(replay_buffer)} samples from replay buffer")
+                except Exception as e:
+                    print(f"   ⚠️ Could not load replay buffer: {e}")
+                    print("   Starting with empty buffer")
+            else:
+                print("   Starting with empty replay buffer")
+        else:
+            print("📝 STANDARD TRAINING (Continual Learning disabled)")
         
         # ============================================================================
         # CREATE ALL OUTPUT DIRECTORIES FIRST
@@ -275,7 +392,8 @@ implementation:
             args.generated_samples,
             args.generated_images_urls,
             args.training_images_summary,
-            args.block_training_logs
+            args.block_training_logs,
+            args.updated_replay_buffer  # ADDED
         ]
         
         for path in output_paths:
@@ -853,11 +971,13 @@ implementation:
                 block_training_results['error'] = str(e)
         
         # ============================================================================
-        # PHASE 2: ADVERSARIAL TRAINING
+        # PHASE 2: ADVERSARIAL TRAINING WITH CONTINUAL LEARNING SUPPORT
         # ============================================================================
         
         print(f"\\n" + "="*60)
         print(f"PHASE 2: ADVERSARIAL TRAINING")
+        if enable_cl:
+            print(f"WITH CONTINUAL LEARNING (Replay Ratio: {replay_ratio})")
         print("="*60)
         
         start_time = time.time()
@@ -865,7 +985,8 @@ implementation:
         training_history = {
             'epoch_losses': [],
             'generator_losses': [],
-            'discriminator_losses': []
+            'discriminator_losses': [],
+            'continual_learning_stats': []  # ADDED
         }
         
         try:
@@ -880,6 +1001,10 @@ implementation:
                 
                 epoch_g_loss = []
                 epoch_d_loss = []
+                cl_stats = {  # ADDED
+                    'replay_used_count': 0,
+                    'samples_added_to_buffer': 0
+                }
                 
                 for batch_idx, batch_data in enumerate(dataloader):
                     if batch_idx > 10:  # Limit batches for testing
@@ -890,11 +1015,14 @@ implementation:
                     real_data = batch_data.to(device)
                     batch_size_real = real_data.size(0)
                     
-                    # Train discriminator
+                    # ====================================================================
+                    # TRAIN DISCRIMINATOR WITH CONTINUAL LEARNING SUPPORT
+                    # ====================================================================
+                    
                     if hasattr(trainer, 'disc_optimizer'):
                         trainer.disc_optimizer.zero_grad()
                     
-                    # Real data
+                    # Train on real data
                     real_output = trainer.discriminator(real_data)
                     if real_output.dim() > 1:
                         real_output = real_output.view(-1)
@@ -902,7 +1030,7 @@ implementation:
                     real_labels = torch.ones(batch_size_real, device=device)
                     d_loss_real = nn.functional.binary_cross_entropy_with_logits(real_output, real_labels)
                     
-                    # Fake data - 2D tensor for generator
+                    # Train on fake data
                     z = torch.randn(batch_size_real, latent_dim, device=device)
                     fake_data = trainer.generator(z).detach()
                     fake_output = trainer.discriminator(fake_data)
@@ -912,13 +1040,43 @@ implementation:
                     fake_labels = torch.zeros(batch_size_real, device=device)
                     d_loss_fake = nn.functional.binary_cross_entropy_with_logits(fake_output, fake_labels)
                     
-                    d_loss = (d_loss_real + d_loss_fake) / 2
+                    # CONTINUAL LEARNING: Add replay if enabled (ADDED)
+                    if enable_cl and replay_buffer and len(replay_buffer) > 0:
+                        # Decide whether to use replay in this batch
+                        if np.random.random() < replay_ratio:
+                            replay_batch = replay_buffer.sample(batch_size_real // 2)
+                            if replay_batch is not None:
+                                replay_batch = replay_batch.to(device)
+                                
+                                # Train on replayed old data
+                                replay_output = trainer.discriminator(replay_batch)
+                                if replay_output.dim() > 1:
+                                    replay_output = replay_output.view(-1)
+                                
+                                replay_labels = torch.ones(replay_batch.size(0), device=device)
+                                d_loss_replay = nn.functional.binary_cross_entropy_with_logits(replay_output, replay_labels)
+                                
+                                # Combined loss: 40% real, 40% fake, 20% replay
+                                d_loss = (0.4 * d_loss_real) + (0.4 * d_loss_fake) + (0.2 * d_loss_replay)
+                                
+                                cl_stats['replay_used_count'] += 1
+                                print(f"  [CL] Batch {batch_idx}: Replay used ({replay_batch.size(0)} samples)")
+                            else:
+                                d_loss = (d_loss_real + d_loss_fake) / 2
+                        else:
+                            d_loss = (d_loss_real + d_loss_fake) / 2
+                    else:
+                        d_loss = (d_loss_real + d_loss_fake) / 2
+                    
                     d_loss.backward()
                     
                     if hasattr(trainer, 'disc_optimizer'):
                         trainer.disc_optimizer.step()
                     
-                    # Train generator
+                    # ====================================================================
+                    # TRAIN GENERATOR (No changes needed for CL)
+                    # ====================================================================
+                    
                     if hasattr(trainer, 'gen_optimizer'):
                         trainer.gen_optimizer.zero_grad()
                     
@@ -934,11 +1092,19 @@ implementation:
                     if hasattr(trainer, 'gen_optimizer'):
                         trainer.gen_optimizer.step()
                     
+                    # CONTINUAL LEARNING: Add current batch to replay buffer (ADDED)
+                    if enable_cl and replay_buffer:
+                        replay_buffer.add_batch(real_data.detach().cpu())
+                        cl_stats['samples_added_to_buffer'] += batch_size_real
+                    
                     epoch_g_loss.append(g_loss.item())
                     epoch_d_loss.append(d_loss.item())
                     
                     if batch_idx % 2 == 0:
-                        print(f"  BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}")
+                        cl_info = ""
+                        if enable_cl:
+                            cl_info = f", Replays: {cl_stats['replay_used_count']}"
+                        print(f"  BATCH {batch_idx}: G={g_loss.item():.4f}, D={d_loss.item():.4f}{cl_info}")
                 
                 avg_g_loss = np.mean(epoch_g_loss) if epoch_g_loss else 0
                 avg_d_loss = np.mean(epoch_d_loss) if epoch_d_loss else 0
@@ -951,10 +1117,24 @@ implementation:
                     'discriminator_loss': avg_d_loss
                 })
                 
-                print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}")
+                # ADDED: Store continual learning stats
+                if enable_cl:
+                    training_history['continual_learning_stats'].append({
+                        'epoch': epoch + 1,
+                        'replay_used_count': cl_stats['replay_used_count'],
+                        'samples_added': cl_stats['samples_added_to_buffer'],
+                        'buffer_size': len(replay_buffer) if replay_buffer else 0
+                    })
+                
+                cl_info = ""
+                if enable_cl and replay_buffer:
+                    cl_info = f", Buffer: {len(replay_buffer)} samples"
+                print(f"  EPOCH SUMMARY: G={avg_g_loss:.4f}, D={avg_d_loss:.4f}{cl_info}")
             
             training_time = time.time() - start_time
             print(f"\\nTRAINING COMPLETE: Training completed in {training_time:.2f}s")
+            if enable_cl and replay_buffer:
+                print(f"CONTINUAL LEARNING: Final buffer size: {len(replay_buffer)} samples")
             training_success = True
             
         except Exception as e:
@@ -1005,7 +1185,26 @@ implementation:
             print(f"ERROR: saving block training logs: {e}")
         
         # ============================================================================
-        # FIX: SAVE ALL OTHER OUTPUT FILES
+        # SAVE REPLAY BUFFER FOR CONTINUAL LEARNING (ADDED)
+        # ============================================================================
+        
+        print(f"\\nSAVING REPLAY BUFFER...")
+        
+        try:
+            if enable_cl and replay_buffer:
+                replay_buffer.save(args.updated_replay_buffer)
+                print(f"SAVED: Replay buffer saved: {args.updated_replay_buffer}")
+                print(f"  SAMPLES: Buffer contains {len(replay_buffer)} samples")
+            else:
+                # Create empty buffer file if CL not enabled
+                empty_buffer = DCGANReplayBuffer(capacity=0)
+                empty_buffer.save(args.updated_replay_buffer)
+                print(f"SAVED: Empty replay buffer saved (continual learning disabled)")
+        except Exception as e:
+            print(f"ERROR: saving replay buffer: {e}")
+        
+        # ============================================================================
+        # SAVE ALL OTHER OUTPUT FILES
         # ============================================================================
         
         print(f"\\nSAVING ALL OUTPUT FILES...")
@@ -1026,7 +1225,8 @@ implementation:
                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'latent_dim': latent_dim,
                 'image_size': image_size,
-                'channels': channels
+                'channels': channels,
+                'continual_learning_enabled': enable_cl  # ADDED
             }
             
             torch.save(checkpoint, args.trained_model)
@@ -1041,13 +1241,17 @@ implementation:
                 'epoch_losses': training_history['epoch_losses'],
                 'generator_losses': training_history['generator_losses'],
                 'discriminator_losses': training_history['discriminator_losses'],
+                'continual_learning_stats': training_history.get('continual_learning_stats', []),  # ADDED
                 'epochs': epochs,
                 'batch_size': batch_size,
                 'algorithm': algorithm,
                 'training_time': training_time if 'training_time' in locals() else 0,
                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'num_samples': len(train_dataset),
-                'block_training_results': block_training_results
+                'block_training_results': block_training_results,
+                'continual_learning_enabled': enable_cl,  # ADDED
+                'replay_ratio_used': replay_ratio if enable_cl else 0,
+                'memory_capacity': memory_capacity if enable_cl else 0
             }
             
             with open(args.training_history, 'w') as f:
@@ -1074,6 +1278,12 @@ implementation:
                 'model_parameters': {
                     'generator': sum(p.numel() for p in trainer.generator.parameters()),
                     'discriminator': sum(p.numel() for p in trainer.discriminator.parameters())
+                },
+                'continual_learning': {  # ADDED
+                    'enabled': enable_cl,
+                    'replay_ratio': replay_ratio if enable_cl else 0,
+                    'memory_capacity': memory_capacity if enable_cl else 0,
+                    'final_buffer_size': len(replay_buffer) if enable_cl and replay_buffer else 0
                 }
             }
             
@@ -1117,6 +1327,22 @@ implementation:
         # 6. Save training images summary
         print(f"SAVING TRAINING IMAGES SUMMARY...")
         try:
+            continual_info = ""
+            if enable_cl:
+                continual_info = f'''
+                Continual Learning:
+                - Enabled: Yes
+                - Replay Ratio: {replay_ratio}
+                - Memory Capacity: {memory_capacity}
+                - Final Buffer Size: {len(replay_buffer) if replay_buffer else 0} samples
+                - Replays Used: {sum(stats.get('replay_used_count', 0) for stats in training_history.get('continual_learning_stats', []))}
+                '''
+            else:
+                continual_info = '''
+                Continual Learning:
+                - Enabled: No (Standard Training)
+                '''
+            
             summary_content = f'''DCGAN Training Summary
             ==========================
             Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1148,6 +1374,8 @@ implementation:
             - Enabled: {should_do_block_training}
             - Generator Blocks Trained: {len(block_training_results.get('generator_blocks', []))}
             - Discriminator Blocks Trained: {len(block_training_results.get('discriminator_blocks', []))}
+            
+            {continual_info}
             '''
             
             with open(args.training_images_summary, 'w') as f:
@@ -1170,7 +1398,15 @@ implementation:
         print(f"Device: {device}")
         print(f"Final Losses - G: {final_g_loss:.4f}, D: {final_d_loss:.4f}")
         print(f"Generated Samples: {len(samples)}")
-        print(f"\\nOUTPUT FILES SAVED:")
+        
+        if enable_cl:
+            print(f"\\n🚀 CONTINUAL LEARNING SUMMARY:")
+            print(f"   Replay Ratio: {replay_ratio}")
+            print(f"   Memory Capacity: {memory_capacity}")
+            print(f"   Final Buffer Size: {len(replay_buffer) if replay_buffer else 0} samples")
+            print(f"   Updated Buffer Saved: {args.updated_replay_buffer}")
+        
+        print(f"\\n📂 OUTPUT FILES SAVED:")
         print(f"   Model: {args.trained_model}")
         print(f"   Training History: {args.training_history}")
         print(f"   Training Metrics: {args.training_metrics}")
@@ -1178,6 +1414,7 @@ implementation:
         print(f"   Generated Images URLs: {args.generated_images_urls}")
         print(f"   Training Summary: {args.training_images_summary}")
         print(f"   Block Training Logs: {args.block_training_logs}")
+        print(f"   Replay Buffer: {args.updated_replay_buffer}")
         print("="*80)
         
     args:
@@ -1207,3 +1444,14 @@ implementation:
       - {inputValue: domain}
       - --get_cdn
       - {inputValue: get_cdn}
+      # Continual Learning args (ADDED)
+      - --enable_continual_learning
+      - {inputValue: enable_continual_learning}
+      - --replay_buffer_path
+      - {inputValue: replay_buffer_path}
+      - --replay_ratio
+      - {inputValue: replay_ratio}
+      - --memory_capacity
+      - {inputValue: memory_capacity}
+      - --updated_replay_buffer
+      - {outputPath: updated_replay_buffer}
