@@ -1,4 +1,4 @@
-name: Upload Data To CDN v16 - SMART TIMEOUTS
+name: Upload Data To CDN v17 - SMART TIMEOUTS
 description: Uploads complete dataset set for next pipeline continuation
 inputs:
   # From Load Raw Dataset v1 - RAW DATA
@@ -167,7 +167,7 @@ implementation:
         # SMART UPLOAD FUNCTION
         # ============================================================================
         def get_upload_config(file_size):
-            """Get timeout and retry config based on file size"""
+           
             if file_size < SMALL_FILE:  # < 10MB
                 return {
                     'max_retries': SMALL_FILE_MAX_RETRIES,
@@ -202,7 +202,7 @@ implementation:
                 }
         
         def upload_file_smart(file_path, upload_url, bearer_token, filename, description):
-            """Upload with smart timeout configuration based on file size"""
+           
             file_size = os.path.getsize(file_path)
             config = get_upload_config(file_size)
             
