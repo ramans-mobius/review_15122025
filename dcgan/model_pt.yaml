@@ -1,4 +1,4 @@
-name: Download and Re-upload PT Model v2
+name: Download and Re-upload PT Model v3
 description: Downloads .pt file from CDN, fixes $ characters, verifies .pt format, and re-uploads
 inputs:
   - name: cdn_url
@@ -81,7 +81,7 @@ implementation:
         # ============================
         # STEP 1: PROCESS CDN URL (FIX $ ISSUES)
         # ============================
-        print("\n" + "=" * 80)
+        print("\\n" + "=" * 80)
         print("1. PROCESSING AND FIXING CDN URL")
         print("=" * 80)
         
@@ -143,7 +143,7 @@ implementation:
         # ============================
         # STEP 2: DOWNLOAD FILE
         # ============================
-        print("\n" + "=" * 80)
+        print("\\n" + "=" * 80)
         print("2. DOWNLOADING FILE")
         print("=" * 80)
         
@@ -178,7 +178,7 @@ implementation:
             if download_success:
                 break
                 
-            print(f"\nAttempt: {attempt_name}")
+            print(f"\\nAttempt: {attempt_name}")
             print(f"URL: {attempt_url}")
             
             try:
@@ -235,7 +235,7 @@ implementation:
                 continue
         
         if not download_success:
-            print("\n✗ All download attempts failed")
+            print("\\n✗ All download attempts failed")
             print("Download attempts summary:")
             for attempt in download_attempts:
                 status = "✓" if attempt['success'] else "✗"
@@ -245,7 +245,7 @@ implementation:
         # ============================
         # STEP 3: VERIFY .PT FILE
         # ============================
-        print("\n" + "=" * 80)
+        print("\\n" + "=" * 80)
         print("3. VERIFYING .PT FILE")
         print("=" * 80)
         
@@ -356,13 +356,13 @@ implementation:
         
         # Final verification status
         if verification['is_pt_file']:
-            print("\n" + "=" * 40)
+            print("\\n" + "=" * 40)
             print("✓ VERIFICATION PASSED: File is a valid .pt file")
             print(f"  Method: {verification['pt_verification_method']}")
             print(f"  Type: {verification['verification_details'].get('model_type', 'Unknown')}")
             print("=" * 40)
         else:
-            print("\n" + "=" * 40)
+            print("\\n" + "=" * 40)
             print("✗ VERIFICATION FAILED: File may not be a valid .pt file")
             print("=" * 40)
         
@@ -374,7 +374,7 @@ implementation:
         # ============================
         # STEP 4: RE-UPLOAD TO CDN
         # ============================
-        print("\n" + "=" * 80)
+        print("\\n" + "=" * 80)
         print("4. RE-UPLOADING .PT FILE TO CDN")
         print("=" * 80)
         
@@ -447,7 +447,7 @@ implementation:
         # ============================
         # STEP 5: SAVE FINAL OUTPUTS
         # ============================
-        print("\n" + "=" * 80)
+        print("\\n" + "=" * 80)
         print("5. SAVING FINAL OUTPUTS")
         print("=" * 80)
         
@@ -492,7 +492,7 @@ implementation:
         except:
             pass
         
-        print("\n" + "=" * 80)
+        print("\\n" + "=" * 80)
         if final_cdn_url and verification['is_pt_file']:
             print("✓ SUCCESS: File downloaded, verified as .pt, and re-uploaded")
             print(f"  Final CDN URL: {final_cdn_url}")
