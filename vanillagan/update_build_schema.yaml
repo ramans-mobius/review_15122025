@@ -1,4 +1,4 @@
-name: I Update Schema Row v2
+name: I Update Schema Row
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -14,14 +14,12 @@ inputs:
   - { name: bearer_auth_token, type: string, description: "Bearer token for authentication." }
   - { name: domain, type: String, description: "The domain for the API endpoint." }
   - { name: float_keys_json, type: String, description: "JSON string of a list of keys to be converted to float."}
-  # New inputs for model artifacts from pipeline
-  - { name: trained_model_path, type: inputPath, description: "Path to trained model file.", default: "-1" }
-  - { name: model_metadata_path, type: inputPath, description: "Path to model metadata file.", default: "-1" }
-  - { name: model_config_path, type: inputPath, description: "Path to model configuration file.", default: "-1" }
-  - { name: training_history_path, type: inputPath, description: "Path to training history file.", default: "-1" }
-  - { name: eval_metrics_path, type: inputPath, description: "Path to evaluation metrics file.", default: "-1" }
-  - { name: model_weights_url, type: String, description: "URL for model weights (will encode $$ to %24%24).", default: "-1" }
-  - { name: model_metadata_url, type: String, description: "URL for model metadata (will encode $$ to %24%24).", default: "-1" }
+  # New inputs for model artifacts from pipeline - using proper inputPath connections
+  - { name: trained_model_cdn_url, type: inputPath, description: "CDN URL for trained model (from Download and Re-upload PT Model).", default: "-1" }
+  - { name: model_metadata_cdn_url, type: inputPath, description: "CDN URL for model metadata (from Download and Re-upload PT Model).", default: "-1" }
+  - { name: training_metrics_path, type: inputPath, description: "Path to training metrics JSON file.", default: "-1" }
+  - { name: model_config_json, type: inputPath, description: "Path to model configuration JSON.", default: "-1" }
+  - { name: evaluation_metrics_path, type: inputPath, description: "Path to evaluation metrics JSON.", default: "-1" }
 
 implementation:
   container:
@@ -40,23 +38,102 @@ implementation:
         import argparse
         import requests
         import os
-        from urllib.parse import quote
+        from urllib.parse import quote, unquote
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
 
         def encode_dollar_signs(url):
-            """Encode single $ to %24%24 in URLs"""
-            if not url:
+         
+            if not url or url == '-1':
                 return url
+            # First decode any existing encoding to avoid double encoding
+            decoded_url = unquote(url)
             # Replace single $ with %24%24
-            return url.replace('$', '%24%24')
+            # But only if it's not already encoded
+            if '$' in decoded_url and '%24' not in decoded_url:
+                encoded = decoded_url.replace('$', '%24%24')
+                print(f"Encoded URL: {decoded_url} -> {encoded}")
+                return encoded
+            return url
 
-        def read_file_content(filepath):
-            """Read content from file if it exists"""
-            if filepath and os.path.exists(filepath):
-                with open(filepath, 'r') as f:
-                    return f.read().strip()
+        def read_cdn_url_from_file(filepath):
+        
+            if filepath and os.path.exists(filepath) and filepath != '-1':
+                try:
+                    with open(filepath, 'r') as f:
+                        content = f.read().strip()
+                    print(f"Read CDN URL from {filepath}: {content}...")
+                    return content
+                except Exception as e:
+                    print(f"Error reading CDN URL file {filepath}: {e}")
+                    return None
             return None
+
+        def read_json_file(filepath):
+         
+            if filepath and os.path.exists(filepath) and filepath != '-1':
+                try:
+                    with open(filepath, 'r') as f:
+                        content = json.load(f)
+                    print(f"Read JSON from {filepath}")
+                    return content
+                except Exception as e:
+                    print(f"Error reading JSON file {filepath}: {e}")
+                    return None
+            return None
+
+        def extract_model_metrics(metrics_data):
+          
+            metrics = {}
+            
+            if not metrics_data:
+                return metrics
+                
+            # If it's already a dict with metrics
+            if isinstance(metrics_data, dict):
+                # Look for parameter count
+                if 'parameter_count' in metrics_data:
+                    metrics['parameter_count'] = str(metrics_data['parameter_count'])
+                elif 'total_params' in metrics_data:
+                    metrics['parameter_count'] = str(metrics_data['total_params'])
+                elif 'params' in metrics_data:
+                    metrics['parameter_count'] = str(metrics_data['params'])
+                
+                # Look for model architecture info
+                if 'input_dim' in metrics_data:
+                    metrics['input_shape'] = str(metrics_data['input_dim'])
+                elif 'input_shape' in metrics_data:
+                    metrics['input_shape'] = str(metrics_data['input_shape'])
+                    
+                if 'output_dim' in metrics_data:
+                    metrics['output_shape'] = str(metrics_data['output_dim'])
+                elif 'output_shape' in metrics_data:
+                    metrics['output_shape'] = str(metrics_data['output_shape'])
+                    
+                if 'latent_dim' in metrics_data:
+                    metrics['latent_dim'] = str(metrics_data['latent_dim'])
+                    
+                # Look for training metrics
+                if 'final_loss' in metrics_data:
+                    metrics['final_loss'] = str(metrics_data['final_loss'])
+                if 'accuracy' in metrics_data:
+                    metrics['accuracy'] = str(metrics_data['accuracy'])
+                if 'fid_score' in metrics_data:
+                    metrics['fid_score'] = str(metrics_data['fid_score'])
+                    
+                # Model metadata
+                if 'model_name' in metrics_data:
+                    metrics['name'] = metrics_data['model_name']
+                if 'architecture' in metrics_data:
+                    metrics['architecture_type'] = metrics_data['architecture']
+                
+                # Store the full config if available
+                if 'model_config' in metrics_data:
+                    metrics['model_specific_config'] = metrics_data['model_config']
+                elif 'config' in metrics_data:
+                    metrics['model_specific_config'] = metrics_data['config']
+                    
+            return metrics
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
@@ -72,13 +149,11 @@ implementation:
         parser.add_argument('--domain', type=str, required=True)
         parser.add_argument('--float_keys_json', type=str, required=False)
         # New arguments for model artifacts
-        parser.add_argument('--trained_model_path', type=str, required=False)
-        parser.add_argument('--model_metadata_path', type=str, required=False)
-        parser.add_argument('--model_config_path', type=str, required=False)
-        parser.add_argument('--training_history_path', type=str, required=False)
-        parser.add_argument('--eval_metrics_path', type=str, required=False)
-        parser.add_argument('--model_weights_url', type=str, required=False)
-        parser.add_argument('--model_metadata_url', type=str, required=False)
+        parser.add_argument('--trained_model_cdn_url', type=str, required=False)
+        parser.add_argument('--model_metadata_cdn_url', type=str, required=False)
+        parser.add_argument('--training_metrics_path', type=str, required=False)
+        parser.add_argument('--model_config_json', type=str, required=False)
+        parser.add_argument('--evaluation_metrics_path', type=str, required=False)
         args = parser.parse_args()
 
         execution_id_int = int(args.execution_id)
@@ -89,6 +164,10 @@ implementation:
         with open(args.tenant_id, 'r') as f:
             tenant_id = f.read().strip()
 
+        print("=" * 80)
+        print("UPDATE SCHEMA ROW WITH MODEL METADATA")
+        print("=" * 80)
+        
         print(f" Input Data ")
         print(f"update_data_json: {args.update_data_json}")
         print(f"mapping_json: {args.mapping_json}")
@@ -97,52 +176,57 @@ implementation:
         mapping = json.loads(args.mapping_json)
         float_keys = json.loads(args.float_keys_json) if args.float_keys_json else []
 
-        # Read model artifacts if provided
+        # Read and process CDN URLs from pipeline components
+        print("\\n" + "=" * 40)
+        print("PROCESSING PIPELINE ARTIFACTS")
+        print("=" * 40)
+        
         model_weights_cdn = None
         model_metadata_cdn = None
-        model_specific_config = None
-        training_metrics = None
+        extracted_metrics = {}
+        model_config = None
         
-        if args.model_weights_url != '-1':
-            model_weights_cdn = encode_dollar_signs(args.model_weights_url)
-            print(f"Model weights URL (encoded): {model_weights_cdn}")
+        # 1. Read trained model CDN URL (from Download and Re-upload PT Model component)
+        if args.trained_model_cdn_url != '-1':
+            cdn_content = read_cdn_url_from_file(args.trained_model_cdn_url)
+            if cdn_content:
+                model_weights_cdn = encode_dollar_signs(cdn_content)
+                print(f"✓ Model weights CDN URL: {model_weights_cdn}...")
         
-        if args.model_metadata_url != '-1':
-            model_metadata_cdn = encode_dollar_signs(args.model_metadata_url)
-            print(f"Model metadata URL (encoded): {model_metadata_cdn}")
+        # 2. Read model metadata CDN URL
+        if args.model_metadata_cdn_url != '-1':
+            cdn_content = read_cdn_url_from_file(args.model_metadata_cdn_url)
+            if cdn_content:
+                model_metadata_cdn = encode_dollar_signs(cdn_content)
+                print(f"✓ Model metadata CDN URL: {model_metadata_cdn}...")
         
-        if args.trained_model_path != '-1':
-            model_content = read_file_content(args.trained_model_path)
-            if model_content:
-                print(f"Read trained model from: {args.trained_model_path}")
+        # 3. Read training metrics
+        if args.training_metrics_path != '-1':
+            training_metrics = read_json_file(args.training_metrics_path)
+            if training_metrics:
+                metrics = extract_model_metrics(training_metrics)
+                extracted_metrics.update(metrics)
+                print(f"✓ Extracted {len(metrics)} metrics from training data")
         
-        if args.model_metadata_path != '-1':
-            metadata_content = read_file_content(args.model_metadata_path)
-            if metadata_content:
-                print(f"Read model metadata from: {args.model_metadata_path}")
-                try:
-                    model_specific_config = json.loads(metadata_content)
-                except json.JSONDecodeError:
-                    model_specific_config = metadata_content
+        # 4. Read model config
+        if args.model_config_json != '-1':
+            config_data = read_json_file(args.model_config_json)
+            if config_data:
+                model_config = config_data
+                # Also extract metrics from config
+                config_metrics = extract_model_metrics(config_data)
+                extracted_metrics.update(config_metrics)
+                print(f"✓ Read model config with {len(config_data.keys())} keys")
         
-        if args.model_config_path != '-1':
-            config_content = read_file_content(args.model_config_path)
-            if config_content:
-                print(f"Read model config from: {args.model_config_path}")
+        # 5. Read evaluation metrics
+        if args.evaluation_metrics_path != '-1':
+            eval_metrics = read_json_file(args.evaluation_metrics_path)
+            if eval_metrics:
+                eval_extracted = extract_model_metrics(eval_metrics)
+                extracted_metrics.update(eval_extracted)
+                print(f"✓ Extracted {len(eval_extracted)} metrics from evaluation data")
         
-        if args.training_history_path != '-1':
-            history_content = read_file_content(args.training_history_path)
-            if history_content:
-                print(f"Read training history from: {args.training_history_path}")
-        
-        if args.eval_metrics_path != '-1':
-            eval_content = read_file_content(args.eval_metrics_path)
-            if eval_content:
-                print(f"Read evaluation metrics from: {args.eval_metrics_path}")
-                try:
-                    training_metrics = json.loads(eval_content)
-                except json.JSONDecodeError:
-                    training_metrics = eval_content
+        print(f"\\nExtracted model metrics: {json.dumps(extracted_metrics, indent=2)}")
 
         headers = {
             'Content-Type': 'application/json',
@@ -172,28 +256,27 @@ implementation:
                     row['architecture_type'] = args.architecture_type
                 if 'execution_id' not in row and args.execution_id != '-1':
                     row['execution_id']=execution_id_int
+                
                 # Add model weights metadata from pipeline artifacts
                 if model_weights_cdn:
                     row['model_weights_cdn'] = model_weights_cdn
                 if model_metadata_cdn:
                     row['model_metadata_cdn'] = model_metadata_cdn
-                if model_specific_config:
-                    row['model_specific_config'] = model_specific_config
-                if training_metrics:
-                    # You can map specific metrics from training_metrics to schema fields
-                    if isinstance(training_metrics, dict):
-                        # Example mapping - adjust based on your actual metrics structure
-                        if 'parameter_count' in training_metrics:
-                            row['parameter_count'] = str(training_metrics['parameter_count'])
-                        if 'input_shape' in training_metrics:
-                            row['input_shape'] = str(training_metrics['input_shape'])
-                        if 'output_shape' in training_metrics:
-                            row['output_shape'] = str(training_metrics['output_shape'])
+                if model_config:
+                    row['model_specific_config'] = model_config
+                
+                # Add extracted metrics
+                for key, value in extracted_metrics.items():
+                    # Map to schema fields
+                    if key in ['parameter_count', 'input_shape', 'output_shape', 'name', 'architecture_type', 'latent_dim']:
+                        row[key] = value
+                    elif key == 'final_loss' and 'symbolic_profile' not in row:
+                        row['symbolic_profile'] = f"Final loss: {value}"
             
             create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
             create_payload = {"data": rows_to_create}
             
-            print(f" Creating Multiple Rows ")
+            print(f"\\n Creating Multiple Rows ")
             print(f"Request URL: POST {create_url}")
             print(f"Request Headers: {json.dumps(headers)}")
             print(f"Request Payload: {json.dumps(create_payload, indent=2)}")
@@ -221,7 +304,7 @@ implementation:
                 }
             }
             
-            print(f" Checking for Existing Row with execution_id: {execution_id_int} ")
+            print(f"\\n Checking for Existing Row with execution_id: {execution_id_int} ")
             print(f"Request URL: POST {check_url}")
             print(f"Request Headers: {json.dumps(headers)}")
             print(f"Request Payload: {json.dumps(check_payload, indent=2)}")
@@ -256,7 +339,7 @@ implementation:
                                 "value": value_to_patch
                             })
                     
-                    # Add model weights metadata patches
+                    # Add model weights metadata patches from pipeline artifacts
                     if model_weights_cdn:
                         patch_requests.append({
                             "operation": "REPLACE",
@@ -269,18 +352,26 @@ implementation:
                             "path": "model_metadata_cdn",
                             "value": model_metadata_cdn
                         })
-                    if model_specific_config:
+                    if model_config:
                         patch_requests.append({
                             "operation": "REPLACE",
                             "path": "model_specific_config",
-                            "value": model_specific_config
+                            "value": model_config
                         })
-                    if training_metrics and isinstance(training_metrics, dict):
-                        if 'parameter_count' in training_metrics:
+                    
+                    # Add extracted metrics as patches
+                    for key, value in extracted_metrics.items():
+                        if key in ['parameter_count', 'input_shape', 'output_shape']:
                             patch_requests.append({
                                 "operation": "REPLACE",
-                                "path": "parameter_count",
-                                "value": str(training_metrics['parameter_count'])
+                                "path": key,
+                                "value": value
+                            })
+                        elif key == 'name' and 'name' not in mapping.values():
+                            patch_requests.append({
+                                "operation": "REPLACE",
+                                "path": "name",
+                                "value": value
                             })
 
                     update_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
@@ -302,7 +393,7 @@ implementation:
                         ]
                     }
                     
-                    print(f"Request URL: PATCH {update_url}")
+                    print(f"\\nRequest URL: PATCH {update_url}")
                     print(f"Request Headers: {json.dumps(headers)}")
                     print(f"Request Payload: {json.dumps(update_payload, indent=2)}")
                     
@@ -340,27 +431,36 @@ implementation:
                     if args.architecture_type != '-1':
                         creation_data['architecture_type'] = args.architecture_type
                     
-                    # Add model weights metadata
+                    # Add model weights metadata from pipeline
                     if model_weights_cdn:
                         creation_data['model_weights_cdn'] = model_weights_cdn
                     if model_metadata_cdn:
                         creation_data['model_metadata_cdn'] = model_metadata_cdn
-                    if model_specific_config:
-                        creation_data['model_specific_config'] = model_specific_config
-                    if training_metrics and isinstance(training_metrics, dict):
-                        if 'parameter_count' in training_metrics:
-                            creation_data['parameter_count'] = str(training_metrics['parameter_count'])
-                        if 'input_shape' in training_metrics:
-                            creation_data['input_shape'] = str(training_metrics['input_shape'])
-                        if 'output_shape' in training_metrics:
-                            creation_data['output_shape'] = str(training_metrics['output_shape'])
+                    if model_config:
+                        creation_data['model_specific_config'] = model_config
+                    
+                    # Add extracted metrics
+                    for key, value in extracted_metrics.items():
+                        if key in ['parameter_count', 'input_shape', 'output_shape', 'name']:
+                            creation_data[key] = value
+                        elif key == 'latent_dim' and 'parameter_count' not in creation_data:
+                            creation_data['parameter_count'] = value
+                        elif key == 'final_loss' and 'symbolic_profile' not in creation_data:
+                            creation_data['symbolic_profile'] = f"Final loss: {value}"
+                    
+                    # Ensure name is set
+                    if 'name' not in creation_data and args.model_id != '-1':
+                        creation_data['name'] = f"model_{args.model_id}"
+                    
+                    # Set source
+                    creation_data['source'] = 'auto-generated'
 
                     create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
                     create_payload = {
                         "data": [creation_data]
                     }
 
-                    print(f"Request URL: POST {create_url}")
+                    print(f"\\nRequest URL: POST {create_url}")
                     print(f"Request Headers: {json.dumps(headers)}")
                     print(f"Request Payload: {json.dumps(create_payload, indent=2)}")
                     
@@ -371,7 +471,7 @@ implementation:
                     response.raise_for_status()
                     print("Successfully created a new model instance.")
                     
-                print(f"Response: {response.json()}")
+                print(f"\\nResponse: {response.json()}")
 
             except requests.exceptions.RequestException as e:
                 print(f"Error: {e}")
@@ -379,6 +479,10 @@ implementation:
                     print(f"Response Status Code: {e.response.status_code}")
                     print(f"Response Content: {e.response.text}")
                 exit(1)
+        
+        print("\\n" + "=" * 80)
+        print("UPDATE COMPLETE")
+        print("=" * 80)
 
     args:
       - --schema_id
@@ -405,18 +509,14 @@ implementation:
       - {inputValue: domain}
       - --float_keys_json
       - {inputValue: float_keys_json}
-      # New arguments
-      - --trained_model_path
-      - {inputPath: trained_model_path}
-      - --model_metadata_path
-      - {inputPath: model_metadata_path}
-      - --model_config_path
-      - {inputPath: model_config_path}
-      - --training_history_path
-      - {inputPath: training_history_path}
-      - --eval_metrics_path
-      - {inputPath: eval_metrics_path}
-      - --model_weights_url
-      - {inputValue: model_weights_url}
-      - --model_metadata_url
-      - {inputValue: model_metadata_url}
+      # New arguments for pipeline artifacts
+      - --trained_model_cdn_url
+      - {inputPath: trained_model_cdn_url}
+      - --model_metadata_cdn_url
+      - {inputPath: model_metadata_cdn_url}
+      - --training_metrics_path
+      - {inputPath: training_metrics_path}
+      - --model_config_json
+      - {inputPath: model_config_json}
+      - --evaluation_metrics_path
+      - {inputPath: evaluation_metrics_path}
