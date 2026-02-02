@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v15
+name: Evaluate DCGAN v16
 description: Evaluates DCGAN with comprehensive metrics and uploads generated images to CDN
 inputs:
   - name: trained_model
@@ -213,7 +213,7 @@ implementation:
                         print(f"    Fixed URL: Added missing $$")
                 
                 print(f"    Uploaded: {cdn_filename}")
-                print(f"    URL: {full_url[:100]}...")
+                print(f"    URL: {full_url}...")
                 return full_url
                 
             except subprocess.CalledProcessError as e:
