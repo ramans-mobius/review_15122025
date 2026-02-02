@@ -1,5 +1,5 @@
-name: Evaluate DCGAN v14
-description: Evaluates DCGAN with comprehensive metrics (no visualization to avoid issues)
+name: Evaluate DCGAN v15
+description: Evaluates DCGAN with comprehensive metrics and uploads generated images to CDN
 inputs:
   - name: trained_model
     type: Model
@@ -31,6 +31,9 @@ outputs:
   - name: evaluation_results_url
     type: String
     description: "URL to evaluation results on CDN"
+  - name: generated_images_url
+    type: String
+    description: "URL to generated images tensor file on CDN"
 
 implementation:
   container:
@@ -109,6 +112,152 @@ implementation:
                 self.__dict__.update(info_dict)
         
         # ============================================================================
+        # CDN UPLOAD FUNCTION WITH PROPER $ HANDLING
+        # ============================================================================
+        
+        def upload_to_cdn(file_path, description, ensure_double_dollar=False):
+          
+            if not os.path.exists(file_path):
+                print(f"    File not found: {file_path}")
+                return None
+            
+            file_size = os.path.getsize(file_path)
+            print(f"  Uploading {description} ({file_size:,} bytes)...")
+            
+            # Generate unique filename
+            unique_id = str(uuid.uuid4())[:8]
+            
+            # Use appropriate extension
+            if description.lower().endswith('json') or '.json' in file_path.lower():
+                cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.json"
+            elif description.lower().endswith('images') or '.pt' in file_path.lower():
+                cdn_filename = f"dcgan_generated_images_{unique_id}.pt"
+            else:
+                cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.bin"
+            
+            # URL with proper path for DCGAN models
+            # Using double $$ to ensure they're preserved
+            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2Fmodels%2F"
+            
+            # Build curl command
+            curl_command = [
+                "curl",
+                "--location", 
+            ]
+            
+            # Handle $ characters in URL if needed
+            if ensure_double_dollar and "$$" in upload_url:
+                # Replace $$ with $$$ to ensure they're preserved
+                upload_url_encoded = upload_url.replace("$$", "$$$")
+                curl_command.append(upload_url_encoded)
+                print(f"    Using triple $ in URL to ensure preservation")
+            else:
+                curl_command.append(upload_url)
+            
+            # Add authorization and form data
+            curl_command.extend([
+                "--header", f"Authorization: Bearer {args.bearer_token}",
+                "--form", f"file=@{file_path}",
+                "--form", f"filename={cdn_filename}",
+                "--fail",
+                "--show-error",
+                "--connect-timeout", "30",
+                "--max-time", "120",
+                "--silent"
+            ])
+            
+            try:
+                print(f"    Executing curl command...")
+                process = subprocess.run(
+                    curl_command,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                response_json = json.loads(process.stdout)
+                
+                # Extract CDN URL - handle different response formats
+                relative_cdn_url = None
+                
+                if 'cdnUrl' in response_json:
+                    relative_cdn_url = response_json['cdnUrl']
+                elif 'info' in response_json and 'cdnUrl' in response_json['info']:
+                    relative_cdn_url = response_json['info']['cdnUrl']
+                elif 'url' in response_json:
+                    relative_cdn_url = response_json['url']
+                
+                if not relative_cdn_url:
+                    print(f"    Error: No cdnUrl in response")
+                    print(f"    Response: {response_json}")
+                    return None
+                
+                # Ensure the CDN URL has proper formatting
+                if relative_cdn_url.startswith("http"):
+                    full_url = relative_cdn_url
+                else:
+                    # Handle $ characters in the CDN path
+                    if "$$" in relative_cdn_url:
+                        # Keep double $$
+                        cdn_path = relative_cdn_url
+                    else:
+                        cdn_path = relative_cdn_url
+                    
+                    full_url = f"{args.get_cdn}{cdn_path}"
+                
+                # Ensure URL has proper $$ pattern for DCGAN models
+                if "dcgan/models" in full_url and "_V1_data" in full_url and "_$$_V1_data" not in full_url:
+                    # Fix missing $$
+                    if "_$_V1_data" in full_url:
+                        full_url = full_url.replace("_$_V1_data", "_$$_V1_data")
+                        print(f"    Fixed URL: Added missing $$")
+                
+                print(f"    Uploaded: {cdn_filename}")
+                print(f"    URL: {full_url[:100]}...")
+                return full_url
+                
+            except subprocess.CalledProcessError as e:
+                print(f"    Upload error (curl): {e.stderr[:200]}")
+                
+                # Try alternative approach with requests
+                try:
+                    print(f"    Trying alternative upload with requests...")
+                    import requests
+                    
+                    with open(file_path, 'rb') as f:
+                        files = {'file': (cdn_filename, f)}
+                        data = {'filename': cdn_filename}
+                        headers = {'Authorization': f'Bearer {args.bearer_token}'}
+                        
+                        response = requests.post(
+                            upload_url,
+                            files=files,
+                            data=data,
+                            headers=headers,
+                            timeout=120
+                        )
+                        
+                        response.raise_for_status()
+                        response_json = response.json()
+                        
+                        if 'cdnUrl' in response_json:
+                            relative_cdn_url = response_json['cdnUrl']
+                            full_url = f"{args.get_cdn}{relative_cdn_url}"
+                            print(f"    Alternative upload successful")
+                            return full_url
+                        
+                except Exception as alt_e:
+                    print(f"    Alternative upload also failed: {str(alt_e)[:100]}")
+                
+                return None
+            except json.JSONDecodeError as e:
+                print(f"    JSON decode error: {str(e)}")
+                return None
+            except Exception as e:
+                print(f"    Upload error: {str(e)[:100]}")
+                return None
+        
+        # ============================================================================
         # MAIN CODE
         # ============================================================================
         
@@ -125,10 +274,11 @@ implementation:
         parser.add_argument('--evaluation_summary', type=str, required=True)
         parser.add_argument('--rlaf_metrics', type=str, required=True)
         parser.add_argument('--evaluation_results_url', type=str, required=True)
+        parser.add_argument('--generated_images_url', type=str, required=True)
         args = parser.parse_args()
         
         print("=" * 80)
-        print("EVALUATE DCGAN v12 - NO VISUALIZATION")
+        print("EVALUATE DCGAN v15 - WITH GENERATED IMAGES CDN UPLOAD")
         print("=" * 80)
         
         # ============================================================================
@@ -140,7 +290,8 @@ implementation:
             args.generated_samples,
             args.evaluation_summary,
             args.rlaf_metrics,
-            args.evaluation_results_url
+            args.evaluation_results_url,
+            args.generated_images_url
         ]
         
         for path in output_paths:
@@ -408,69 +559,61 @@ implementation:
             return rlaf_metrics
         
         # ============================================================================
-        # CDN UPLOAD FUNCTION
+        # SAVE AND UPLOAD GENERATED IMAGES
         # ============================================================================
         
-        def upload_to_cdn(file_path, description):
-            if not os.path.exists(file_path):
-                print(f"    File not found: {file_path}")
-                return None
+        def save_and_upload_generated_images(fake_images, algorithm, batch_size):
+          
+            print(f"\\nSaving and uploading generated images...")
+            print(f"  Images shape: {fake_images.shape}")
+            print(f"  Number of images: {len(fake_images)}")
+            print(f"  Algorithm: {algorithm}")
             
-            file_size = os.path.getsize(file_path)
-            print(f"  Uploading {description} ({file_size:,} bytes)...")
+            # Create temp directory for generated images
+            temp_dir = "/tmp/generated_images"
+            os.makedirs(temp_dir, exist_ok=True)
             
-            # Generate unique filename
-            unique_id = str(uuid.uuid4())[:8]
+            # Save images as PyTorch tensor file
+            timestamp = int(time.time())
+            images_filename = f"generated_images_{algorithm}_{timestamp}_{batch_size}samples.pt"
+            images_local_path = os.path.join(temp_dir, images_filename)
             
-            # Use appropriate extension
-            if description.lower().endswith('json') or '.json' in file_path.lower():
-                cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.json"
-            else:
-                cdn_filename = f"dcgan_eval_{description.replace(' ', '_')}_{unique_id}.bin"
+            # Save tensor
+            torch.save(fake_images, images_local_path)
+            file_size = os.path.getsize(images_local_path)
+            print(f"  ✓ Images saved locally: {images_local_path}")
+            print(f"  ✓ File size: {file_size:,} bytes")
             
-            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
-            
-            curl_command = [
-                "curl",
-                "--location", upload_url,
-                "--header", f"Authorization: Bearer {args.bearer_token}",
-                "--form", f"file=@{file_path}",
-                "--form", f"filename={cdn_filename}",
-                "--fail",
-                "--show-error",
-                "--connect-timeout", "30",
-                "--max-time", "120",
-                "--silent"
-            ]
-            
-            try:
-                process = subprocess.run(
-                    curl_command,
-                    capture_output=True,
-                    text=True,
-                    check=True
+            # Upload to CDN if bearer token is provided
+            images_cdn_url = None
+            if args.bearer_token and args.bearer_token.strip():
+                print(f"  Uploading images to CDN...")
+                
+                # Upload with proper $ handling
+                images_cdn_url = upload_to_cdn(
+                    images_local_path, 
+                    f"generated images {algorithm}",
+                    ensure_double_dollar=True  # Use triple $$$ to ensure double $$ in final URL
                 )
                 
-                response_json = json.loads(process.stdout)
-                relative_cdn_url = response_json.get("cdnUrl", "")
-                
-                if not relative_cdn_url:
-                    print(f"    Error: No cdnUrl in response")
-                    return None
-                
-                full_url = f"{args.get_cdn}{relative_cdn_url}"
-                print(f"    Uploaded: {cdn_filename}")
-                print(f"    URL: {full_url[:80]}...")
-                return full_url
-                
-            except subprocess.CalledProcessError as e:
-                print(f"    Upload error: {e.stderr[:200]}")
-                return None
-            except json.JSONDecodeError:
-                return None
-            except Exception as e:
-                print(f"    Error: {str(e)[:100]}")
-                return None
+                if images_cdn_url:
+                    print(f"  ✓ Images uploaded to CDN")
+                    
+                    # Ensure URL has proper $$ pattern
+                    if "_V1_data" in images_cdn_url and "_$$_V1_data" not in images_cdn_url:
+                        # Try to fix the pattern
+                        if "_$_V1_data" in images_cdn_url:
+                            images_cdn_url = images_cdn_url.replace("_$_V1_data", "_$$_V1_data")
+                            print(f"  Fixed URL pattern: Added $$")
+                        elif "V1_data" in images_cdn_url:
+                            images_cdn_url = images_cdn_url.replace("V1_data", "_$$_V1_data")
+                            print(f"  Fixed URL pattern: Added _$$_")
+                else:
+                    print(f"  ✗ Images upload failed")
+            else:
+                print(f"  Skipping CDN upload (no bearer token)")
+            
+            return images_local_path, images_cdn_url
         
         # ============================================================================
         # MAIN EVALUATION LOGIC
@@ -634,7 +777,7 @@ implementation:
         generator.eval()
         
         # Determine number of samples
-        num_eval_samples = min(50, len(processed_images))
+        num_eval_samples = min(100, len(processed_images))  # Increased to 100 for better sampling
         print(f"  Using {num_eval_samples} samples for evaluation")
         
         # Prepare real samples
@@ -650,6 +793,27 @@ implementation:
         print(f"  Fake samples shape: {fake_tensor.shape}")
         
         # ============================================================================
+        # SAVE AND UPLOAD GENERATED IMAGES
+        # ============================================================================
+        print("\\n" + "=" * 60)
+        print("PROCESSING GENERATED IMAGES")
+        print("=" * 60)
+        
+        # Save locally and upload to CDN
+        generated_images_local, generated_images_cdn_url = save_and_upload_generated_images(
+            fake_tensor, algorithm, num_eval_samples
+        )
+        
+        # Save CDN URL to output
+        with open(args.generated_images_url, 'w') as f:
+            if generated_images_cdn_url:
+                f.write(generated_images_cdn_url)
+                print(f"✓ Generated images URL saved: {args.generated_images_url}")
+            else:
+                f.write("")
+                print(f"⚠ No CDN URL for generated images (upload may have failed)")
+        
+        # ============================================================================
         # CALCULATE COMPREHENSIVE METRICS
         # ============================================================================
         print("\\n" + "=" * 60)
@@ -659,6 +823,15 @@ implementation:
         start_time = time.time()
         metrics = calculate_all_metrics(real_tensor.cpu(), fake_tensor, algorithm)
         metrics['calculation_time'] = time.time() - start_time
+        
+        # Add generated images info to metrics
+        metrics['generated_images_info'] = {
+            'num_samples': num_eval_samples,
+            'shape': list(fake_tensor.shape),
+            'local_path': generated_images_local,
+            'cdn_url': generated_images_cdn_url if generated_images_cdn_url else None,
+            'file_size': os.path.getsize(generated_images_local) if os.path.exists(generated_images_local) else 0
+        }
         
         # ============================================================================
         # CREATE RLAF METRICS
@@ -672,7 +845,8 @@ implementation:
             'algorithm': algorithm,
             'num_eval_samples': num_eval_samples,
             'preprocessing_applied': True,
-            'preprocessing_params': {'scale': scale, 'shift': shift}
+            'preprocessing_params': {'scale': scale, 'shift': shift},
+            'generated_images_available': generated_images_cdn_url is not None
         }
         
         rlaf_metrics = create_rlaf_metrics(metrics, algorithm, model_info)
@@ -692,8 +866,9 @@ implementation:
             'metrics': metrics,
             'rlaf_metrics': rlaf_metrics,
             'model_info': model_info,
+            'generated_images_info': metrics['generated_images_info'],
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-            'version': 'v12-no-visualization'
+            'version': 'v15-with-generated-images'
         }
         
         # Save results package locally
@@ -703,8 +878,8 @@ implementation:
         
         # Upload results package
         results_package_url = None
-        if args.bearer_token:
-            results_package_url = upload_to_cdn(results_package_path, "evaluation_results_package")
+        if args.bearer_token and args.bearer_token.strip():
+            results_package_url = upload_to_cdn(results_package_path, "evaluation_results_package", ensure_double_dollar=True)
         
         # Save results URL
         with open(args.evaluation_results_url, 'w') as f:
@@ -761,11 +936,17 @@ implementation:
                 'image_fidelity': rlaf_metrics['composite_scores']['image_fidelity'],
                 'diversity_quality': rlaf_metrics['composite_scores']['diversity_quality']
             },
+            'generated_images_info': {
+                'num_samples': num_eval_samples,
+                'shape': list(fake_tensor.shape),
+                'cdn_url': generated_images_cdn_url if generated_images_cdn_url else 'Not uploaded',
+                'local_saved': True
+            },
             'results_package_url': results_package_url if results_package_url else '',
             'calculation_time': metrics.get('calculation_time'),
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
             'model_info': model_info,
-            'note': 'Visualization skipped to avoid file system issues'
+            'note': 'Generated images saved locally and uploaded to CDN'
         }
         
         with open(args.evaluation_summary, 'w') as f:
@@ -790,6 +971,18 @@ implementation:
         print(f"  MSE: {metrics.get('mse', 0):.4f}")
         print(f"  Histogram Correlation: {metrics.get('histogram_correlation', 0):.3f}")
         
+        print("\\n GENERATED IMAGES:")
+        print(f"  Shape: {fake_tensor.shape}")
+        print(f"  Saved locally: {generated_images_local}")
+        print(f"  CDN URL: {'✓ Uploaded' if generated_images_cdn_url else '✗ Not uploaded'}")
+        if generated_images_cdn_url:
+            print(f"  URL preview: {generated_images_cdn_url[:80]}...")
+            # Check for $$ pattern
+            if "_$$_V1_data" in generated_images_cdn_url:
+                print(f"  URL pattern: Has proper _$$_V1_data")
+            elif "_V1_data" in generated_images_cdn_url:
+                print(f"  URL pattern: Missing $$ in _V1_data")
+        
         print("\\n REAL IMAGE STATISTICS:")
         real_stats = metrics.get('real_stats', {})
         print(f"  Mean: {real_stats.get('mean', 0):.3f}")
@@ -812,6 +1005,7 @@ implementation:
         print(f"  Discriminator Quality: {rlaf_metrics['primary_metrics']['discriminator_quality_score']:.3f}")
         
         print("\\n CDN UPLOADS:")
+        print(f"  Generated Images: {'✓ Uploaded' if generated_images_cdn_url else '✗ Failed'}")
         print(f"  Results Package: {'✓ Uploaded' if results_package_url else '✗ Failed'}")
         
         print("\\n OUTPUT FILES:")
@@ -820,6 +1014,7 @@ implementation:
         print(f"  ✓ Generated samples: {args.generated_samples}")
         print(f"  ✓ Evaluation summary: {args.evaluation_summary}")
         print(f"  ✓ Evaluation results URL: {args.evaluation_results_url}")
+        print(f"  ✓ Generated images URL: {args.generated_images_url}")
         
         print("=" * 80)
         
@@ -848,3 +1043,5 @@ implementation:
       - {outputPath: rlaf_metrics}
       - --evaluation_results_url
       - {outputPath: evaluation_results_url}
+      - --generated_images_url
+      - {outputPath: generated_images_url}
