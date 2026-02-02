@@ -1,9 +1,9 @@
-name: Download and Re-upload PT Model v1
+name: Download and Re-upload PT Model v2
 description: Downloads .pt file from CDN, fixes $ characters, verifies .pt format, and re-uploads
 inputs:
   - name: cdn_url
     type: String
-    description: "CDN URL of the model file (may have $ character issues)"
+    description: "CDN URL of the model file (ensure $$ are properly escaped)"
   - name: bearer_token
     type: String
     description: "Bearer token for authentication"
@@ -75,40 +75,75 @@ implementation:
         os.makedirs(os.path.dirname(args.upload_status), exist_ok=True)
         
         print("=" * 80)
-        print("DOWNLOAD AND RE-UPLOAD PT MODEL v1")
+        print("DOWNLOAD AND RE-UPLOAD PT MODEL v2")
         print("=" * 80)
         
         # ============================
-        # STEP 1: PROCESS CDN URL
+        # STEP 1: PROCESS CDN URL (FIX $ ISSUES)
         # ============================
-        print("\\n" + "=" * 80)
-        print("1. PROCESSING CDN URL")
+        print("\n" + "=" * 80)
+        print("1. PROCESSING AND FIXING CDN URL")
         print("=" * 80)
         
         original_url = args.cdn_url.strip()
-        print(f"Original URL: {original_url}")
+        print(f"Original URL received: {original_url}")
         
-        # Fix $ character issues
-        fixed_url = original_url
+        # Count actual $ characters in the string
         dollar_count = original_url.count('$')
+        print(f"Found {dollar_count} $ character(s) in received URL")
         
-        print(f"Found {dollar_count} $ character(s) in URL")
+        # The actual URL should have _$$_ (two dollar signs)
+        # Check if we have the correct pattern
+        target_pattern = "_$$_V1_data"
         
-        if dollar_count == 1:
-            fixed_url = original_url.replace('$', '$$')
-            print(f"Fixed 1$ → 2$: {fixed_url}")
-        elif dollar_count == 2:
-            fixed_url = original_url.replace('$$', '$$$')
-            print(f"Fixed 2$ → 3$: {fixed_url}")
-        elif dollar_count == 0:
-            print("✓ No $ characters found, URL is clean")
+        # First, restore proper $$ if they were lost
+        if "_$_V1_data" in original_url:
+            fixed_url = original_url.replace("_$_V1_data", "_$$_V1_data")
+            print(f"Fixed: Changed _$_ to _$$_")
+        elif "_V1_data" in original_url and "$$" not in original_url and "$" not in original_url:
+            # If no $ at all but we need them
+            parts = original_url.split("_V1_data")
+            fixed_url = parts[0] + "_$$_V1_data" + parts[1] if len(parts) > 1 else parts[0] + "_$$_V1_data"
+            print(f"Added missing $$ before V1_data")
         else:
-            print(f"⚠ URL has {dollar_count} $ characters - using as-is")
+            # Check for various patterns
+            patterns_to_fix = [
+                ("_$$$_", "_$$_"),  # Too many $
+                ("_$$_$$_", "_$$_"),  # Duplicate $$
+                ("_$", "_$$"),  # Missing one $
+                ("$$_", "_$$_"),  # Wrong position
+            ]
+            
+            fixed_url = original_url
+            for old, new in patterns_to_fix:
+                if old in fixed_url:
+                    fixed_url = fixed_url.replace(old, new)
+                    print(f"Fixed pattern: {old} → {new}")
+        
+        # Ensure we have exactly _$$_ before V1_data
+        if "_$$_V1_data" not in fixed_url:
+            # Try to insert it
+            if "_V1_data" in fixed_url:
+                fixed_url = fixed_url.replace("_V1_data", "_$$_V1_data")
+                print(f"Inserted _$$_ before V1_data")
+            elif "V1_data" in fixed_url:
+                fixed_url = fixed_url.replace("V1_data", "_$$_V1_data")
+                print(f"Added _$$_ before V1_data")
+        
+        # Final validation
+        final_dollar_count = fixed_url.count('$')
+        print(f"Final URL has {final_dollar_count} $ characters")
+        
+        if "_$$_V1_data" in fixed_url:
+            print(f"✓ URL has correct _$$_V1_data pattern")
+        else:
+            print(f"⚠ URL doesn't have _$$_V1_data pattern")
+            print(f"  Fixed URL: {fixed_url}")
         
         # ============================
         # STEP 2: DOWNLOAD FILE
         # ============================
-        print("\\n" + "=" * 80)
+        print("\n" + "=" * 80)
         print("2. DOWNLOADING FILE")
         print("=" * 80)
         
@@ -118,73 +153,107 @@ implementation:
         
         headers = {'Authorization': f'Bearer {args.bearer_token.strip()}'}
         
-        try:
-            print(f"Downloading from: {fixed_url}")
-            start_time = time.time()
+        download_success = False
+        download_attempts = []
+        
+        # Try multiple URL variations
+        url_variations = []
+        
+        # 1. The fixed URL (with _$$_)
+        url_variations.append(("Fixed URL (with _$$_)", fixed_url))
+        
+        # 2. Original URL as-is
+        url_variations.append(("Original URL", original_url))
+        
+        # 3. Try with triple $ (sometimes needed for escaping)
+        if "_$$_V1_data" in fixed_url:
+            triple_dollar_url = fixed_url.replace("_$$_V1_data", "_$$$_V1_data")
+            url_variations.append(("Triple $ URL", triple_dollar_url))
+        
+        # 4. Try URL encoded $ signs
+        encoded_dollar_url = fixed_url.replace("$", "%24")
+        url_variations.append(("URL-encoded $", encoded_dollar_url))
+        
+        for attempt_name, attempt_url in url_variations:
+            if download_success:
+                break
+                
+            print(f"\nAttempt: {attempt_name}")
+            print(f"URL: {attempt_url}")
             
-            response = requests.get(fixed_url, headers=headers, stream=True, timeout=300)
-            response.raise_for_status()
-            
-            file_size = int(response.headers.get('content-length', 0))
-            print(f"Content length: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
-            
-            # Download file
-            downloaded = 0
-            sha256_hash = hashlib.sha256()
-            
-            with open(temp_download, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        sha256_hash.update(chunk)
-                        downloaded += len(chunk)
-                        
-                        if downloaded % (5 * 1024 * 1024) < 8192 and file_size > 0:
-                            percent = (downloaded / file_size) * 100
-                            print(f"  Progress: {downloaded/1024/1024:.1f} MB ({percent:.1f}%)")
-            
-            elapsed_time = time.time() - start_time
-            actual_size = os.path.getsize(temp_download)
-            checksum = sha256_hash.hexdigest()
-            
-            print(f"✓ Download completed in {elapsed_time:.1f} seconds")
-            print(f"✓ File size: {actual_size:,} bytes")
-            print(f"✓ SHA256: {checksum[:16]}...")
-            
-        except Exception as e:
-            print(f"✗ Download failed: {str(e)}")
-            
-            # Try with original URL if fixed URL failed
-            if fixed_url != original_url:
-                print(f"Trying with original URL: {original_url}")
-                try:
-                    response = requests.get(original_url, headers=headers, stream=True, timeout=300)
-                    response.raise_for_status()
-                    
-                    with open(temp_download, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                    
-                    actual_size = os.path.getsize(temp_download)
-                    print(f"✓ Downloaded using original URL: {actual_size:,} bytes")
-                except Exception as e2:
-                    print(f"✗ Both URL attempts failed: {str(e2)}")
-                    sys.exit(1)
-            else:
-                sys.exit(1)
+            try:
+                response = requests.get(attempt_url, headers=headers, stream=True, timeout=300)
+                response.raise_for_status()
+                
+                file_size = int(response.headers.get('content-length', 0))
+                print(f"Response status: {response.status_code}")
+                print(f"Content length: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                
+                # Download file
+                start_time = time.time()
+                downloaded = 0
+                sha256_hash = hashlib.sha256()
+                
+                with open(temp_download, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            sha256_hash.update(chunk)
+                            downloaded += len(chunk)
+                            
+                            if downloaded % (5 * 1024 * 1024) < 8192 and file_size > 0:
+                                percent = (downloaded / file_size) * 100
+                                print(f"  Progress: {downloaded/1024/1024:.1f} MB ({percent:.1f}%)")
+                
+                elapsed_time = time.time() - start_time
+                actual_size = os.path.getsize(temp_download)
+                checksum = sha256_hash.hexdigest()
+                
+                print(f"✓ Download successful: {actual_size:,} bytes in {elapsed_time:.1f}s")
+                print(f"✓ Used URL pattern: {attempt_name}")
+                download_success = True
+                final_download_url = attempt_url
+                
+                download_attempts.append({
+                    'attempt': attempt_name,
+                    'url': attempt_url,
+                    'success': True,
+                    'size': actual_size,
+                    'time': elapsed_time
+                })
+                
+                break
+                
+            except Exception as e:
+                print(f"✗ Failed: {str(e)}")
+                download_attempts.append({
+                    'attempt': attempt_name,
+                    'url': attempt_url,
+                    'success': False,
+                    'error': str(e)
+                })
+                continue
+        
+        if not download_success:
+            print("\n✗ All download attempts failed")
+            print("Download attempts summary:")
+            for attempt in download_attempts:
+                status = "✓" if attempt['success'] else "✗"
+                print(f"  {status} {attempt['attempt']}: {attempt.get('error', 'Success')}")
+            sys.exit(1)
         
         # ============================
         # STEP 3: VERIFY .PT FILE
         # ============================
-        print("\\n" + "=" * 80)
+        print("\n" + "=" * 80)
         print("3. VERIFYING .PT FILE")
         print("=" * 80)
         
         verification = {
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
             'original_url': original_url,
-            'fixed_url': fixed_url,
+            'final_download_url': final_download_url,
+            'download_attempts': download_attempts,
             'downloaded_file': temp_download,
             'file_size': actual_size,
             'sha256_checksum': checksum,
@@ -215,7 +284,7 @@ implementation:
             print(f"✓ File command output: {file_output}")
             
             # Check for PyTorch indicators
-            pt_indicators = ['data', 'torch', 'pickle', 'python']
+            pt_indicators = ['data', 'torch', 'pickle', 'python', 'zip']
             is_likely_pt = any(indicator.lower() in file_output.lower() for indicator in pt_indicators)
             
             if is_likely_pt:
@@ -242,6 +311,11 @@ implementation:
                 verification['verification_details']['model_type'] = str(type(model))
                 
                 # Check for common model attributes
+                if isinstance(model, dict):
+                    verification['verification_details']['is_dict'] = True
+                    verification['verification_details']['dict_keys'] = list(model.keys())
+                    print(f"  Loaded as dict with keys: {list(model.keys())[:5]}...")
+                
                 if hasattr(model, 'state_dict'):
                     verification['verification_details']['has_state_dict'] = True
                     verification['verification_details']['state_dict_keys'] = len(list(model.state_dict().keys()))
@@ -251,10 +325,13 @@ implementation:
                 print(f"✗ PyTorch failed to load file: {str(e)}")
                 verification['verification_details']['torch_load_error'] = str(e)
         
-        # Check 4: Magic number check (pickle files)
+        # Check 4: Magic number check
         try:
             with open(temp_download, 'rb') as f:
                 first_bytes = f.read(4)
+            
+            verification['verification_details']['magic_bytes'] = first_bytes.hex()
+            print(f"✓ Magic bytes: {first_bytes.hex()}")
             
             # Check for pickle protocol indicators
             if first_bytes.startswith(b'\\x80'):
@@ -264,19 +341,28 @@ implementation:
                 if not verification['is_pt_file']:
                     verification['is_pt_file'] = True
                     verification['pt_verification_method'] = 'pickle_magic_bytes'
-            else:
-                print(f"⚠ File doesn't start with pickle magic bytes: {first_bytes.hex()}")
+            
+            # Check for ZIP (PyTorch often packages as ZIP)
+            elif first_bytes.startswith(b'PK\\x03\\x04'):
+                print("✓ File is a ZIP archive (common for PyTorch models)")
+                verification['verification_details']['is_zip'] = True
+                
+                if not verification['is_pt_file']:
+                    verification['is_pt_file'] = True
+                    verification['pt_verification_method'] = 'zip_magic_bytes'
+                    
         except Exception as e:
             print(f"⚠ Could not read magic bytes: {str(e)}")
         
         # Final verification status
         if verification['is_pt_file']:
-            print("\\n" + "=" * 40)
+            print("\n" + "=" * 40)
             print("✓ VERIFICATION PASSED: File is a valid .pt file")
             print(f"  Method: {verification['pt_verification_method']}")
+            print(f"  Type: {verification['verification_details'].get('model_type', 'Unknown')}")
             print("=" * 40)
         else:
-            print("\\n" + "=" * 40)
+            print("\n" + "=" * 40)
             print("✗ VERIFICATION FAILED: File may not be a valid .pt file")
             print("=" * 40)
         
@@ -288,7 +374,7 @@ implementation:
         # ============================
         # STEP 4: RE-UPLOAD TO CDN
         # ============================
-        print("\\n" + "=" * 80)
+        print("\n" + "=" * 80)
         print("4. RE-UPLOADING .PT FILE TO CDN")
         print("=" * 80)
         
@@ -361,7 +447,7 @@ implementation:
         # ============================
         # STEP 5: SAVE FINAL OUTPUTS
         # ============================
-        print("\\n" + "=" * 80)
+        print("\n" + "=" * 80)
         print("5. SAVING FINAL OUTPUTS")
         print("=" * 80)
         
@@ -392,7 +478,8 @@ implementation:
             'upload_success': final_cdn_url is not None,
             'verification_passed': verification['is_pt_file'],
             'verification_method': verification['pt_verification_method'],
-            'curl_response': upload_response
+            'curl_response': upload_response,
+            'download_attempts': download_attempts
         }
         
         with open(args.upload_status, 'w') as f:
@@ -405,7 +492,7 @@ implementation:
         except:
             pass
         
-        print("\\n" + "=" * 80)
+        print("\n" + "=" * 80)
         if final_cdn_url and verification['is_pt_file']:
             print("✓ SUCCESS: File downloaded, verified as .pt, and re-uploaded")
             print(f"  Final CDN URL: {final_cdn_url}")
