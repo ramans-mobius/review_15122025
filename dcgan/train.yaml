@@ -1,5 +1,5 @@
-name: Train DCGAN v39 - WITH BLOCK TRAINING AND CDN UPLOAD
-description: Trains DCGAN with Block Training for CAFO/FF and uploads generated images to CDN
+name: Train DCGAN v41 - WITH BLOCK TRAINING AND CDN UPLOAD
+description: Trains DCGAN with Block Training for CAFO/FF and Adversarial Training
 inputs:
   - name: data_path
     type: Dataset
@@ -74,7 +74,7 @@ implementation:
         matplotlib.use('Agg')
         
         print("=" * 80)
-        print("TRAIN DCGAN v39 - WITH BLOCK TRAINING AND CDN UPLOAD")
+        print("TRAIN DCGAN v41 - WITH BLOCK TRAINING AND CDN UPLOAD")
         print("=" * 80)
         print(f"Python version: {sys.version}")
         print(f"Torch version: {torch.__version__}")
@@ -175,109 +175,50 @@ implementation:
         print("COMPATIBILITY: Compatibility classes defined")
 
         print("\\n" + "-" * 40)
-        print("DEFINING CDN UPLOAD FUNCTION")
+        print("CDN UPLOAD FUNCTION")
         print("-" * 40)
         
-        def upload_to_cdn(file_path, description, ensure_double_dollar=False):
+        def upload_to_cdn(file_path, description):
+           
             if not os.path.exists(file_path):
                 print(f"    ERROR: File not found: {file_path}")
                 return None
             
             file_size = os.path.getsize(file_path)
-            print(f"  UPLOAD: Uploading {description} ({file_size:,} bytes)...")
+            print(f"  CDN: Uploading {description} ({file_size:,} bytes)...")
             
-            # Generate unique filename
             unique_id = str(uuid.uuid4())[:8]
+            cdn_filename = f"dcgan_generated_images_{unique_id}.pt"
             
-            # Use appropriate extension
-            if description.lower().endswith('json') or '.json' in file_path.lower():
-                cdn_filename = f"dcgan_{description.replace(' ', '_')}_{unique_id}.json"
-            elif description.lower().endswith('images') or '.pt' in file_path.lower():
-                cdn_filename = f"dcgan_generated_images_{unique_id}.pt"
-            else:
-                cdn_filename = f"dcgan_{description.replace(' ', '_')}_{unique_id}.bin"
-            
-            # URL with proper path for DCGAN models
+            # URL with proper $ handling
             upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2Fmodels%2F"
+            upload_url_encoded = upload_url.replace("$$", "$$$")
             
-            # Build curl command
-            curl_command = [
-                "curl",
-                "--location", 
+            curl_cmd = [
+                "curl", "--location", upload_url_encoded,
+                "--header", f"Authorization: Bearer {args.bearer_token}",
+                "--form", f"file=@{file_path}", "--form", f"filename={cdn_filename}",
+                "--fail", "--show-error", "--connect-timeout", "30", "--max-time", "120",
+                "--silent"
             ]
             
-            # Handle $ characters in URL if needed
-            if ensure_double_dollar and "$$" in upload_url:
-                # Replace $$ with $$$ to ensure they're preserved
-                upload_url_encoded = upload_url.replace("$$", "$$$")
-                curl_command.append(upload_url_encoded)
-                print(f"    UPLOAD: Using triple $ in URL to ensure preservation")
-            else:
-                curl_command.append(upload_url)
-            
-            # Add authorization and form data
-            curl_command.extend([
-                "--header", f"Authorization: Bearer {args.bearer_token}",
-                "--form", f"file=@{file_path}",
-                "--form", f"filename={cdn_filename}",
-                "--fail",
-                "--show-error",
-                "--connect-timeout", "30",
-                "--max-time", "120",
-                "--silent"
-            ])
-            
             try:
-                print(f"    UPLOAD: Executing curl command...")
-                process = subprocess.run(
-                    curl_command,
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
+                process = subprocess.run(curl_cmd, capture_output=True, text=True, check=True)
+                response = json.loads(process.stdout)
+                cdn_path = response.get('cdnUrl') or response.get('info', {}).get('cdnUrl') or response.get('url')
                 
-                response_json = json.loads(process.stdout)
-                
-                # Extract CDN URL - handle different response formats
-                relative_cdn_url = None
-                
-                if 'cdnUrl' in response_json:
-                    relative_cdn_url = response_json['cdnUrl']
-                elif 'info' in response_json and 'cdnUrl' in response_json['info']:
-                    relative_cdn_url = response_json['info']['cdnUrl']
-                elif 'url' in response_json:
-                    relative_cdn_url = response_json['url']
-                
-                if not relative_cdn_url:
-                    print(f"    ERROR: No cdnUrl in response")
-                    return None
-                
-                # Ensure the CDN URL has proper formatting
-                if relative_cdn_url.startswith("http"):
-                    full_url = relative_cdn_url
-                else:
-                    full_url = f"{args.get_cdn}{relative_cdn_url}"
-                
-                # Ensure URL has proper $$ pattern for DCGAN models
-                if "dcgan/models" in full_url and "_V1_data" in full_url and "_$$_V1_data" not in full_url:
-                    # Fix missing $$
-                    if "_$_V1_data" in full_url:
-                        full_url = full_url.replace("_$_V1_data", "_$$_V1_data")
-                        print(f"    UPLOAD: Fixed URL: Added missing $$")
-                
-                print(f"    UPLOAD: Uploaded: {cdn_filename}")
-                print(f"    UPLOAD: URL: {full_url[:100]}...")
-                return full_url
-                
-            except subprocess.CalledProcessError as e:
-                print(f"    UPLOAD ERROR (curl): {e.stderr[:200]}")
-                return None
-            except json.JSONDecodeError as e:
-                print(f"    UPLOAD ERROR (JSON): {str(e)}")
-                return None
+                if cdn_path:
+                    full_url = cdn_path if cdn_path.startswith("http") else f"{args.get_cdn}{cdn_path}"
+                    # Ensure proper $$ pattern
+                    if "_V1_data" in full_url and "_$$_V1_data" not in full_url:
+                        if "_$_V1_data" in full_url:
+                            full_url = full_url.replace("_$_V1_data", "_$$_V1_data")
+                    print(f"    CDN: Uploaded: {cdn_filename}")
+                    return full_url
             except Exception as e:
-                print(f"    UPLOAD ERROR: {str(e)[:100]}")
-                return None
+                print(f"    CDN ERROR: {str(e)[:100]}")
+            
+            return None
         
         print("\\n" + "-" * 40)
         print("IMPORTING DCGAN MODULES")
@@ -288,6 +229,12 @@ implementation:
             import nesy_factory.GANs.dcgan as dcgan_module
             print("SUCCESS: Successfully imported nesy_factory.GANs.dcgan")
             
+            # Check what's available
+            available_attrs = [attr for attr in dir(dcgan_module) if not attr.startswith('_')]
+            print(f"INFO: Available attributes ({len(available_attrs)}):")
+            for i in range(0, len(available_attrs), 10):
+                print(f"   {', '.join(available_attrs[i:i+10])}")
+            
             # Try to import specific classes with fallbacks
             try:
                 from nesy_factory.GANs.dcgan import DCGANConfig
@@ -295,6 +242,13 @@ implementation:
             except ImportError:
                 print("   WARNING: DCGANConfig not found, will create config manually")
                 DCGANConfig = None
+            
+            try:
+                from nesy_factory.GANs.dcgan import TrainingAlgorithm
+                print("  IMPORT: TrainingAlgorithm imported")
+            except ImportError:
+                print("   WARNING: TrainingAlgorithm not found")
+                TrainingAlgorithm = None
             
             try:
                 from nesy_factory.GANs.dcgan import EnhancedDCGANTrainer
@@ -323,7 +277,6 @@ implementation:
             sys.exit(1)
         
         parser = argparse.ArgumentParser()
-        # Existing parameters
         parser.add_argument("--data_path", required=True)
         parser.add_argument("--master_config", required=True)
         parser.add_argument("--model_input", required=True)
@@ -341,7 +294,7 @@ implementation:
         args = parser.parse_args()
         
         print("\\n" + "="*80)
-        print("DCGAN TRAINING v39 - WITH CDN UPLOAD")
+        print("DCGAN TRAINING v41 - WITH BLOCK TRAINING AND CDN UPLOAD")
         print("="*80)
 
         print("\\n" + "-" * 40)
@@ -349,14 +302,9 @@ implementation:
         print("-" * 40)
         
         output_paths = [
-            args.trained_model,
-            args.training_history,
-            args.training_metrics,
-            args.generated_samples,
-            args.generated_images_urls,
-            args.training_images_summary,
-            args.block_training_logs,
-            args.generated_images_cdn_url
+            args.trained_model, args.training_history, args.training_metrics,
+            args.generated_samples, args.generated_images_urls, args.training_images_summary,
+            args.block_training_logs, args.generated_images_cdn_url
         ]
         
         for path in output_paths:
@@ -365,60 +313,6 @@ implementation:
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
                     print(f"  DIRECTORY: Created: {dir_path}")
-      
-        
-        def save_and_upload_generated_images(fake_images, algorithm, batch_size):
-            
-            print(f"\\nCDN UPLOAD: Saving and uploading generated images...")
-            print(f"  CDN UPLOAD: Images shape: {fake_images.shape}")
-            print(f"  CDN UPLOAD: Number of images: {len(fake_images)}")
-            print(f"  CDN UPLOAD: Algorithm: {algorithm}")
-            
-            # Create temp directory for generated images
-            temp_dir = "/tmp/generated_images"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            # Save images as PyTorch tensor file
-            timestamp = int(time.time())
-            images_filename = f"dcgan_generated_{algorithm}_{timestamp}_{batch_size}samples.pt"
-            images_local_path = os.path.join(temp_dir, images_filename)
-            
-            # Save tensor
-            torch.save(fake_images, images_local_path)
-            file_size = os.path.getsize(images_local_path)
-            print(f"  CDN UPLOAD: Images saved locally: {images_local_path}")
-            print(f"  CDN UPLOAD: File size: {file_size:,} bytes")
-            
-            # Upload to CDN if bearer token is provided
-            images_cdn_url = None
-            if args.bearer_token and args.bearer_token.strip():
-                print(f"  CDN UPLOAD: Uploading images to CDN...")
-                
-                # Upload with proper $ handling
-                images_cdn_url = upload_to_cdn(
-                    images_local_path, 
-                    f"generated images {algorithm}",
-                    ensure_double_dollar=True  # Use triple $$$ to ensure double $$ in final URL
-                )
-                
-                if images_cdn_url:
-                    print(f"  CDN UPLOAD: Images uploaded to CDN")
-                    
-                    # Ensure URL has proper $$ pattern
-                    if "_V1_data" in images_cdn_url and "_$$_V1_data" not in images_cdn_url:
-                        # Try to fix the pattern
-                        if "_$_V1_data" in images_cdn_url:
-                            images_cdn_url = images_cdn_url.replace("_$_V1_data", "_$$_V1_data")
-                            print(f"  CDN UPLOAD: Fixed URL pattern: Added $$")
-                        elif "V1_data" in images_cdn_url:
-                            images_cdn_url = images_cdn_url.replace("V1_data", "_$$_V1_data")
-                            print(f"  CDN UPLOAD: Fixed URL pattern: Added _$$_")
-                else:
-                    print(f"  CDN UPLOAD: Images upload failed")
-            else:
-                print(f"  CDN UPLOAD: Skipping CDN upload (no bearer token)")
-            
-            return images_local_path, images_cdn_url
         
         print("\\n" + "-" * 40)
         print("PARSING MASTER CONFIG")
@@ -483,6 +377,7 @@ implementation:
                     sys.exit(1)
             
             print(f"INFO: Data wrapper type: {type(data_wrapper)}")
+            print(f"INFO: Available attributes: {[a for a in dir(data_wrapper) if not a.startswith('_')]}")
             
             # Handle different data wrapper types from preprocess brick
             if isinstance(data_wrapper, PreprocessedDataset):
@@ -1068,6 +963,7 @@ implementation:
             traceback.print_exc()
             training_success = False
 
+        
         print(f"\\nGENERATING SAMPLES...")
         
         try:
@@ -1091,47 +987,37 @@ implementation:
             traceback.print_exc()
             samples = torch.randn(16, channels, image_size, image_size) * 0.5 + 0.5
 
-        print(f"\\n" + "="*60)
-        print(f"PHASE 3: CDN UPLOAD OF GENERATED IMAGES")
-        print("="*60)
-        
+        # CDN UPLOAD OF GENERATED IMAGES
         generated_images_cdn_url = ""
-        generated_images_local = ""
-        
         if args.bearer_token and args.bearer_token.strip():
-            # Save and upload generated images
-            generated_images_local, generated_images_cdn_url = save_and_upload_generated_images(
-                samples, algorithm, len(samples)
-            )
+            print(f"\\n" + "="*60)
+            print("CDN UPLOAD OF GENERATED IMAGES")
+            print("="*60)
             
-            # Save CDN URL to output
-            with open(args.generated_images_cdn_url, 'w') as f:
-                if generated_images_cdn_url:
-                    f.write(generated_images_cdn_url)
-                    print(f"SAVED: Generated images CDN URL saved: {args.generated_images_cdn_url}")
-                else:
-                    f.write("")
-                    print(f"WARNING: No CDN URL for generated images (upload may have failed)")
-        else:
-            print(f"SKIPPING: No bearer token provided, skipping CDN upload")
-            with open(args.generated_images_cdn_url, 'w') as f:
-                f.write("")
+            # Save images locally
+            temp_dir = "/tmp/generated_images"
+            os.makedirs(temp_dir, exist_ok=True)
+            images_filename = f"dcgan_generated_{algorithm}_{int(time.time())}.pt"
+            images_local_path = os.path.join(temp_dir, images_filename)
+            torch.save(samples, images_local_path)
+            
+            # Upload to CDN
+            generated_images_cdn_url = upload_to_cdn(images_local_path, f"generated images {algorithm}")
+        
+        # Save CDN URL
+        with open(args.generated_images_cdn_url, 'w') as f:
+            f.write(generated_images_cdn_url if generated_images_cdn_url else "")
         
         print(f"\\nSAVING BLOCK TRAINING LOGS...")
-        
         try:
-            # Save block training results
             with open(args.block_training_logs, 'w') as f:
                 json.dump(block_training_results, f, indent=2)
-            print(f"SAVED: Block training logs saved: {args.block_training_logs}")
-            
         except Exception as e:
             print(f"ERROR: saving block training logs: {e}")
 
         print(f"\\nSAVING ALL OUTPUT FILES...")
         
-        # 1. Save trained model
-        print(f"SAVING TRAINED MODEL...")
+        # Save trained model
         try:
             checkpoint = {
                 'model_source': 'trained',
@@ -1147,16 +1033,13 @@ implementation:
                 'latent_dim': latent_dim,
                 'image_size': image_size,
                 'channels': channels,
-                'generated_images_cdn_url': generated_images_cdn_url if generated_images_cdn_url else ""
+                'generated_images_cdn_url': generated_images_cdn_url
             }
-            
             torch.save(checkpoint, args.trained_model)
-            print(f"SAVED: Trained model saved: {args.trained_model}")
         except Exception as e:
             print(f"ERROR: saving trained model: {e}")
         
-        # 2. Save training history
-        print(f"SAVING TRAINING HISTORY...")
+        # Save training history
         try:
             history_data = {
                 'epoch_losses': training_history['epoch_losses'],
@@ -1169,21 +1052,17 @@ implementation:
                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'num_samples': len(train_dataset),
                 'block_training_results': block_training_results,
-                'generated_images_cdn_url': generated_images_cdn_url if generated_images_cdn_url else ""
+                'generated_images_cdn_url': generated_images_cdn_url
             }
-            
             with open(args.training_history, 'w') as f:
                 json.dump(history_data, f, indent=2)
-            print(f"SAVED: Training history saved: {args.training_history}")
         except Exception as e:
             print(f"ERROR: saving training history: {e}")
         
-        # 3. Save training metrics
-        print(f"SAVING TRAINING METRICS...")
+        # Save training metrics
         try:
             final_g_loss = training_history['generator_losses'][-1] if training_history['generator_losses'] else 0
             final_d_loss = training_history['discriminator_losses'][-1] if training_history['discriminator_losses'] else 0
-            
             metrics_data = {
                 'final_generator_loss': float(final_g_loss),
                 'final_discriminator_loss': float(final_d_loss),
@@ -1193,21 +1072,14 @@ implementation:
                 'algorithm': algorithm,
                 'device': str(device),
                 'timestamp': time.strftime('%Y-%m-dT%H:%M:%SZ'),
-                'model_parameters': {
-                    'generator': sum(p.numel() for p in trainer.generator.parameters()),
-                    'discriminator': sum(p.numel() for p in trainer.discriminator.parameters())
-                },
-                'generated_images_cdn_url': generated_images_cdn_url if generated_images_cdn_url else ""
+                'generated_images_cdn_url': generated_images_cdn_url
             }
-            
             with open(args.training_metrics, 'w') as f:
                 json.dump(metrics_data, f, indent=2)
-            print(f"SAVED: Training metrics saved: {args.training_metrics}")
         except Exception as e:
             print(f"ERROR: saving training metrics: {e}")
         
-        # 4. Save generated samples
-        print(f"SAVING GENERATED SAMPLES...")
+        # Save generated samples
         try:
             generated_dataset = PreprocessedDataset(
                 samples,
@@ -1215,36 +1087,27 @@ implementation:
                 f"dcgan_{algorithm}_generated_{int(time.time())}",
                 {}
             )
-            
             with open(args.generated_samples, 'wb') as f:
                 pickle.dump(generated_dataset, f)
-            print(f"SAVED: Generated samples saved: {args.generated_samples}")
         except Exception as e:
             print(f"ERROR: saving generated samples: {e}")
         
-        # 5. Save generated images URLs
-        print(f"SAVING GENERATED IMAGES URLS...")
+        # Save generated images URLs
         try:
             urls_data = {
                 'generated_images': generated_images_cdn_url if generated_images_cdn_url else "",
-                'local_path': generated_images_local if generated_images_local else "",
                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'algorithm': algorithm,
-                'num_samples': len(samples),
-                'message': 'Images uploaded to CDN' if generated_images_cdn_url else 'Images not uploaded to CDN'
+                'num_samples': len(samples)
             }
-            
             with open(args.generated_images_urls, 'w') as f:
                 json.dump(urls_data, f, indent=2)
-            print(f"SAVED: Generated images URLs saved: {args.generated_images_urls}")
         except Exception as e:
             print(f"ERROR: saving generated images URLs: {e}")
         
-        # 6. Save training images summary
-        print(f"SAVING TRAINING IMAGES SUMMARY...")
+        # Save training images summary
         try:
-            cdn_status = "✓ Uploaded to CDN" if generated_images_cdn_url else "✗ Not uploaded (no bearer token or upload failed)"
-            
+            cdn_status = "✓ Uploaded to CDN" if generated_images_cdn_url else "✗ Not uploaded"
             summary_content = f'''DCGAN Training Summary
             ==========================
             Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1254,35 +1117,20 @@ implementation:
             Training Time: {training_time:.2f}s
             Device: {device}
             
-            Model Parameters:
-            - Generator: {sum(p.numel() for p in trainer.generator.parameters()):,}
-            - Discriminator: {sum(p.numel() for p in trainer.discriminator.parameters()):,}
-            
             Final Losses:
             - Generator: {final_g_loss:.4f}
             - Discriminator: {final_d_loss:.4f}
             
-            Dataset:
-            - Samples: {len(train_dataset)}
-            - Image Size: {image_size}
-            - Channels: {channels}
-            
-            Generated Samples:
-            - Count: {len(samples)}
-            - Shape: {tuple(samples.shape)}
-            - Range: [{samples.min():.3f}, {samples.max():.3f}]
-            - CDN Status: {cdn_status}
-            - CDN URL: {generated_images_cdn_url[:100] if generated_images_cdn_url else "N/A"}
+            Generated Samples: {len(samples)}
+            CDN Status: {cdn_status}
             
             Block Training:
             - Enabled: {should_do_block_training}
             - Generator Blocks Trained: {len(block_training_results.get('generator_blocks', []))}
             - Discriminator Blocks Trained: {len(block_training_results.get('discriminator_blocks', []))}
             '''
-            
             with open(args.training_images_summary, 'w') as f:
                 f.write(summary_content)
-            print(f"SAVED: Training images summary saved: {args.training_images_summary}")
         except Exception as e:
             print(f"ERROR: saving training images summary: {e}")
 
@@ -1291,22 +1139,10 @@ implementation:
         print("="*80)
         print(f"Algorithm: {algorithm.upper()}")
         print(f"Epochs: {epochs}")
-        print(f"Batch Size: {batch_size}")
         print(f"Training Time: {training_time:.2f}s")
-        print(f"Device: {device}")
         print(f"Final Losses - G: {final_g_loss:.4f}, D: {final_d_loss:.4f}")
         print(f"Generated Samples: {len(samples)}")
         print(f"CDN Upload: {'✓ Success' if generated_images_cdn_url else '✗ Failed/Not attempted'}")
-        
-        print(f"\\n OUTPUT FILES SAVED:")
-        print(f"   Model: {args.trained_model}")
-        print(f"   Training History: {args.training_history}")
-        print(f"   Training Metrics: {args.training_metrics}")
-        print(f"   Generated Samples: {args.generated_samples}")
-        print(f"   Generated Images URLs: {args.generated_images_urls}")
-        print(f"   Training Summary: {args.training_images_summary}")
-        print(f"   Block Training Logs: {args.block_training_logs}")
-        print(f"   Generated Images CDN URL: {args.generated_images_cdn_url}")
         print("="*80)
         
     args:
