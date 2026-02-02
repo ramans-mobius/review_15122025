@@ -34,7 +34,7 @@ outputs:
 
 implementation:
   container:
-    image: kushagra4761/nesy-factory:t2.6v2
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -c
