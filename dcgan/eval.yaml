@@ -1,4 +1,4 @@
-name: Evaluate DCGAN v16
+name: Evaluate DCGAN v17
 description: Evaluates DCGAN with comprehensive metrics and uploads generated images to CDN
 inputs:
   - name: trained_model
@@ -976,7 +976,7 @@ implementation:
         print(f"  Saved locally: {generated_images_local}")
         print(f"  CDN URL: {'✓ Uploaded' if generated_images_cdn_url else '✗ Not uploaded'}")
         if generated_images_cdn_url:
-            print(f"  URL preview: {generated_images_cdn_url[:80]}...")
+            print(f"  URL preview: {generated_images_cdn_url}...")
             # Check for $$ pattern
             if "_$$_V1_data" in generated_images_cdn_url:
                 print(f"  URL pattern: Has proper _$$_V1_data")
