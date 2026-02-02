@@ -1,0 +1,422 @@
+name: I Update Schema Row v2
+description: Updates a row in a schema based on a mapping between column names and a JSON object.
+
+inputs:
+  - { name: schema_id, type: String, description: "The ID of the schema to update." }
+  - { name: update_data_json, type: String, description: "JSON string containing the data to update." }
+  - { name: mapping_json, type: String, description: "JSON string mapping column names to keys in update_data_json." }
+  - { name: model_id, type: String, description: "The ID of the model to filter by." }
+  - { name: execution_id, type: String, description: "The ID of the model to filter by." }
+  - { name: tenant_id, type: string, description: "The ID of the tenant." }
+  - { name: project_id, type: String, description: "The ID of the project." }
+  - { name: architecture_type, type: String, description: "The architecture type." }
+  - { name: multiple_rows_json, type: String, description: "JSON string containing a list of rows to create." }
+  - { name: bearer_auth_token, type: string, description: "Bearer token for authentication." }
+  - { name: domain, type: String, description: "The domain for the API endpoint." }
+  - { name: float_keys_json, type: String, description: "JSON string of a list of keys to be converted to float."}
+  # New inputs for model artifacts from pipeline
+  - { name: trained_model_path, type: inputPath, description: "Path to trained model file.", default: "-1" }
+  - { name: model_metadata_path, type: inputPath, description: "Path to model metadata file.", default: "-1" }
+  - { name: model_config_path, type: inputPath, description: "Path to model configuration file.", default: "-1" }
+  - { name: training_history_path, type: inputPath, description: "Path to training history file.", default: "-1" }
+  - { name: eval_metrics_path, type: inputPath, description: "Path to evaluation metrics file.", default: "-1" }
+  - { name: model_weights_url, type: String, description: "URL for model weights (will encode $$ to %24%24).", default: "-1" }
+  - { name: model_metadata_url, type: String, description: "URL for model metadata (will encode $$ to %24%24).", default: "-1" }
+
+implementation:
+  container:
+    image: python:3.9-slim
+    command:
+      - sh
+      - -c
+      - |
+        pip install requests
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import json
+        import argparse
+        import requests
+        import os
+        from urllib.parse import quote
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        def encode_dollar_signs(url):
+            """Encode single $ to %24%24 in URLs"""
+            if not url:
+                return url
+            # Replace single $ with %24%24
+            return url.replace('$', '%24%24')
+
+        def read_file_content(filepath):
+            """Read content from file if it exists"""
+            if filepath and os.path.exists(filepath):
+                with open(filepath, 'r') as f:
+                    return f.read().strip()
+            return None
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--schema_id', type=str, required=True)
+        parser.add_argument('--update_data_json', type=str, required=True)
+        parser.add_argument('--mapping_json', type=str, required=True)
+        parser.add_argument('--model_id', type=str, required=True)
+        parser.add_argument('--execution_id', type=str, required=True)
+        parser.add_argument('--tenant_id', type=str, required=True)
+        parser.add_argument('--project_id', type=str, required=True)
+        parser.add_argument('--architecture_type', type=str, required=True)
+        parser.add_argument('--multiple_rows_json', type=str, required=True)
+        parser.add_argument('--bearer_auth_token', type=str, required=True)
+        parser.add_argument('--domain', type=str, required=True)
+        parser.add_argument('--float_keys_json', type=str, required=False)
+        # New arguments for model artifacts
+        parser.add_argument('--trained_model_path', type=str, required=False)
+        parser.add_argument('--model_metadata_path', type=str, required=False)
+        parser.add_argument('--model_config_path', type=str, required=False)
+        parser.add_argument('--training_history_path', type=str, required=False)
+        parser.add_argument('--eval_metrics_path', type=str, required=False)
+        parser.add_argument('--model_weights_url', type=str, required=False)
+        parser.add_argument('--model_metadata_url', type=str, required=False)
+        args = parser.parse_args()
+
+        execution_id_int = int(args.execution_id)
+
+        with open(args.bearer_auth_token, 'r') as f:
+            bearer_auth_token = f.read().strip()
+
+        with open(args.tenant_id, 'r') as f:
+            tenant_id = f.read().strip()
+
+        print(f" Input Data ")
+        print(f"update_data_json: {args.update_data_json}")
+        print(f"mapping_json: {args.mapping_json}")
+        
+        update_data = json.loads(args.update_data_json)
+        mapping = json.loads(args.mapping_json)
+        float_keys = json.loads(args.float_keys_json) if args.float_keys_json else []
+
+        # Read model artifacts if provided
+        model_weights_cdn = None
+        model_metadata_cdn = None
+        model_specific_config = None
+        training_metrics = None
+        
+        if args.model_weights_url != '-1':
+            model_weights_cdn = encode_dollar_signs(args.model_weights_url)
+            print(f"Model weights URL (encoded): {model_weights_cdn}")
+        
+        if args.model_metadata_url != '-1':
+            model_metadata_cdn = encode_dollar_signs(args.model_metadata_url)
+            print(f"Model metadata URL (encoded): {model_metadata_cdn}")
+        
+        if args.trained_model_path != '-1':
+            model_content = read_file_content(args.trained_model_path)
+            if model_content:
+                print(f"Read trained model from: {args.trained_model_path}")
+        
+        if args.model_metadata_path != '-1':
+            metadata_content = read_file_content(args.model_metadata_path)
+            if metadata_content:
+                print(f"Read model metadata from: {args.model_metadata_path}")
+                try:
+                    model_specific_config = json.loads(metadata_content)
+                except json.JSONDecodeError:
+                    model_specific_config = metadata_content
+        
+        if args.model_config_path != '-1':
+            config_content = read_file_content(args.model_config_path)
+            if config_content:
+                print(f"Read model config from: {args.model_config_path}")
+        
+        if args.training_history_path != '-1':
+            history_content = read_file_content(args.training_history_path)
+            if history_content:
+                print(f"Read training history from: {args.training_history_path}")
+        
+        if args.eval_metrics_path != '-1':
+            eval_content = read_file_content(args.eval_metrics_path)
+            if eval_content:
+                print(f"Read evaluation metrics from: {args.eval_metrics_path}")
+                try:
+                    training_metrics = json.loads(eval_content)
+                except json.JSONDecodeError:
+                    training_metrics = eval_content
+
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_auth_token}'
+        }
+
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[408, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "PUT", "POST", "DELETE", "OPTIONS", "TRACE"],
+            backoff_factor=1
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        http = requests.Session()
+        http.mount("https://", adapter)
+        http.mount("http://", adapter)
+
+        if args.multiple_rows_json != '-1':
+            rows_to_create = json.loads(args.multiple_rows_json)
+            for row in rows_to_create:
+                if args.tenant_id != '-1':
+                    with open(args.tenant_id, 'r') as f:
+                        row['tenant_id'] = f.read().strip()
+                if args.project_id != '-1':
+                    row['projectId'] = args.project_id
+                if args.architecture_type != '-1':
+                    row['architecture_type'] = args.architecture_type
+                if 'execution_id' not in row and args.execution_id != '-1':
+                    row['execution_id']=execution_id_int
+                # Add model weights metadata from pipeline artifacts
+                if model_weights_cdn:
+                    row['model_weights_cdn'] = model_weights_cdn
+                if model_metadata_cdn:
+                    row['model_metadata_cdn'] = model_metadata_cdn
+                if model_specific_config:
+                    row['model_specific_config'] = model_specific_config
+                if training_metrics:
+                    # You can map specific metrics from training_metrics to schema fields
+                    if isinstance(training_metrics, dict):
+                        # Example mapping - adjust based on your actual metrics structure
+                        if 'parameter_count' in training_metrics:
+                            row['parameter_count'] = str(training_metrics['parameter_count'])
+                        if 'input_shape' in training_metrics:
+                            row['input_shape'] = str(training_metrics['input_shape'])
+                        if 'output_shape' in training_metrics:
+                            row['output_shape'] = str(training_metrics['output_shape'])
+            
+            create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+            create_payload = {"data": rows_to_create}
+            
+            print(f" Creating Multiple Rows ")
+            print(f"Request URL: POST {create_url}")
+            print(f"Request Headers: {json.dumps(headers)}")
+            print(f"Request Payload: {json.dumps(create_payload, indent=2)}")
+
+            try:
+                response = http.post(create_url, headers=headers, data=json.dumps(create_payload), timeout=60)
+                response.raise_for_status()
+                print("Successfully created multiple model instances.")
+                print(f"Response: {response.json()}")
+            except requests.exceptions.RequestException as e:
+                print(f"Error creating multiple model instances: {e}")
+                print(f"Failed Request Payload: {json.dumps(create_payload, indent=2)}")
+                if e.response:
+                    print(f"Response Status Code: {e.response.status_code}")
+                    print(f"Response Content: {e.response.text}")
+                exit(1)
+        else:
+            # Check if execution_id exists
+            check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
+            check_payload = {
+                "dbType": "TIDB",
+                "ownedOnly": True,
+                "filter": {
+                    "execution_id": execution_id_int
+                }
+            }
+            
+            print(f" Checking for Existing Row with execution_id: {execution_id_int} ")
+            print(f"Request URL: POST {check_url}")
+            print(f"Request Headers: {json.dumps(headers)}")
+            print(f"Request Payload: {json.dumps(check_payload, indent=2)}")
+
+            try:
+                response = http.post(check_url, headers=headers, data=json.dumps(check_payload), timeout=60)
+                response.raise_for_status()
+                response_data = response.json()
+                
+                if response_data.get("content"):
+                    print(f" Instance Found: Updating Row ")
+                    patch_requests = []
+                    for column, keys in mapping.items():
+                        value_to_patch = None
+                        if isinstance(keys, list):
+                            value_to_patch = {key: update_data.get(key) for key in keys if key in update_data}
+                        else:
+                            if keys in update_data:
+                                value = update_data.get(keys)
+                                if keys in float_keys:
+                                    try:
+                                        value_to_patch = float(value)
+                                    except (ValueError, TypeError):
+                                        value_to_patch = str(value)
+                                else:
+                                    value_to_patch = str(value)
+
+                        if value_to_patch is not None:
+                            patch_requests.append({
+                                "operation": "REPLACE",
+                                "path": column,
+                                "value": value_to_patch
+                            })
+                    
+                    # Add model weights metadata patches
+                    if model_weights_cdn:
+                        patch_requests.append({
+                            "operation": "REPLACE",
+                            "path": "model_weights_cdn",
+                            "value": model_weights_cdn
+                        })
+                    if model_metadata_cdn:
+                        patch_requests.append({
+                            "operation": "REPLACE",
+                            "path": "model_metadata_cdn",
+                            "value": model_metadata_cdn
+                        })
+                    if model_specific_config:
+                        patch_requests.append({
+                            "operation": "REPLACE",
+                            "path": "model_specific_config",
+                            "value": model_specific_config
+                        })
+                    if training_metrics and isinstance(training_metrics, dict):
+                        if 'parameter_count' in training_metrics:
+                            patch_requests.append({
+                                "operation": "REPLACE",
+                                "path": "parameter_count",
+                                "value": str(training_metrics['parameter_count'])
+                            })
+
+                    update_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                    update_payload = {
+                        "dbType": "TIDB",
+                        "conditionalFilter": {
+                            "conditions": [
+                                {
+                                    "field": "execution_id",
+                                    "operator": "EQUAL",
+                                    "value": execution_id_int
+                                }
+                            ]
+                        },
+                        "partialUpdateRequests": [
+                            {
+                                "patch": patch_requests
+                            }
+                        ]
+                    }
+                    
+                    print(f"Request URL: PATCH {update_url}")
+                    print(f"Request Headers: {json.dumps(headers)}")
+                    print(f"Request Payload: {json.dumps(update_payload, indent=2)}")
+                    
+                    response = http.patch(update_url, headers=headers, data=json.dumps(update_payload), timeout=60)
+                    response.raise_for_status()
+                    print("Successfully updated the model instance.")
+                else:
+                    print(f" No Instance Found: Creating New Row ")
+                    creation_data = {}
+                    for column, keys in mapping.items():
+                        value_to_add = None
+                        if isinstance(keys, list):
+                            value_to_add = {key: update_data.get(key) for key in keys if key in update_data}
+                        else:
+                            if keys in update_data:
+                                value = update_data.get(keys)
+                                if keys in float_keys:
+                                    try:
+                                        value_to_add = float(value)
+                                    except (ValueError, TypeError):
+                                        value_to_add = str(value)
+                                else:
+                                    value_to_add = str(value)
+
+                        if value_to_add is not None:
+                            creation_data[column] = value_to_add
+                    
+                    creation_data['execution_id'] = execution_id_int
+                    if args.model_id != '-1':
+                        creation_data['model_id'] = args.model_id
+                    if args.tenant_id != '-1':
+                        creation_data['tenant_id'] = tenant_id
+                    if args.project_id != '-1':
+                        creation_data['projectId'] = args.project_id
+                    if args.architecture_type != '-1':
+                        creation_data['architecture_type'] = args.architecture_type
+                    
+                    # Add model weights metadata
+                    if model_weights_cdn:
+                        creation_data['model_weights_cdn'] = model_weights_cdn
+                    if model_metadata_cdn:
+                        creation_data['model_metadata_cdn'] = model_metadata_cdn
+                    if model_specific_config:
+                        creation_data['model_specific_config'] = model_specific_config
+                    if training_metrics and isinstance(training_metrics, dict):
+                        if 'parameter_count' in training_metrics:
+                            creation_data['parameter_count'] = str(training_metrics['parameter_count'])
+                        if 'input_shape' in training_metrics:
+                            creation_data['input_shape'] = str(training_metrics['input_shape'])
+                        if 'output_shape' in training_metrics:
+                            creation_data['output_shape'] = str(training_metrics['output_shape'])
+
+                    create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
+                    create_payload = {
+                        "data": [creation_data]
+                    }
+
+                    print(f"Request URL: POST {create_url}")
+                    print(f"Request Headers: {json.dumps(headers)}")
+                    print(f"Request Payload: {json.dumps(create_payload, indent=2)}")
+                    
+                    response = http.post(create_url, headers=headers, data=json.dumps(create_payload), timeout=60)
+                    if response.status_code >= 400:
+                        print(f"Error: {response.status_code} {response.reason}")
+                        print(f"Response Content: {response.text}")
+                    response.raise_for_status()
+                    print("Successfully created a new model instance.")
+                    
+                print(f"Response: {response.json()}")
+
+            except requests.exceptions.RequestException as e:
+                print(f"Error: {e}")
+                if e.response is not None:
+                    print(f"Response Status Code: {e.response.status_code}")
+                    print(f"Response Content: {e.response.text}")
+                exit(1)
+
+    args:
+      - --schema_id
+      - {inputValue: schema_id}
+      - --update_data_json
+      - {inputValue: update_data_json}
+      - --mapping_json
+      - {inputValue: mapping_json}
+      - --model_id
+      - {inputValue: model_id}
+      - --execution_id
+      - {inputValue: execution_id}
+      - --tenant_id
+      - {inputPath: tenant_id}
+      - --project_id
+      - {inputValue: project_id}
+      - --architecture_type
+      - {inputValue: architecture_type}
+      - --multiple_rows_json
+      - {inputValue: multiple_rows_json}
+      - --bearer_auth_token
+      - {inputPath: bearer_auth_token}
+      - --domain
+      - {inputValue: domain}
+      - --float_keys_json
+      - {inputValue: float_keys_json}
+      # New arguments
+      - --trained_model_path
+      - {inputPath: trained_model_path}
+      - --model_metadata_path
+      - {inputPath: model_metadata_path}
+      - --model_config_path
+      - {inputPath: model_config_path}
+      - --training_history_path
+      - {inputPath: training_history_path}
+      - --eval_metrics_path
+      - {inputPath: eval_metrics_path}
+      - --model_weights_url
+      - {inputValue: model_weights_url}
+      - --model_metadata_url
+      - {inputValue: model_metadata_url}
