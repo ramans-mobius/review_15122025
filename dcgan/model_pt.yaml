@@ -1,4 +1,4 @@
-name: Download and Re-upload PT Model v3
+name: Download and Re-upload PT Model v4
 description: Downloads .pt file from CDN, fixes $ characters, verifies .pt format, and re-uploads
 inputs:
   - name: cdn_url
@@ -68,14 +68,23 @@ implementation:
         
         args = parser.parse_args()
         
+        # DEBUG: Print output paths
+        print("DEBUG: Output paths:")
+        print(f"  final_model_pt: {args.final_model_pt}")
+        print(f"  final_cdn_url: {args.final_cdn_url}")
+        print(f"  verification_status: {args.verification_status}")
+        print(f"  upload_status: {args.upload_status}")
+        
         # Create output directories
-        os.makedirs(os.path.dirname(args.final_model_pt), exist_ok=True)
-        os.makedirs(os.path.dirname(args.final_cdn_url), exist_ok=True)
-        os.makedirs(os.path.dirname(args.verification_status), exist_ok=True)
-        os.makedirs(os.path.dirname(args.upload_status), exist_ok=True)
+        for path in [args.final_model_pt, args.final_cdn_url, args.verification_status, args.upload_status]:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"DEBUG: Created directory: {dir_path}")
         
         print("=" * 80)
-        print("DOWNLOAD AND RE-UPLOAD PT MODEL v2")
+        print("DOWNLOAD AND RE-UPLOAD PT MODEL v3")
         print("=" * 80)
         
         # ============================
@@ -165,7 +174,7 @@ implementation:
         # 2. Original URL as-is
         url_variations.append(("Original URL", original_url))
         
-        # 3. Try with triple $ (sometimes needed for escaping)
+        # 3. Try with triple $ (sometimes needed for escaping) - THIS IS THE KEY!
         if "_$$_V1_data" in fixed_url:
             triple_dollar_url = fixed_url.replace("_$$_V1_data", "_$$$_V1_data")
             url_variations.append(("Triple $ URL", triple_dollar_url))
@@ -388,10 +397,12 @@ implementation:
         print(f"Generated filename: {filename}")
         print(f"Source file: {temp_download} ({actual_size:,} bytes)")
         
-        # Upload using curl
+        # Upload using curl - IMPORTANT: Use triple $ in upload URL
+        # Replace $$ with $$$ to ensure they're preserved
+        upload_url_encoded = upload_url.replace("$$", "$$$")
         curl_command = [
             "curl",
-            "--location", upload_url,
+            "--location", upload_url_encoded,
             "--header", f"Authorization: Bearer {args.bearer_token.strip()}",
             "--form", f"file=@{temp_download}",
             "--form", f"filename={filename}",
@@ -445,21 +456,41 @@ implementation:
             print(f"✗ Upload error: {str(e)}")
         
         # ============================
-        # STEP 5: SAVE FINAL OUTPUTS
+        # STEP 5: SAVE FINAL OUTPUTS - FIXED SECTION
         # ============================
         print("\\n" + "=" * 80)
         print("5. SAVING FINAL OUTPUTS")
         print("=" * 80)
         
+        # DEBUG: Show what we're saving
+        print(f"DEBUG: temp_download path: {temp_download}")
+        print(f"DEBUG: final_model_pt path: {args.final_model_pt}")
+        print(f"DEBUG: File exists at temp_download: {os.path.exists(temp_download)}")
+        print(f"DEBUG: File size: {os.path.getsize(temp_download) if os.path.exists(temp_download) else 'N/A'}")
+        
         # Save the downloaded .pt file to final location
         final_model_path = args.final_model_pt
-        if not final_model_path.endswith('.pt'):
-            final_model_path = os.path.join(os.path.dirname(final_model_path), 'model.pt')
         
-        # Copy file to final location
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(final_model_path), exist_ok=True)
+        
+        # Copy file to final location - Save it exactly where Argo expects it
         import shutil
-        shutil.copy2(temp_download, final_model_path)
-        print(f"✓ Model saved as: {final_model_path}")
+        try:
+            shutil.copy2(temp_download, final_model_path)
+            print(f"✓ Model saved as: {final_model_path}")
+            print(f"✓ Actual saved file size: {os.path.getsize(final_model_path):,} bytes")
+            print(f"✓ File exists at final location: {os.path.exists(final_model_path)}")
+        except Exception as e:
+            print(f"✗ Error saving model file: {e}")
+            # Try alternative approach
+            try:
+                with open(temp_download, 'rb') as src, open(final_model_path, 'wb') as dst:
+                    dst.write(src.read())
+                print(f"✓ Model saved using alternative method")
+            except Exception as e2:
+                print(f"✗ Alternative save also failed: {e2}")
+                sys.exit(1)
         
         # Save final CDN URL
         with open(args.final_cdn_url, 'w') as f:
@@ -479,7 +510,9 @@ implementation:
             'verification_passed': verification['is_pt_file'],
             'verification_method': verification['pt_verification_method'],
             'curl_response': upload_response,
-            'download_attempts': download_attempts
+            'download_attempts': download_attempts,
+            'actual_file_saved': os.path.exists(final_model_path),
+            'actual_file_size': os.path.getsize(final_model_path) if os.path.exists(final_model_path) else 0
         }
         
         with open(args.upload_status, 'w') as f:
@@ -489,8 +522,9 @@ implementation:
         # Clean up temp files
         try:
             shutil.rmtree(temp_dir)
+            print(f"✓ Cleaned up temp directory: {temp_dir}")
         except:
-            pass
+            print(f"⚠ Could not clean up temp directory: {temp_dir}")
         
         print("\\n" + "=" * 80)
         if final_cdn_url and verification['is_pt_file']:
@@ -503,6 +537,31 @@ implementation:
             print("⚠ PARTIAL: File verified as .pt but upload failed")
         else:
             print("✗ FAILED: File not verified as .pt and upload failed")
+        
+        # Final verification that all outputs exist
+        print("\\n" + "=" * 40)
+        print("OUTPUT VERIFICATION")
+        print("=" * 40)
+        for path, name in [
+            (args.final_model_pt, "final_model_pt"),
+            (args.final_cdn_url, "final_cdn_url"),
+            (args.verification_status, "verification_status"),
+            (args.upload_status, "upload_status")
+        ]:
+            exists = os.path.exists(path)
+            size = os.path.getsize(path) if exists else 0
+            status = "✓" if exists and size > 0 else "✗"
+            print(f"{status} {name}: {path} (exists: {exists}, size: {size:,} bytes)")
+        
+        if not all([
+            os.path.exists(args.final_model_pt) and os.path.getsize(args.final_model_pt) > 0,
+            os.path.exists(args.final_cdn_url),
+            os.path.exists(args.verification_status),
+            os.path.exists(args.upload_status)
+        ]):
+            print("\\n✗ SOME OUTPUTS ARE MISSING OR EMPTY")
+            sys.exit(1)
+        
         print("=" * 80)
         
     args:
