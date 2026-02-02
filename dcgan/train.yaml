@@ -1,4 +1,4 @@
-name: Train DCGAN v41 - WITH BLOCK TRAINING AND CDN UPLOAD
+name: Train DCGAN v42 - WITH BLOCK TRAINING AND CDN UPLOAD
 description: Trains DCGAN with Block Training for CAFO/FF and Adversarial Training
 inputs:
   - name: data_path
@@ -37,7 +37,7 @@ outputs:
     type: String
   - name: generated_images_cdn_url
     type: String
-    description: "CDN URL for generated images"
+    description: "Full CDN URL for generated images (JPEG)"
 
 implementation:
   container:
@@ -74,7 +74,7 @@ implementation:
         matplotlib.use('Agg')
         
         print("=" * 80)
-        print("TRAIN DCGAN v41 - WITH BLOCK TRAINING AND CDN UPLOAD")
+        print("TRAIN DCGAN v42 - WITH BLOCK TRAINING AND CDN UPLOAD")
         print("=" * 80)
         print(f"Python version: {sys.version}")
         print(f"Torch version: {torch.__version__}")
@@ -175,20 +175,73 @@ implementation:
         print("COMPATIBILITY: Compatibility classes defined")
 
         print("\\n" + "-" * 40)
-        print("CDN UPLOAD FUNCTION")
+        print("CDN UPLOAD FUNCTION - SAVES AS JPEG")
         print("-" * 40)
         
-        def upload_to_cdn(file_path, description):
+        def upload_images_to_cdn(images_tensor, description):
            
-            if not os.path.exists(file_path):
-                print(f"    ERROR: File not found: {file_path}")
+            if images_tensor is None or len(images_tensor) == 0:
+                print(f"    ERROR: No images to upload")
                 return None
             
-            file_size = os.path.getsize(file_path)
-            print(f"  CDN: Uploading {description} ({file_size:,} bytes)...")
+            print(f"  CDN: Preparing {len(images_tensor)} images for upload...")
             
+            # Create a grid of images
+            try:
+                # Convert tensor to numpy and denormalize
+                images_np = images_tensor.cpu().numpy()
+                
+                # Handle different tensor shapes
+                if images_np.shape[1] == 1:  # Grayscale
+                    images_np = images_np[:, 0, :, :]  # Remove channel dimension
+                    cmap = 'gray'
+                else:
+                    # For RGB, transpose to (N, H, W, C)
+                    images_np = np.transpose(images_np, (0, 2, 3, 1))
+                    cmap = None
+                
+                # Create figure with grid of images
+                n_images = len(images_np)
+                n_cols = 4
+                n_rows = (n_images + n_cols - 1) // n_cols
+                
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 3 * n_rows))
+                axes = axes.flatten() if n_rows > 1 else [axes]
+                
+                for i, (ax, img) in enumerate(zip(axes, images_np)):
+                    ax.imshow(img, cmap=cmap)
+                    ax.axis('off')
+                    ax.set_title(f'Sample {i+1}', fontsize=8)
+                
+                # Hide unused axes
+                for i in range(len(images_np), len(axes)):
+                    axes[i].axis('off')
+                
+                plt.tight_layout()
+                
+                # Save to temporary file
+                temp_dir = "/tmp/generated_images"
+                os.makedirs(temp_dir, exist_ok=True)
+                
+                unique_id = str(uuid.uuid4())[:8]
+                jpeg_filename = f"dcgan_generated_{description.replace(' ', '_')}_{unique_id}.jpg"
+                jpeg_path = os.path.join(temp_dir, jpeg_filename)
+                
+                plt.savefig(jpeg_path, dpi=150, bbox_inches='tight', pad_inches=0.1)
+                plt.close(fig)
+                
+                file_size = os.path.getsize(jpeg_path)
+                print(f"  CDN: Saved JPEG: {jpeg_filename} ({file_size:,} bytes)")
+                
+            except Exception as e:
+                print(f"  CDN ERROR creating image grid: {e}")
+                traceback.print_exc()
+                return None
+            
+            # Upload to CDN
+            print(f"  CDN: Uploading JPEG to CDN...")
             unique_id = str(uuid.uuid4())[:8]
-            cdn_filename = f"dcgan_generated_images_{unique_id}.pt"
+            cdn_filename = f"dcgan_generated_{description.replace(' ', '_')}_{unique_id}.jpg"
             
             # URL with proper $ handling
             upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2Fmodels%2F"
@@ -197,7 +250,7 @@ implementation:
             curl_cmd = [
                 "curl", "--location", upload_url_encoded,
                 "--header", f"Authorization: Bearer {args.bearer_token}",
-                "--form", f"file=@{file_path}", "--form", f"filename={cdn_filename}",
+                "--form", f"file=@{jpeg_path}", "--form", f"filename={cdn_filename}",
                 "--fail", "--show-error", "--connect-timeout", "30", "--max-time", "120",
                 "--silent"
             ]
@@ -209,14 +262,23 @@ implementation:
                 
                 if cdn_path:
                     full_url = cdn_path if cdn_path.startswith("http") else f"{args.get_cdn}{cdn_path}"
+                    
                     # Ensure proper $$ pattern
                     if "_V1_data" in full_url and "_$$_V1_data" not in full_url:
                         if "_$_V1_data" in full_url:
                             full_url = full_url.replace("_$_V1_data", "_$$_V1_data")
-                    print(f"    CDN: Uploaded: {cdn_filename}")
+                    
+                    print(f"    CDN: Upload successful!")
+                    print(f"    CDN: Filename: {cdn_filename}")
+                    print(f"    CDN: Full URL: {full_url}")
                     return full_url
+                else:
+                    print(f"    CDN ERROR: No CDN URL in response")
+                    
+            except subprocess.CalledProcessError as e:
+                print(f"    CDN ERROR (curl): {e.stderr[:200]}")
             except Exception as e:
-                print(f"    CDN ERROR: {str(e)[:100]}")
+                print(f"    CDN ERROR: {str(e)}")
             
             return None
         
@@ -294,7 +356,7 @@ implementation:
         args = parser.parse_args()
         
         print("\\n" + "="*80)
-        print("DCGAN TRAINING v41 - WITH BLOCK TRAINING AND CDN UPLOAD")
+        print("DCGAN TRAINING v42 - WITH BLOCK TRAINING AND CDN UPLOAD")
         print("="*80)
 
         print("\\n" + "-" * 40)
@@ -987,24 +1049,17 @@ implementation:
             traceback.print_exc()
             samples = torch.randn(16, channels, image_size, image_size) * 0.5 + 0.5
 
-        # CDN UPLOAD OF GENERATED IMAGES
+        # CDN UPLOAD OF GENERATED IMAGES AS JPEG
         generated_images_cdn_url = ""
         if args.bearer_token and args.bearer_token.strip():
             print(f"\\n" + "="*60)
-            print("CDN UPLOAD OF GENERATED IMAGES")
+            print("CDN UPLOAD OF GENERATED IMAGES (JPEG)")
             print("="*60)
             
-            # Save images locally
-            temp_dir = "/tmp/generated_images"
-            os.makedirs(temp_dir, exist_ok=True)
-            images_filename = f"dcgan_generated_{algorithm}_{int(time.time())}.pt"
-            images_local_path = os.path.join(temp_dir, images_filename)
-            torch.save(samples, images_local_path)
-            
-            # Upload to CDN
-            generated_images_cdn_url = upload_to_cdn(images_local_path, f"generated images {algorithm}")
+            # Upload images as JPEG grid
+            generated_images_cdn_url = upload_images_to_cdn(samples, algorithm)
         
-        # Save CDN URL
+        # Save CDN URL - FULL URL
         with open(args.generated_images_cdn_url, 'w') as f:
             f.write(generated_images_cdn_url if generated_images_cdn_url else "")
         
@@ -1079,7 +1134,7 @@ implementation:
         except Exception as e:
             print(f"ERROR: saving training metrics: {e}")
         
-        # Save generated samples
+        # Save generated samples (still as .pt for Dataset output)
         try:
             generated_dataset = PreprocessedDataset(
                 samples,
@@ -1096,9 +1151,12 @@ implementation:
         try:
             urls_data = {
                 'generated_images': generated_images_cdn_url if generated_images_cdn_url else "",
+                'image_format': 'jpeg',
+                'num_images': len(samples),
+                'image_grid': True,
                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'algorithm': algorithm,
-                'num_samples': len(samples)
+                'note': 'Images uploaded as JPEG grid to CDN'
             }
             with open(args.generated_images_urls, 'w') as f:
                 json.dump(urls_data, f, indent=2)
@@ -1107,7 +1165,7 @@ implementation:
         
         # Save training images summary
         try:
-            cdn_status = "✓ Uploaded to CDN" if generated_images_cdn_url else "✗ Not uploaded"
+            cdn_status = "✓ Uploaded to CDN as JPEG" if generated_images_cdn_url else "✗ Not uploaded"
             summary_content = f'''DCGAN Training Summary
             ==========================
             Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1123,6 +1181,7 @@ implementation:
             
             Generated Samples: {len(samples)}
             CDN Status: {cdn_status}
+            CDN URL: {generated_images_cdn_url if generated_images_cdn_url else "N/A"}
             
             Block Training:
             - Enabled: {should_do_block_training}
@@ -1142,7 +1201,9 @@ implementation:
         print(f"Training Time: {training_time:.2f}s")
         print(f"Final Losses - G: {final_g_loss:.4f}, D: {final_d_loss:.4f}")
         print(f"Generated Samples: {len(samples)}")
-        print(f"CDN Upload: {'✓ Success' if generated_images_cdn_url else '✗ Failed/Not attempted'}")
+        print(f"CDN Upload: {'✓ Success (JPEG)' if generated_images_cdn_url else '✗ Failed/Not attempted'}")
+        if generated_images_cdn_url:
+            print(f"Full CDN URL: {generated_images_cdn_url}")
         print("="*80)
         
     args:
