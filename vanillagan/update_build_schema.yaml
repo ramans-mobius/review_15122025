@@ -1,4 +1,4 @@
-name: I Update Schema Row v6
+name: I Update Schema Row v7
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -183,13 +183,13 @@ implementation:
             cdn_content = get_input_content(args.trained_model_cdn_url)
             if cdn_content:
                 model_weights_cdn = encode_dollar_signs(cdn_content)
-                print(f"Model weights CDN URL: {model_weights_cdn[:100]}..." if len(model_weights_cdn) > 100 else f"Model weights CDN URL: {model_weights_cdn}")
+                print(f"Model weights CDN URL: {model_weights_cdn}..." if len(model_weights_cdn) > 100 else f"Model weights CDN URL: {model_weights_cdn}")
         
         if args.model_metadata_cdn_url != '-1':
             cdn_content = get_input_content(args.model_metadata_cdn_url)
             if cdn_content:
                 model_metadata_cdn = encode_dollar_signs(cdn_content)
-                print(f"Model metadata CDN URL: {model_metadata_cdn[:100]}..." if len(model_metadata_cdn) > 100 else f"Model metadata CDN URL: {model_metadata_cdn}")
+                print(f"Model metadata CDN URL: {model_metadata_cdn}..." if len(model_metadata_cdn) > 100 else f"Model metadata CDN URL: {model_metadata_cdn}")
         
         if args.training_metrics_path != '-1':
             training_metrics = parse_json_input(args.training_metrics_path)
