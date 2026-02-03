@@ -15,11 +15,11 @@ inputs:
   - { name: domain, type: String, description: "The domain for the API endpoint." }
   - { name: float_keys_json, type: String, description: "JSON string of a list of keys to be converted to float."}
   # Updated: Changed from inputPath to String for direct string inputs
-  - { name: trained_model_cdn_url, type: String, description: "CDN URL string for trained model.", default: "-1" }
-  - { name: model_metadata_cdn_url, type: String, description: "CDN URL string for model metadata.", default: "-1" }
-  - { name: training_metrics_path, type: String, description: "Training metrics JSON string.", default: "-1" }
-  - { name: model_config_json, type: String, description: "Model configuration JSON string.", default: "-1" }
-  - { name: evaluation_metrics_path, type: String, description: "Evaluation metrics JSON string.", default: "-1" }
+  - { name: trained_model_cdn_url, type: String, description: "CDN URL string for trained model."}
+  - { name: model_metadata_cdn_url, type: String, description: "CDN URL string for model metadata."}
+  - { name: training_metrics_path, type: String, description: "Training metrics JSON string." }
+  - { name: model_config_json, type: String, description: "Model configuration JSON string."}
+  - { name: evaluation_metrics_path, type: String, description: "Evaluation metrics JSON string. }
 
 implementation:
   container:
@@ -520,12 +520,12 @@ implementation:
       - {inputValue: float_keys_json}
       # Updated arguments for pipeline artifacts
       - --trained_model_cdn_url
-      - {inputValue: trained_model_cdn_url}
+      - {inputPath: trained_model_cdn_url}
       - --model_metadata_cdn_url
-      - {inputValue: model_metadata_cdn_url}
+      - {inputPath: model_metadata_cdn_url}
       - --training_metrics_path
-      - {inputValue: training_metrics_path}
+      - {inputPath: training_metrics_path}
       - --model_config_json
-      - {inputValue: model_config_json}
+      - {inputPath: model_config_json}
       - --evaluation_metrics_path
-      - {inputValue: evaluation_metrics_path}
+      - {inputPath: evaluation_metrics_path}
