@@ -1,4 +1,4 @@
-name: Train Vanilla GAN 7 with Continual Learning
+name: Train Vanilla GAN 8 with Continual Learning
 description: Trains Vanilla GAN model with balanced training and optional continual learning fine-tuning
 inputs:
   - name: initialized_model
@@ -287,14 +287,17 @@ implementation:
                 return self.final_layer(h).view(-1)
         
         # =============================================================================
-        # CDN UPLOAD FUNCTION
+        # CDN UPLOAD FUNCTION WITH ERROR HANDLING
         # =============================================================================
         
         def upload_to_cdn(file_path, file_type, bearer_token, get_cdn, upload_domain, model_type="vanilla_gan"):
-          
             try:
                 if not bearer_token or bearer_token == "":
                     print(f"No bearer token provided for {file_type} upload")
+                    return None
+                
+                if not os.path.exists(file_path):
+                    print(f"File not found for upload: {file_path}")
                     return None
                 
                 with open(file_path, 'rb') as f:
@@ -318,27 +321,47 @@ implementation:
                 }
                 
                 print(f"Uploading {file_type} to CDN: {filename}")
-                response = requests.post(upload_url, data=file_content, headers=headers, timeout=30)
+                print(f"Upload URL: {upload_url}")
+                print(f"File size: {len(file_content)} bytes")
                 
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get('status') == 'success':
-                        cdn_url = f"{get_cdn}/{result.get('filename')}"
-                        print(f"Successfully uploaded {file_type} to CDN: {cdn_url}")
-                        return {
-                            'url': cdn_url,
-                            'filename': filename,
-                            'upload_response': result
-                        }
+                # Add timeout and better error handling
+                try:
+                    response = requests.post(upload_url, data=file_content, headers=headers, timeout=30)
+                    print(f"Response status code: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        print(f"Response JSON: {result}")
+                        
+                        if result.get('status') == 'success':
+                            cdn_url = f"{get_cdn}/{result.get('filename')}"
+                            print(f"Successfully uploaded {file_type} to CDN: {cdn_url}")
+                            return {
+                                'url': cdn_url,
+                                'filename': filename,
+                                'upload_response': result
+                            }
+                        else:
+                            print(f"Upload API returned error: {result.get('message', 'Unknown error')}")
+                            return None
                     else:
-                        print(f"Upload API returned error: {result.get('message', 'Unknown error')}")
+                        print(f"Failed to upload {file_type}. Status code: {response.status_code}")
+                        print(f"Response text: {response.text}")
                         return None
-                else:
-                    print(f"Failed to upload {file_type}. Status code: {response.status_code}")
+                        
+                except requests.exceptions.Timeout:
+                    print(f"Timeout uploading {file_type} to CDN")
+                    return None
+                except requests.exceptions.ConnectionError:
+                    print(f"Connection error uploading {file_type} to CDN")
+                    return None
+                except Exception as e:
+                    print(f"Request error uploading {file_type}: {str(e)}")
                     return None
                     
             except Exception as e:
                 print(f"Error uploading {file_type} to CDN: {str(e)}")
+                traceback.print_exc()
                 return None
         
         # =============================================================================
@@ -519,6 +542,21 @@ implementation:
             print("CAFO block training completed")
         
         # =============================================================================
+        # OUTPUT DIRECTORY CREATION
+        # =============================================================================
+        
+        def create_output_directories(output_paths):
+           
+            for arg_name, path in output_paths.items():
+                if arg_name.startswith('--'):
+                    continue
+                # Create parent directory if it doesn't exist
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                    print(f"Created directory: {dir_path}")
+        
+        # =============================================================================
         # MAIN EXECUTION
         # =============================================================================
         
@@ -543,6 +581,22 @@ implementation:
         parser.add_argument('--model_upload_response', type=str, required=True)
         parser.add_argument('--continual_learning_status', type=str, required=True)
         args = parser.parse_args()
+        
+        # Create output directories before starting
+        output_paths = {
+            'trained_model': args.trained_model,
+            'training_history': args.training_history,
+            'training_metrics': args.training_metrics,
+            'generated_samples': args.generated_samples,
+            'trained_model_cdn_url': args.trained_model_cdn_url,
+            'model_metadata_cdn_url': args.model_metadata_cdn_url,
+            'training_metrics_path': args.training_metrics_path,
+            'model_config_json': args.model_config_json,
+            'samples_cdn_urls': args.samples_cdn_urls,
+            'model_upload_response': args.model_upload_response,
+            'continual_learning_status': args.continual_learning_status
+        }
+        create_output_directories(output_paths)
         
         print("VANILLA GAN BALANCED TRAINING WITH CONTINUAL LEARNING STARTING")
         print("="*60)
@@ -989,6 +1043,8 @@ implementation:
                 model_metadata_cdn_url = model_cdn_url
                 model_upload_response_json = json.dumps(model_upload_result['upload_response'])
                 print(f"✓ Model uploaded to CDN: {model_cdn_url}")
+            else:
+                print("✗ Model upload failed")
             
             for sample in generated_samples:
                 sample_upload_result = upload_to_cdn(
@@ -998,6 +1054,8 @@ implementation:
                     sample['cdn_url'] = sample_upload_result['url']
                     sample_urls.append(sample_upload_result['url'])
                     print(f"✓ Sample {sample['sample_id']} uploaded")
+                else:
+                    print(f"✗ Sample {sample['sample_id']} upload failed")
         
         samples_cdn_urls_json = json.dumps(sample_urls)
         
