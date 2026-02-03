@@ -1,4 +1,4 @@
-name: I Update Schema Row v3
+name: I Update Schema Row v4
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -14,12 +14,11 @@ inputs:
   - { name: bearer_auth_token, type: string, description: "Bearer token for authentication." }
   - { name: domain, type: String, description: "The domain for the API endpoint." }
   - { name: float_keys_json, type: String, description: "JSON string of a list of keys to be converted to float."}
-  # Updated: Changed from inputPath to String for direct string inputs
-  - { name: trained_model_cdn_url, type: String, description: "CDN URL string for trained model."}
-  - { name: model_metadata_cdn_url, type: String, description: "CDN URL string for model metadata."}
-  - { name: training_metrics_path, type: String, description: "Training metrics JSON string." }
-  - { name: model_config_json, type: String, description: "Model configuration JSON string."}
-  - { name: evaluation_metrics_path, type: String, description: "Evaluation metrics JSON string. }
+  - { name: trained_model_cdn_url, type: inputPath, description: "CDN URL string for trained model."}
+  - { name: model_metadata_cdn_url, type: inputPath, description: "CDN URL string for model metadata."}
+  - { name: training_metrics_path, type: inputPath, description: "Training metrics JSON string." }
+  - { name: model_config_json, type: inputPath, description: "Model configuration JSON string."}
+  - { name: evaluation_metrics_path, type: inputPath, description: "Evaluation metrics JSON string." }
 
 implementation:
   container:
@@ -45,10 +44,7 @@ implementation:
         def encode_dollar_signs(url):
             if not url or url == '-1':
                 return url
-            # First decode any existing encoding to avoid double encoding
             decoded_url = unquote(url)
-            # Replace single $ with %24%24
-            # But only if it's not already encoded
             if '$' in decoded_url and '%24' not in decoded_url:
                 encoded = decoded_url.replace('$', '%24%24')
                 print(f"Encoded URL: {decoded_url} -> {encoded}")
@@ -56,32 +52,24 @@ implementation:
             return url
 
         def get_input_content(input_value):
-            
             if not input_value or input_value == '-1':
                 return None
-            
-            # Check if it's a valid file path that exists
             if os.path.exists(input_value):
                 try:
                     with open(input_value, 'r') as f:
                         return f.read().strip()
                 except Exception as e:
                     print(f"Error reading file {input_value}: {e}")
-                    # Fallback to treating as string
                     return input_value
             else:
-                # It's already a string
                 return input_value
 
         def parse_json_input(input_value):
-          
             if not input_value or input_value == '-1':
                 return None
-            
             content = get_input_content(input_value)
             if not content:
                 return None
-            
             try:
                 return json.loads(content)
             except json.JSONDecodeError as e:
@@ -94,54 +82,39 @@ implementation:
 
         def extract_model_metrics(metrics_data):
             metrics = {}
-            
             if not metrics_data:
                 return metrics
-                
-            # If it's already a dict with metrics
             if isinstance(metrics_data, dict):
-                # Look for parameter count
                 if 'parameter_count' in metrics_data:
                     metrics['parameter_count'] = str(metrics_data['parameter_count'])
                 elif 'total_params' in metrics_data:
                     metrics['parameter_count'] = str(metrics_data['total_params'])
                 elif 'params' in metrics_data:
                     metrics['parameter_count'] = str(metrics_data['params'])
-                
-                # Look for model architecture info
                 if 'input_dim' in metrics_data:
                     metrics['input_shape'] = str(metrics_data['input_dim'])
                 elif 'input_shape' in metrics_data:
                     metrics['input_shape'] = str(metrics_data['input_shape'])
-                    
                 if 'output_dim' in metrics_data:
                     metrics['output_shape'] = str(metrics_data['output_dim'])
                 elif 'output_shape' in metrics_data:
                     metrics['output_shape'] = str(metrics_data['output_shape'])
-                    
                 if 'latent_dim' in metrics_data:
                     metrics['latent_dim'] = str(metrics_data['latent_dim'])
-                    
-                # Look for training metrics
                 if 'final_loss' in metrics_data:
                     metrics['final_loss'] = str(metrics_data['final_loss'])
                 if 'accuracy' in metrics_data:
                     metrics['accuracy'] = str(metrics_data['accuracy'])
                 if 'fid_score' in metrics_data:
                     metrics['fid_score'] = str(metrics_data['fid_score'])
-                    
-                # Model metadata
                 if 'model_name' in metrics_data:
                     metrics['name'] = metrics_data['model_name']
                 if 'architecture' in metrics_data:
                     metrics['architecture_type'] = metrics_data['architecture']
-                
-                # Store the full config if available
                 if 'model_config' in metrics_data:
                     metrics['model_specific_config'] = metrics_data['model_config']
                 elif 'config' in metrics_data:
                     metrics['model_specific_config'] = metrics_data['config']
-                    
             return metrics
 
         parser = argparse.ArgumentParser()
@@ -157,7 +130,6 @@ implementation:
         parser.add_argument('--bearer_auth_token', type=str, required=True)
         parser.add_argument('--domain', type=str, required=True)
         parser.add_argument('--float_keys_json', type=str, required=False)
-        # Updated arguments for model artifacts
         parser.add_argument('--trained_model_cdn_url', type=str, required=False)
         parser.add_argument('--model_metadata_cdn_url', type=str, required=False)
         parser.add_argument('--training_metrics_path', type=str, required=False)
@@ -185,7 +157,6 @@ implementation:
         mapping = json.loads(args.mapping_json)
         float_keys = json.loads(args.float_keys_json) if args.float_keys_json else []
 
-        # Read and process CDN URLs from pipeline components
         print("\\n" + "=" * 40)
         print("PROCESSING PIPELINE ARTIFACTS")
         print("=" * 40)
@@ -195,45 +166,39 @@ implementation:
         extracted_metrics = {}
         model_config = None
         
-        # 1. Process trained model CDN URL
         if args.trained_model_cdn_url != '-1':
             cdn_content = get_input_content(args.trained_model_cdn_url)
             if cdn_content:
                 model_weights_cdn = encode_dollar_signs(cdn_content)
-                print(f"✓ Model weights CDN URL: {model_weights_cdn[:100]}..." if len(model_weights_cdn) > 100 else f"✓ Model weights CDN URL: {model_weights_cdn}")
+                print(f"Model weights CDN URL: {model_weights_cdn[:100]}..." if len(model_weights_cdn) > 100 else f"Model weights CDN URL: {model_weights_cdn}")
         
-        # 2. Process model metadata CDN URL
         if args.model_metadata_cdn_url != '-1':
             cdn_content = get_input_content(args.model_metadata_cdn_url)
             if cdn_content:
                 model_metadata_cdn = encode_dollar_signs(cdn_content)
-                print(f"✓ Model metadata CDN URL: {model_metadata_cdn[:100]}..." if len(model_metadata_cdn) > 100 else f"✓ Model metadata CDN URL: {model_metadata_cdn}")
+                print(f"Model metadata CDN URL: {model_metadata_cdn[:100]}..." if len(model_metadata_cdn) > 100 else f"Model metadata CDN URL: {model_metadata_cdn}")
         
-        # 3. Process training metrics (as JSON)
         if args.training_metrics_path != '-1':
             training_metrics = parse_json_input(args.training_metrics_path)
             if training_metrics:
                 metrics = extract_model_metrics(training_metrics)
                 extracted_metrics.update(metrics)
-                print(f"✓ Extracted {len(metrics)} metrics from training data")
+                print(f"Extracted {len(metrics)} metrics from training data")
         
-        # 4. Process model config (as JSON)
         if args.model_config_json != '-1':
             config_data = parse_json_input(args.model_config_json)
             if config_data:
                 model_config = config_data
-                # Also extract metrics from config
                 config_metrics = extract_model_metrics(config_data)
                 extracted_metrics.update(config_metrics)
-                print(f"✓ Read model config with {len(config_data.keys())} keys")
+                print(f"Read model config with {len(config_data.keys())} keys")
         
-        # 5. Process evaluation metrics (as JSON)
         if args.evaluation_metrics_path != '-1':
             eval_metrics = parse_json_input(args.evaluation_metrics_path)
             if eval_metrics:
                 eval_extracted = extract_model_metrics(eval_metrics)
                 extracted_metrics.update(eval_extracted)
-                print(f"✓ Extracted {len(eval_extracted)} metrics from evaluation data")
+                print(f"Extracted {len(eval_extracted)} metrics from evaluation data")
         
         print(f"\\nExtracted model metrics: {json.dumps(extracted_metrics, indent=2)}")
 
@@ -266,7 +231,6 @@ implementation:
                 if 'execution_id' not in row and args.execution_id != '-1':
                     row['execution_id']=execution_id_int
                 
-                # Add model weights metadata from pipeline artifacts
                 if model_weights_cdn:
                     row['model_weights_cdn'] = model_weights_cdn
                 if model_metadata_cdn:
@@ -274,9 +238,7 @@ implementation:
                 if model_config:
                     row['model_specific_config'] = model_config
                 
-                # Add extracted metrics
                 for key, value in extracted_metrics.items():
-                    # Map to schema fields
                     if key in ['parameter_count', 'input_shape', 'output_shape', 'name', 'architecture_type', 'latent_dim']:
                         row[key] = value
                     elif key == 'final_loss' and 'symbolic_profile' not in row:
@@ -303,7 +265,6 @@ implementation:
                     print(f"Response Content: {e.response.text}")
                 exit(1)
         else:
-            # Check if execution_id exists
             check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
             check_payload = {
                 "dbType": "TIDB",
@@ -348,7 +309,6 @@ implementation:
                                 "value": value_to_patch
                             })
                     
-                    # Add model weights metadata patches from pipeline artifacts
                     if model_weights_cdn:
                         patch_requests.append({
                             "operation": "REPLACE",
@@ -368,7 +328,6 @@ implementation:
                             "value": model_config
                         })
                     
-                    # Add extracted metrics as patches
                     for key, value in extracted_metrics.items():
                         if key in ['parameter_count', 'input_shape', 'output_shape']:
                             patch_requests.append({
@@ -440,7 +399,6 @@ implementation:
                     if args.architecture_type != '-1':
                         creation_data['architecture_type'] = args.architecture_type
                     
-                    # Add model weights metadata from pipeline
                     if model_weights_cdn:
                         creation_data['model_weights_cdn'] = model_weights_cdn
                     if model_metadata_cdn:
@@ -448,7 +406,6 @@ implementation:
                     if model_config:
                         creation_data['model_specific_config'] = model_config
                     
-                    # Add extracted metrics
                     for key, value in extracted_metrics.items():
                         if key in ['parameter_count', 'input_shape', 'output_shape', 'name']:
                             creation_data[key] = value
@@ -457,11 +414,9 @@ implementation:
                         elif key == 'final_loss' and 'symbolic_profile' not in creation_data:
                             creation_data['symbolic_profile'] = f"Final loss: {value}"
                     
-                    # Ensure name is set
                     if 'name' not in creation_data and args.model_id != '-1':
                         creation_data['name'] = f"model_{args.model_id}"
                     
-                    # Set source
                     creation_data['source'] = 'auto-generated'
 
                     create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
@@ -518,7 +473,6 @@ implementation:
       - {inputValue: domain}
       - --float_keys_json
       - {inputValue: float_keys_json}
-      # Updated arguments for pipeline artifacts
       - --trained_model_cdn_url
       - {inputPath: trained_model_cdn_url}
       - --model_metadata_cdn_url
