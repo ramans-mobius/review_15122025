@@ -14,7 +14,7 @@ inputs:
     type: String
     description: Master GAN configuration as JSON string
   - name: bearer_token
-    type: String
+    type: string
     description: Bearer token for CDN upload
   - name: get_cdn
     type: String
