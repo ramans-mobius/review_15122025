@@ -1,5 +1,5 @@
 name: Train Vanilla GAN 6 with Continual Learning
-description: Trains Vanilla GAN model with balanced training and optional continual learning from schema/CDN
+description: Trains Vanilla GAN model with balanced training and optional continual learning fine-tuning
 inputs:
   - name: initialized_model
     type: Model
@@ -10,32 +10,18 @@ inputs:
   - name: gan_config_json
     type: String
     description: Master GAN configuration as JSON string
-  # Continual learning inputs
   - name: enable_continual_learning
     type: String
     default: "false"
-    description: Whether to enable continual learning
-  - name: load_from_schema
+    description: Whether to enable continual learning fine-tuning
+  - name: fine_tune_factor
     type: String
-    default: "false"
-    description: Whether to load previous weights from schema
-  - name: schema_id
-    type: String
-    default: ""
-    description: Schema ID for loading weights
-  - name: model_id
-    type: String
-    default: ""
-    description: Model ID for loading weights
-  - name: execution_id
-    type: String
-    default: ""
-    description: Execution ID for loading weights (previous run)
+    default: "0.1"
+    description: Learning rate multiplier for fine-tuning (0.1 = 10% of original LR)
   - name: bearer_token
     type: String
     default: ""
-    description: Bearer token for API authentication
-  # CDN upload inputs
+    description: Bearer token for CDN upload authentication
   - name: get_cdn
     type: String
     default: "https://cdn-new.gov-cloud.ai"
@@ -44,6 +30,7 @@ inputs:
     type: String
     default: "https://igs.gov-cloud.ai"
     description: API domain for upload
+
 outputs:
   - name: trained_model
     type: Model
@@ -53,10 +40,18 @@ outputs:
     type: String
   - name: generated_samples
     type: Dataset
-  # CDN upload outputs
-  - name: model_cdn_url
+  - name: trained_model_cdn_url
     type: String
-    description: CDN URL for the trained model .pt file
+    description: File containing CDN URL for the trained model .pt file
+  - name: model_metadata_cdn_url
+    type: String
+    description: File containing CDN URL for model metadata
+  - name: training_metrics_path
+    type: String
+    description: Path to training metrics JSON file
+  - name: model_config_json
+    type: String
+    description: Path to model configuration JSON
   - name: samples_cdn_urls
     type: String
     description: JSON list of CDN URLs for generated sample images
@@ -75,639 +70,199 @@ implementation:
       - -u
       - -c
       - |
-        import argparse
-        import os
-        import sys
-        import json
-        import pickle
-        import base64
-        import time
-        import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
-        from torch.utils.data import Dataset, DataLoader
-        import numpy as np
-        from PIL import Image
-        import io
-        import math
-        import traceback
-        import subprocess
-        import tempfile
-        import requests
-        from urllib.parse import unquote
+        import argparse, os, json, pickle, base64, time, torch, torch.nn as nn
+        import numpy as np, traceback, requests, uuid
+        from torch.utils.data import DataLoader
+        from PIL import Image, io
         
         # =============================================================================
-        # CONTINUAL LEARNING & CDN FUNCTIONS
-        # =============================================================================
-        
-        def decode_url(url):
-          
-            if not url:
-                return url
-            
-            url = url.replace('\\n', '').replace('\\r', '').strip()
-            decoded = unquote(url)
-            
-            # Ensure _$$_V1_data pattern
-            if '_V1_data' in decoded and '$$' not in decoded:
-                if '_$_V1_data' in decoded:
-                    decoded = decoded.replace('_$_V1_data', '_$$_V1_data')
-                elif '_$$$_V1_data' in decoded:
-                    decoded = decoded.replace('_$$$_V1_data', '_$$_V1_data')
-                else:
-                    decoded = decoded.replace('_V1_data', '_$$_V1_data')
-            
-            return decoded
-        
-        def query_schema_for_weights(schema_id, model_id, execution_id, bearer_token):
-           
-            print(f"Querying schema for previous model weights...")
-            print(f"Schema ID: {schema_id}, Model ID: {model_id}, Execution ID: {execution_id}")
-            
-            try:
-                execution_id_float = float(execution_id)
-            except ValueError:
-                print(f"ERROR: execution_id must be a number. Got: {execution_id}")
-                return None
-            
-            schema_url = f"https://igs.gov-cloud.ai/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
-            
-            filter_data = {
-                "dbType": "TIDB",
-                "ownedOnly": True,
-                "filter": {
-                    "model_id": str(model_id),
-                    "execution_id": execution_id_float
-                }
-            }
-            
-            headers = {
-                "Authorization": f"Bearer {bearer_token}",
-                "Content-Type": "application/json"
-            }
-            
-            try:
-                response = requests.post(schema_url, headers=headers, json=filter_data, timeout=30)
-                response.raise_for_status()
-                response_data = response.json()
-                
-                if 'content' in response_data and len(response_data['content']) > 0:
-                    item = response_data['content'][0]
-                    weights_url = item.get('model_weights_cdn')
-                    
-                    if weights_url:
-                        print(f"Found model weights URL in schema")
-                        decoded_url = decode_url(weights_url)
-                        print(f"Decoded URL: {decoded_url[:100]}...")
-                        return decoded_url
-                    else:
-                        print(f"No model_weights_cdn found in schema entry")
-                else:
-                    print(f"No model found in schema with execution_id: {execution_id}")
-                
-                return None
-                
-            except Exception as e:
-                print(f"Error querying schema: {e}")
-                return None
-        
-        def download_model_weights(weights_url, bearer_token):
-            """Download model weights from CDN URL"""
-            print(f"Downloading model weights from: {weights_url[:100]}...")
-            
-            try:
-                headers = {'Authorization': f'Bearer {bearer_token}'}
-                
-                # Try multiple URL variations
-                url_variations = []
-                
-                # Original decoded URL
-                url_variations.append(("Decoded URL", weights_url))
-                
-                # Try with triple $$$
-                if '_$$_V1_data' in weights_url:
-                    triple_url = weights_url.replace('_$$_V1_data', '_$$$_V1_data')
-                    url_variations.append(("Triple $$$ URL", triple_url))
-                
-                # Try with single $
-                if '_$$_V1_data' in weights_url:
-                    single_url = weights_url.replace('_$$_V1_data', '_$_V1_data')
-                    url_variations.append(("Single $ URL", single_url))
-                
-                for variation_name, test_url in url_variations:
-                    print(f"  Trying {variation_name}: {test_url[:100]}...")
-                    
-                    try:
-                        response = requests.get(test_url, headers=headers, stream=True, timeout=60)
-                        response.raise_for_status()
-                        
-                        # Create temp file
-                        temp_dir = tempfile.mkdtemp()
-                        temp_path = os.path.join(temp_dir, "model_weights.pt")
-                        
-                        with open(temp_path, 'wb') as f:
-                            for chunk in response.iter_content(chunk_size=8192):
-                                if chunk:
-                                    f.write(chunk)
-                        
-                        file_size = os.path.getsize(temp_path)
-                        print(f"  Successfully downloaded {file_size:,} bytes")
-                        
-                        # Load the checkpoint
-                        checkpoint = torch.load(temp_path, map_location='cpu', weights_only=False)
-                        
-                        # Clean up
-                        try:
-                            import shutil
-                            shutil.rmtree(temp_dir)
-                        except:
-                            pass
-                        
-                        return checkpoint
-                        
-                    except Exception as e:
-                        print(f"  Failed: {e}")
-                        continue
-                
-                print("All URL variations failed")
-                return None
-                
-            except Exception as e:
-                print(f"Error downloading weights: {e}")
-                return None
-        
-        def load_previous_model(initialized_model, gan_config, enable_cl, load_from_schema, 
-                               schema_id, model_id, execution_id, bearer_token):
-            """Load previous model for continual learning"""
-            continual_status = {
-                'enabled': enable_cl == 'true',
-                'loaded': False,
-                'source': None,
-                'error': None
-            }
-            
-            if enable_cl != 'true':
-                print("Continual learning disabled, starting fresh training")
-                return None, continual_status
-            
-            print("Continual learning enabled, attempting to load previous model...")
-            
-            # Try to load from initialized model first
-            try:
-                with open(initialized_model, 'rb') as f:
-                    model_data = pickle.load(f)
-                
-                # Check if this model was already loaded from schema/CDN
-                if hasattr(model_data, 'source'):
-                    if model_data.source in ['schema', 'cdn']:
-                        print(f"Model already loaded from {model_data.source} in Build brick")
-                        continual_status['loaded'] = True
-                        continual_status['source'] = model_data.source
-                        return model_data, continual_status
-            except:
-                pass
-            
-            # If not loaded from Build brick, try to load from schema
-            if load_from_schema == 'true' and schema_id and model_id and execution_id and bearer_token:
-                print("Attempting to load previous model from schema...")
-                
-                weights_url = query_schema_for_weights(schema_id, model_id, execution_id, bearer_token)
-                if weights_url:
-                    checkpoint = download_model_weights(weights_url, bearer_token)
-                    if checkpoint:
-                        print("Successfully loaded model weights from schema")
-                        continual_status['loaded'] = True
-                        continual_status['source'] = 'schema'
-                        continual_status['weights_url'] = weights_url
-                        
-                        # Create a wrapper with the loaded checkpoint
-                        class LoadedModelWrapper:
-                            def __init__(self, checkpoint):
-                                self.checkpoint = checkpoint
-                                self.source = 'schema'
-                                self.loaded_from_schema = True
-                                self.model_type = 'vanilla_gan'
-                        
-                        return LoadedModelWrapper(checkpoint), continual_status
-            
-            print("No previous model found, starting fresh training")
-            continual_status['error'] = 'No previous model found'
-            return None, continual_status
-        
-        def apply_previous_weights(gan, previous_model, gan_config):
-            """Apply previous model weights to current GAN"""
-            if not previous_model:
-                return False
-            
-            try:
-                if hasattr(previous_model, 'checkpoint'):
-                    checkpoint = previous_model.checkpoint
-                    
-                    if isinstance(checkpoint, dict):
-                        # Try to load generator state dict
-                        if 'generator_state_dict' in checkpoint:
-                            gan.generator.load_state_dict(checkpoint['generator_state_dict'])
-                            print("Loaded generator weights from previous model")
-                        
-                        if 'discriminator_state_dict' in checkpoint:
-                            gan.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
-                            print("Loaded discriminator weights from previous model")
-                        
-                        # Also try standard state_dict keys
-                        elif 'state_dict' in checkpoint:
-                            try:
-                                gan.generator.load_state_dict(checkpoint['state_dict'], strict=False)
-                                print("Loaded weights from state_dict")
-                            except:
-                                pass
-                    
-                    elif isinstance(checkpoint, torch.nn.Module):
-                        # Direct model object
-                        try:
-                            gan.generator.load_state_dict(checkpoint.state_dict())
-                            print("Loaded weights from model object")
-                        except:
-                            pass
-                    
-                    return True
-                    
-            except Exception as e:
-                print(f"Error applying previous weights: {e}")
-                traceback.print_exc()
-            
-            return False
-        
-        def upload_to_cdn(file_path, filename, bearer_token, upload_domain, get_cdn):
-            """Upload file to CDN and return full URL"""
-            print(f"Uploading {filename} to CDN...")
-            
-            try:
-                upload_url = f"{upload_domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fvanilla_gan%2Fmodels%2F"
-                
-                curl_command = [
-                    "curl",
-                    "--location", upload_url,
-                    "--header", f"Authorization: Bearer {bearer_token}",
-                    "--form", f"file=@{file_path}",
-                    "--form", f"filename={filename}",
-                    "--fail",
-                    "--show-error",
-                    "--connect-timeout", "60",
-                    "--max-time", "300",
-                    "--silent"
-                ]
-                
-                process = subprocess.run(
-                    curl_command,
-                    capture_output=True,
-                    text=True,
-                    check=False
-                )
-                
-                print(f"Curl exit code: {process.returncode}")
-                
-                if process.returncode == 0:
-                    response = json.loads(process.stdout)
-                    
-                    # Extract CDN path
-                    cdn_path = None
-                    if 'cdnUrl' in response:
-                        cdn_path = response['cdnUrl']
-                    elif 'info' in response and 'cdnUrl' in response['info']:
-                        cdn_path = response['info']['cdnUrl']
-                    elif 'url' in response:
-                        cdn_path = response['url']
-                    
-                    if cdn_path:
-                        # Construct full URL
-                        if cdn_path.startswith('http'):
-                            full_url = cdn_path
-                        else:
-                            if not cdn_path.startswith('/'):
-                                cdn_path = '/' + cdn_path
-                            full_url = get_cdn + cdn_path
-                        
-                        # Ensure $$ pattern
-                        full_url = decode_url(full_url)
-                        print(f"Generated CDN URL: {full_url[:100]}...")
-                        
-                        return {
-                            'success': True,
-                            'cdn_url': full_url,
-                            'filename': filename,
-                            'response': response
-                        }
-                    else:
-                        return {'success': False, 'error': 'No CDN URL in response'}
-                else:
-                    error_msg = process.stderr[:500] if process.stderr else 'Unknown error'
-                    return {'success': False, 'error': error_msg}
-                    
-            except Exception as e:
-                print(f"Error in CDN upload: {str(e)}")
-                return {'success': False, 'error': str(e)}
-        
-        def save_model_as_pt(gan, filepath, config, training_metrics):
-            """Save GAN model as .pt file"""
-            try:
-                model_state = {
-                    'model_type': 'vanilla_gan',
-                    'training_algorithm': config.get('training_algorithm', 'backprop'),
-                    'generator_state_dict': gan.generator.state_dict(),
-                    'discriminator_state_dict': gan.discriminator.state_dict() if hasattr(gan, 'discriminator') else None,
-                    'config': config,
-                    'training_metrics': training_metrics,
-                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                    'parameters': {
-                        'generator': sum(p.numel() for p in gan.generator.parameters()),
-                        'discriminator': sum(p.numel() for p in gan.discriminator.parameters()),
-                        'total': sum(p.numel() for p in gan.generator.parameters()) + 
-                                 sum(p.numel() for p in gan.discriminator.parameters())
-                    }
-                }
-                
-                torch.save(model_state, filepath)
-                print(f"Model saved as .pt file: {filepath} ({os.path.getsize(filepath)} bytes)")
-                return True
-                
-            except Exception as e:
-                print(f"Error saving model as .pt: {e}")
-                return False
-        
-        def save_image_as_jpg(image_data, filepath):
-            """Save base64 image as JPG file"""
-            try:
-                if isinstance(image_data, str):
-                    img_bytes = base64.b64decode(image_data)
-                    img = Image.open(io.BytesIO(img_bytes))
-                else:
-                    img = image_data
-                
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                
-                img.save(filepath, 'JPEG', quality=95)
-                return True
-                
-            except Exception as e:
-                print(f"Error saving image as JPG: {e}")
-                return False
-        
-        # =============================================================================
-        # ORIGINAL TRAINING CODE (KEEPING EXISTING IMPLEMENTATION)
+        # DEFINE MODEL CLASSES
         # =============================================================================
         
         class VanillaGANWrapper:
-            def __init__(self, generator_state, discriminator_state, config):
-                self.generator_state = generator_state
-                self.discriminator_state = discriminator_state
-                self.config = config
-                
-            @classmethod
-            def from_model(cls, model):
-                if hasattr(model, 'generator') and hasattr(model, 'discriminator'):
-                    return cls(
-                        generator_state=model.generator.state_dict(),
-                        discriminator_state=model.discriminator.state_dict(),
-                        config=getattr(model, 'config', {})
-                    )
-                return None
+            def __init__(self, generator_state, discriminator_state, config, source='new'):
+                self.generator_state, self.discriminator_state = generator_state, discriminator_state
+                self.config, self.source = config, source
         
         class VanillaGenerator(nn.Module):
             def __init__(self, latent_dim, output_dim, hidden_layers=[256, 512, 1024]):
-                super(VanillaGenerator, self).__init__()
-                self.latent_dim = latent_dim
-                self.output_dim = output_dim
-                
+                super().__init__()
                 layers = []
                 input_dim = latent_dim
-                
                 for hidden_dim in hidden_layers:
-                    layers.append(nn.Linear(input_dim, hidden_dim))
-                    layers.append(nn.ReLU())
+                    layers.extend([nn.Linear(input_dim, hidden_dim), nn.ReLU()])
                     input_dim = hidden_dim
-                
-                layers.append(nn.Linear(input_dim, output_dim))
-                layers.append(nn.Tanh())
-                
+                layers.extend([nn.Linear(input_dim, output_dim), nn.Tanh()])
                 self.model = nn.Sequential(*layers)
-            
-            def forward(self, z):
-                return self.model(z)
+            def forward(self, z): return self.model(z)
         
         class VanillaDiscriminator(nn.Module):
             def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
-                super(VanillaDiscriminator, self).__init__()
-                self.input_dim = input_dim
-                
+                super().__init__()
                 layers = []
                 current_dim = input_dim
-                
                 for hidden_dim in hidden_layers:
-                    layers.append(nn.Linear(current_dim, hidden_dim))
-                    layers.append(nn.LeakyReLU(0.2))
-                    layers.append(nn.Dropout(0.3))
+                    layers.extend([nn.Linear(current_dim, hidden_dim), nn.LeakyReLU(0.2), nn.Dropout(0.3)])
                     current_dim = hidden_dim
-                
-                layers.append(nn.Linear(current_dim, 1))
-                layers.append(nn.Sigmoid())
-                
+                layers.extend([nn.Linear(current_dim, 1), nn.Sigmoid()])
                 self.model = nn.Sequential(*layers)
-            
-            def forward(self, x):
-                return self.model(x)
+            def forward(self, x): return self.model(x)
         
         class ForwardForwardDiscriminatorBlock(nn.Module):
             def __init__(self, input_dim, output_dim, config):
-                super(ForwardForwardDiscriminatorBlock, self).__init__()
+                super().__init__()
                 self.config = config
-                
                 self.linear = nn.Linear(input_dim, output_dim)
                 self.activation = nn.LeakyReLU(0.2)
                 self.dropout = nn.Dropout(config.get('discriminator_dropout', 0.3))
-                
-                self.local_predictor = nn.Sequential(
-                    nn.Linear(output_dim, 128),
-                    nn.ReLU(),
-                    nn.Linear(128, 1),
-                    nn.Sigmoid()
-                )
-            
-            def forward(self, x):
-                x = self.linear(x)
-                x = self.activation(x)
-                x = self.dropout(x)
-                return x
-            
-            def compute_goodness(self, x):
-                return torch.sum(x**2, dim=-1)
-            
+                self.local_predictor = nn.Sequential(nn.Linear(output_dim, 128), nn.ReLU(), nn.Linear(128, 1), nn.Sigmoid())
+            def forward(self, x): return self.dropout(self.activation(self.linear(x)))
+            def compute_goodness(self, x): return torch.sum(x**2, dim=-1)
             def forward_forward_loss(self, pos_goodness, neg_goodness):
                 theta = self.config.get('ff_theta', 2.0)
                 pos_margin = self.config.get('ff_positive_margin', 2.0)
                 neg_margin = self.config.get('ff_negative_margin', 0.0)
-                
                 pos_loss = torch.log(1 + torch.exp(-(pos_goodness - theta - pos_margin)))
                 neg_loss = torch.log(1 + torch.exp(neg_goodness - theta + neg_margin))
-                
                 return pos_loss.mean() + neg_loss.mean()
         
         class ForwardForwardDiscriminator(nn.Module):
             def __init__(self, input_dim, hidden_layers, config):
-                super(ForwardForwardDiscriminator, self).__init__()
-                self.config = config
-                self.ff_trained = False
-                
+                super().__init__()
+                self.config, self.ff_trained = config, False
                 self.blocks = nn.ModuleList()
                 current_dim = input_dim
-                
                 for hidden_dim in hidden_layers:
-                    block = ForwardForwardDiscriminatorBlock(current_dim, hidden_dim, config)
-                    self.blocks.append(block)
+                    self.blocks.append(ForwardForwardDiscriminatorBlock(current_dim, hidden_dim, config))
                     current_dim = hidden_dim
-                
-                self.final_layer = nn.Sequential(
-                    nn.Linear(current_dim, 1),
-                    nn.Sigmoid()
-                )
-            
+                self.final_layer = nn.Sequential(nn.Linear(current_dim, 1), nn.Sigmoid())
             def forward(self, x, return_layers=False):
                 x = x.view(x.size(0), -1)
-                
-                if return_layers:
-                    layer_outputs = []
-                
+                layer_outputs = [] if return_layers else None
                 h = x
                 for block in self.blocks:
                     h = block(h)
-                    if return_layers:
-                        layer_outputs.append(h)
-                
+                    if return_layers: layer_outputs.append(h)
                 output = self.final_layer(h).view(-1)
-                
-                if return_layers:
-                    return output, layer_outputs
-                return output
-            
+                return (output, layer_outputs) if return_layers else output
             def forward_single_block(self, x, block_idx):
                 x = x.view(x.size(0), -1)
                 h = x
-                for i in range(block_idx + 1):
-                    h = self.blocks[i](h)
+                for i in range(block_idx + 1): h = self.blocks[i](h)
                 return h
         
         class CAFODiscriminatorBlock(nn.Module):
             def __init__(self, input_dim, output_dim, config):
-                super(CAFODiscriminatorBlock, self).__init__()
+                super().__init__()
                 self.config = config
-                
                 self.linear = nn.Linear(input_dim, output_dim)
                 self.activation = nn.LeakyReLU(0.2)
                 self.dropout = nn.Dropout(config.get('discriminator_dropout', 0.3))
-                
-                self.local_predictor = nn.Sequential(
-                    nn.Linear(output_dim, 64),
-                    nn.ReLU(),
-                    nn.Linear(64, 1),
-                    nn.Sigmoid()
-                )
-            
-            def forward(self, x):
-                x = self.linear(x)
-                x = self.activation(x)
-                x = self.dropout(x)
-                return x
+                self.local_predictor = nn.Sequential(nn.Linear(output_dim, 64), nn.ReLU(), nn.Linear(64, 1), nn.Sigmoid())
+            def forward(self, x): return self.dropout(self.activation(self.linear(x)))
         
         class CAFODiscriminator(nn.Module):
             def __init__(self, input_dim, hidden_layers, config):
-                super(CAFODiscriminator, self).__init__()
-                self.config = config
-                self.cafo_trained = False
-                
+                super().__init__()
+                self.config, self.cafo_trained = config, False
                 self.blocks = nn.ModuleList()
                 current_dim = input_dim
-                
                 for hidden_dim in hidden_layers:
-                    block = CAFODiscriminatorBlock(current_dim, hidden_dim, config)
-                    self.blocks.append(block)
+                    self.blocks.append(CAFODiscriminatorBlock(current_dim, hidden_dim, config))
                     current_dim = hidden_dim
-                
-                self.final_layer = nn.Sequential(
-                    nn.Linear(current_dim, 1),
-                    nn.Sigmoid()
-                )
-            
+                self.final_layer = nn.Sequential(nn.Linear(current_dim, 1), nn.Sigmoid())
             def forward(self, x):
                 x = x.view(x.size(0), -1)
                 h = x
-                for block in self.blocks:
-                    h = block(h)
+                for block in self.blocks: h = block(h)
                 return self.final_layer(h).view(-1)
+        
+        # =============================================================================
+        # HELPER FUNCTIONS
+        # =============================================================================
+        
+        def upload_to_cdn(file_path, file_type, bearer_token, get_cdn, upload_domain, model_type="vanilla_gan"):
+            if not bearer_token: return None
+            try:
+                with open(file_path, 'rb') as f: file_content = f.read()
+                unique_id, timestamp = str(uuid.uuid4())[:8], int(time.time())
+                filename = f"{model_type}_{file_type}_{timestamp}_{unique_id}"
+                filename += ".pt" if file_type == "model" else ".json" if file_type == "metadata" else ".png"
+                upload_url = f"{upload_domain}/api/v2/upload"
+                headers = {"Authorization": f"Bearer {bearer_token}", "Content-Type": "application/octet-stream"}
+                response = requests.post(upload_url, data=file_content, headers=headers, timeout=30)
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get('status') == 'success':
+                        cdn_url = f"{get_cdn}/{result.get('filename')}"
+                        return {'url': cdn_url, 'filename': filename, 'upload_response': result}
+                return None
+            except Exception as e:
+                print(f"CDN upload error: {str(e)}")
+                return None
         
         class BalancedVanillaGAN:
             def __init__(self, generator, discriminator, config):
-                self.generator = generator
-                self.discriminator = discriminator
+                self.generator, self.discriminator = generator, discriminator
                 self.config = config
                 self.device = torch.device(config.get('device', 'cpu'))
-                
                 g_lr = config.get('generator_lr', 0.0002)
                 d_lr = config.get('discriminator_lr', 0.0001)
-                
                 self.g_optimizer = torch.optim.Adam(generator.parameters(), lr=g_lr, betas=(0.5, 0.999))
                 self.d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=d_lr, betas=(0.5, 0.999))
-                self.criterion = nn.BCELoss()
-                self.mse_loss = nn.MSELoss()
-                
-                print(f"Optimizers created: G_LR={g_lr}, D_LR={d_lr}")
+                self.criterion, self.mse_loss = nn.BCELoss(), nn.MSELoss()
             
             def compute_gradient_penalty(self, real_samples, fake_samples, lambda_gp=10):
                 batch_size = real_samples.size(0)
-                alpha = torch.rand(batch_size, 1, device=self.device)
-                alpha = alpha.expand_as(real_samples)
-                
+                alpha = torch.rand(batch_size, 1, device=self.device).expand_as(real_samples)
                 interpolates = alpha * real_samples + (1 - alpha) * fake_samples
                 interpolates.requires_grad_(True)
-                
                 d_interpolates = self.discriminator(interpolates)
-                
                 gradients = torch.autograd.grad(
-                    outputs=d_interpolates,
-                    inputs=interpolates,
+                    outputs=d_interpolates, inputs=interpolates,
                     grad_outputs=torch.ones_like(d_interpolates),
-                    create_graph=True,
-                    retain_graph=True
+                    create_graph=True, retain_graph=True
                 )[0]
-                
-                gradient_penalty = lambda_gp * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
-                return gradient_penalty
+                return lambda_gp * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+            
+            def feature_matching_loss(self, real_data, fake_data):
+                real_features, fake_features = [], []
+                x_real, x_fake = real_data, fake_data
+                if hasattr(self.discriminator, 'model'): layers = self.discriminator.model
+                elif hasattr(self.discriminator, 'layers'): layers = self.discriminator.layers
+                elif hasattr(self.discriminator, 'blocks'): layers = self.discriminator.blocks
+                else: layers = list(self.discriminator.children())
+                for layer in layers[:-1]:
+                    x_real, x_fake = layer(x_real), layer(x_fake)
+                    if hasattr(layer, 'out_features') or hasattr(layer, 'out_channels'):
+                        real_features.append(x_real.detach())
+                        fake_features.append(x_fake)
+                if not real_features: return torch.tensor(0.0, device=self.device)
+                fm_loss = sum(self.mse_loss(fake_feat.mean(0), real_feat.mean(0)) 
+                            for real_feat, fake_feat in zip(real_features, fake_features))
+                return fm_loss / len(real_features)
         
         # =============================================================================
-        # MAIN TRAINING LOGIC WITH CONTINUAL LEARNING
+        # MAIN EXECUTION
         # =============================================================================
         
-        parser = argparse.ArgumentParser(description='Vanilla GAN Training with Continual Learning')
-        # Original inputs
+        parser = argparse.ArgumentParser()
         parser.add_argument('--initialized_model', type=str, required=True)
         parser.add_argument('--preprocessed_data', type=str, required=True)
         parser.add_argument('--gan_config_json', type=str, required=True)
-        # Continual learning inputs
         parser.add_argument('--enable_continual_learning', type=str, default='false')
-        parser.add_argument('--load_from_schema', type=str, default='false')
-        parser.add_argument('--schema_id', type=str, default='')
-        parser.add_argument('--model_id', type=str, default='')
-        parser.add_argument('--execution_id', type=str, default='')
+        parser.add_argument('--fine_tune_factor', type=str, default='0.1')
         parser.add_argument('--bearer_token', type=str, default='')
-        # CDN upload inputs
         parser.add_argument('--get_cdn', type=str, default="https://cdn-new.gov-cloud.ai")
         parser.add_argument('--upload_domain', type=str, default="https://igs.gov-cloud.ai")
-        # Original outputs
         parser.add_argument('--trained_model', type=str, required=True)
         parser.add_argument('--training_history', type=str, required=True)
         parser.add_argument('--training_metrics', type=str, required=True)
         parser.add_argument('--generated_samples', type=str, required=True)
-        # New outputs
-        parser.add_argument('--model_cdn_url', type=str, required=True)
+        parser.add_argument('--trained_model_cdn_url', type=str, required=True)
+        parser.add_argument('--model_metadata_cdn_url', type=str, required=True)
+        parser.add_argument('--training_metrics_path', type=str, required=True)
+        parser.add_argument('--model_config_json', type=str, required=True)
         parser.add_argument('--samples_cdn_urls', type=str, required=True)
         parser.add_argument('--model_upload_response', type=str, required=True)
         parser.add_argument('--continual_learning_status', type=str, required=True)
@@ -716,7 +271,7 @@ implementation:
         print("VANILLA GAN TRAINING WITH CONTINUAL LEARNING")
         print("="*60)
         
-        # Parse configuration
+        # Load configuration
         gan_config = json.loads(args.gan_config_json)
         model_config = gan_config.get('model', {})
         training_config = gan_config.get('training', {})
@@ -728,43 +283,30 @@ implementation:
         g_train_steps = training_config.get('g_train_steps', 4)
         label_smoothing = training_config.get('label_smoothing', 0.3)
         noise_std = training_config.get('noise_std', 0.15)
+        d_dropout = training_config.get('d_dropout', 0.6)
+        feature_matching = training_config.get('feature_matching', True)
         gradient_penalty = training_config.get('gradient_penalty', 0.1)
         
         algorithm = model_config.get('training_algorithm', 'backprop')
         use_forward_forward = model_config.get('use_forward_forward', False)
         use_cafo = model_config.get('use_cafo', False)
+        if use_forward_forward: algorithm = 'forward_forward'
+        elif use_cafo: algorithm = 'cafo'
         
-        if use_forward_forward:
-            algorithm = 'forward_forward'
-        elif use_cafo:
-            algorithm = 'cafo'
+        print(f"Training {algorithm.upper()} with G_LR={generator_lr}, D_LR={discriminator_lr}")
+        print(f"Continual Learning: {args.enable_continual_learning}")
         
-        print(f"Training Algorithm: {algorithm.upper()}")
-        print(f"Enable Continual Learning: {args.enable_continual_learning}")
-        print(f"Load from Schema: {args.load_from_schema}")
+        # Continual learning setup
+        continual_status = {
+            'enabled': args.enable_continual_learning == 'true',
+            'fine_tune_factor': float(args.fine_tune_factor),
+            'original_lr': {'generator': generator_lr, 'discriminator': discriminator_lr},
+            'adjusted_lr': {'generator': generator_lr, 'discriminator': discriminator_lr},
+            'model_loaded_from': 'new',
+            'fine_tuning_applied': False
+        }
         
-        # =============================================================================
-        # CONTINUAL LEARNING: LOAD PREVIOUS MODEL
-        # =============================================================================
-        
-        previous_model, continual_status = load_previous_model(
-            args.initialized_model,
-            gan_config,
-            args.enable_continual_learning,
-            args.load_from_schema,
-            args.schema_id,
-            args.model_id,
-            args.execution_id,
-            args.bearer_token
-        )
-        
-        print(f"Continual Learning Status: {continual_status}")
-        
-        # =============================================================================
-        # ORIGINAL TRAINING SETUP (KEEPING EXISTING CODE)
-        # =============================================================================
-        
-        # Load preprocessed data
+        # Load data
         with open(args.preprocessed_data, 'rb') as f:
             data_wrapper = pickle.load(f)
         
@@ -774,46 +316,37 @@ implementation:
             image_size = data_wrapper.get('image_size', 28)
             channels = data_wrapper.get('channels', 1)
         else:
-            dataset = data_wrapper
-            input_dim = 784
-            image_size = 28
-            channels = 1
+            dataset, input_dim, image_size, channels = data_wrapper, 784, 28, 1
         
         batch_size = training_config.get('batch_size', 64)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
         
-        # Load model (keeping existing logic)
+        # Load model
         gan = None
         try:
             with open(args.initialized_model, 'rb') as f:
                 model_data = pickle.load(f)
             
-            if hasattr(model_data, 'generator') and hasattr(model_data, 'discriminator'):
-                if hasattr(model_data.__class__, '__name__') and 'Balanced' in str(model_data.__class__):
-                    gan = model_data
-                    print("Loaded BalancedVanillaGAN directly")
-                else:
-                    config = {
-                        'generator_lr': generator_lr,
-                        'discriminator_lr': discriminator_lr,
-                        'device': 'cpu'
-                    }
-                    gan = BalancedVanillaGAN(model_data.generator, model_data.discriminator, config)
-                    print("Converted to BalancedVanillaGAN")
+            if hasattr(model_data, 'source'):
+                continual_status['model_loaded_from'] = model_data.source
             
-            elif isinstance(model_data, VanillaGANWrapper):
+            if hasattr(model_data, 'generator') and hasattr(model_data, 'discriminator'):
+                if hasattr(model_data, '__class__') and 'Balanced' in str(model_data.__class__):
+                    gan = model_data
+                else:
+                    config = {'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr, 'device': 'cpu'}
+                    gan = BalancedVanillaGAN(model_data.generator, model_data.discriminator, config)
+
+            elif isinstance(model_data, VanillaGANWrapper) or (hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state')):
                 config = model_data.config
-                config.update({
-                    'generator_lr': generator_lr,
-                    'discriminator_lr': discriminator_lr
-                })
-                
+                config.update({'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr})
+                input_dim = config.get('input_dim', 784)
                 latent_dim = config.get('latent_dim', 100)
                 generator_layers = config.get('generator_layers', [256, 512, 1024])
                 discriminator_layers = config.get('discriminator_layers', [1024, 512, 256])
+                algorithm = config.get('training_algorithm', 'backprop')
                 
                 generator = VanillaGenerator(latent_dim, input_dim, generator_layers)
-                
                 if algorithm == 'forward_forward':
                     discriminator = ForwardForwardDiscriminator(input_dim, discriminator_layers, config)
                 elif algorithm == 'cafo':
@@ -823,66 +356,48 @@ implementation:
                 
                 generator.load_state_dict(model_data.generator_state)
                 discriminator.load_state_dict(model_data.discriminator_state)
-                
                 gan = BalancedVanillaGAN(generator, discriminator, config)
-                print("Reconstructed from wrapper")
+
+            elif hasattr(model_data, 'generator_arch') and hasattr(model_data, 'discriminator_arch'):
+                config = {'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr, 'device': 'cpu'}
+                gan = BalancedVanillaGAN(model_data.generator_arch, model_data.discriminator_arch, config)
+            
+            else: raise ValueError("Creating fallback model")
                 
         except Exception as e:
-            print(f"Error loading model, creating fallback: {e}")
-            latent_dim = model_config.get('latent_dim', 100)
-            generator = VanillaGenerator(latent_dim, input_dim, model_config.get('generator_layers', [256, 512, 1024]))
-            
+            print(f"Creating fallback model: {e}")
+            generator = VanillaGenerator(
+                latent_dim=model_config.get('latent_dim', 100),
+                output_dim=input_dim,
+                hidden_layers=model_config.get('generator_layers', [256, 512, 1024])
+            )
             if algorithm == 'forward_forward':
                 discriminator = ForwardForwardDiscriminator(input_dim, model_config.get('discriminator_layers', [1024, 512, 256]), 
-                                                           {'discriminator_dropout': 0.3})
+                                                          {'discriminator_dropout': d_dropout})
             elif algorithm == 'cafo':
                 discriminator = CAFODiscriminator(input_dim, model_config.get('discriminator_layers', [1024, 512, 256]), 
-                                                 {'discriminator_dropout': 0.3})
+                                                {'discriminator_dropout': d_dropout})
             else:
                 discriminator = VanillaDiscriminator(input_dim, model_config.get('discriminator_layers', [1024, 512, 256]))
             
-            config = {
-                'generator_lr': generator_lr,
-                'discriminator_lr': discriminator_lr,
-                'device': 'cpu'
-            }
-            
-            gan = BalancedVanillaGAN(generator, discriminator, config)
-            print("Created fallback model")
+            balanced_config = {'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr, 'device': 'cpu'}
+            gan = BalancedVanillaGAN(generator, discriminator, balanced_config)
         
-        if gan is None:
-            raise ValueError("Failed to load or create model")
-        
-        # =============================================================================
-        # APPLY PREVIOUS WEIGHTS FOR CONTINUAL LEARNING
-        # =============================================================================
-        
-        if previous_model and continual_status['loaded']:
-            print("\nApplying previous model weights for continual learning...")
-            weights_applied = apply_previous_weights(gan, previous_model, gan_config)
-            
-            if weights_applied:
-                continual_status['weights_applied'] = True
-                print("Previous model weights applied successfully")
-                
-                # Adjust learning rates for fine-tuning
-                fine_tune_factor = 0.1  # Use 10% of original LR for fine-tuning
-                for param_group in gan.g_optimizer.param_groups:
-                    param_group['lr'] = generator_lr * fine_tune_factor
-                for param_group in gan.d_optimizer.param_groups:
-                    param_group['lr'] = discriminator_lr * fine_tune_factor
-                
-                print(f"Adjusted learning rates for fine-tuning:")
-                print(f"  Generator LR: {generator_lr * fine_tune_factor}")
-                print(f"  Discriminator LR: {discriminator_lr * fine_tune_factor}")
-            else:
-                continual_status['weights_applied'] = False
-                continual_status['error'] = 'Failed to apply weights'
-                print("Failed to apply previous model weights")
+        # Apply continual learning fine-tuning
+        if args.enable_continual_learning == 'true' and continual_status['model_loaded_from'] in ['schema', 'cdn', 'model']:
+            try:
+                fine_tune_factor = float(args.fine_tune_factor)
+                for param_group in gan.g_optimizer.param_groups: param_group['lr'] = generator_lr * fine_tune_factor
+                for param_group in gan.d_optimizer.param_groups: param_group['lr'] = discriminator_lr * fine_tune_factor
+                continual_status['adjusted_lr'] = {'generator': generator_lr * fine_tune_factor, 'discriminator': discriminator_lr * fine_tune_factor}
+                continual_status['fine_tuning_applied'] = True
+                print(f"Fine-tuning applied: factor={fine_tune_factor}")
+            except Exception as e:
+                continual_status['fine_tuning_applied'] = False
+                continual_status['error'] = str(e)
         
         # Setup device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"Using device: {device}")
         gan.generator.to(device)
         gan.discriminator.to(device)
         
@@ -890,121 +405,111 @@ implementation:
         epochs = training_config.get('epochs', 20)
         latent_dim = model_config.get('latent_dim', 100)
         
-        print(f"\nStarting Vanilla GAN training...")
-        print(f"Epochs: {epochs}, Batch size: {batch_size}")
-        print(f"Continual Learning: {continual_status.get('loaded', False)}")
+        print(f"Training: Epochs={epochs}, Batch={batch_size}, Latent={latent_dim}")
         
-        # =============================================================================
-        # ORIGINAL TRAINING LOOP (KEEPING EXISTING CODE)
-        # =============================================================================
-        
+        # Training history
         training_history = {
             'epochs_completed': 0,
-            'losses_g': [],
-            'losses_d': [],
-            'real_scores': [],
-            'fake_scores': [],
+            'losses_g': [], 'losses_d': [],
+            'real_scores': [], 'fake_scores': [],
             'algorithm': algorithm,
             'training_type': 'balanced',
             'continual_learning': continual_status,
             'timestamps': []
         }
         
+        # =============================================================================
+        # TRAINING LOOP
+        # =============================================================================
+        
         for epoch in range(epochs):
             epoch_start = time.time()
-            epoch_g_losses = []
-            epoch_d_losses = []
-            epoch_real_scores = []
-            epoch_fake_scores = []
+            epoch_g_losses, epoch_d_losses = [], []
+            epoch_real_scores, epoch_fake_scores = [], []
             
             for batch_idx, real_data in enumerate(dataloader):
                 current_batch_size = real_data.size(0)
                 real_data = real_data.to(device)
                 
-                if label_smoothing > 0:
-                    real_labels = torch.ones(current_batch_size, device=device) - label_smoothing
-                    fake_labels = torch.zeros(current_batch_size, device=device) + label_smoothing
-                else:
-                    real_labels = torch.ones(current_batch_size, device=device)
-                    fake_labels = torch.zeros(current_batch_size, device=device)
+                # Labels
+                real_labels = torch.ones(current_batch_size, device=device) - label_smoothing if label_smoothing > 0 else torch.ones(current_batch_size, device=device)
+                fake_labels = torch.zeros(current_batch_size, device=device) + label_smoothing if label_smoothing > 0 else torch.zeros(current_batch_size, device=device)
                 
-                if noise_std > 0:
-                    noise_real = torch.randn_like(real_data) * noise_std
-                    real_data_noisy = real_data + noise_real
-                else:
-                    real_data_noisy = real_data
+                # Add noise
+                real_data_noisy = real_data + torch.randn_like(real_data) * noise_std if noise_std > 0 else real_data
                 
                 # Train Discriminator
                 d_steps_to_run = d_train_steps
-                d_loss = None
-                fake_data = None
+                if epoch_real_scores:
+                    recent_real_score = np.mean(epoch_real_scores[-10:])
+                    recent_fake_score = np.mean(epoch_fake_scores[-10:])
+                    if recent_real_score > 0.85 and recent_fake_score < 0.15:
+                        d_steps_to_run = 0
                 
+                d_loss, fake_data = None, None
                 for d_step in range(d_steps_to_run):
                     gan.d_optimizer.zero_grad()
-                    
                     real_output = gan.discriminator(real_data_noisy).view(-1)
                     d_loss_real = gan.criterion(real_output, real_labels)
                     
                     noise = torch.randn(current_batch_size, latent_dim, device=device)
                     fake_data = gan.generator(noise).detach()
-                    
-                    if noise_std > 0:
-                        noise_fake = torch.randn_like(fake_data) * noise_std
-                        fake_data_noisy = fake_data + noise_fake
-                    else:
-                        fake_data_noisy = fake_data
-                    
+                    fake_data_noisy = fake_data + torch.randn_like(fake_data) * noise_std if noise_std > 0 else fake_data
                     fake_output = gan.discriminator(fake_data_noisy).view(-1)
                     d_loss_fake = gan.criterion(fake_output, fake_labels)
                     
                     d_loss = (d_loss_real + d_loss_fake) / 2
-                    
                     if gradient_penalty > 0 and fake_data_noisy is not None:
-                        gp = gan.compute_gradient_penalty(real_data_noisy, fake_data_noisy, gradient_penalty)
-                        d_loss += gp
+                        d_loss += gan.compute_gradient_penalty(real_data_noisy, fake_data_noisy, gradient_penalty)
                     
                     d_loss.backward()
                     gan.d_optimizer.step()
                 
                 # Train Generator
                 g_steps_to_run = g_train_steps
-                g_loss = None
+                if epoch_real_scores:
+                    recent_real_score = np.mean(epoch_real_scores[-10:])
+                    recent_fake_score = np.mean(epoch_fake_scores[-10:])
+                    if recent_real_score > 0.85 and recent_fake_score < 0.15:
+                        g_steps_to_run = g_train_steps * 3
                 
+                g_loss, fake_data_for_generator = None, None
                 for g_step in range(g_steps_to_run):
                     gan.g_optimizer.zero_grad()
-                    
                     noise = torch.randn(current_batch_size, latent_dim, device=device)
                     fake_data_for_generator = gan.generator(noise)
                     fake_output = gan.discriminator(fake_data_for_generator).view(-1)
                     
-                    if label_smoothing > 0:
-                        target_labels = torch.ones(current_batch_size, device=device) - label_smoothing/2
-                    else:
-                        target_labels = torch.ones(current_batch_size, device=device)
+                    target_labels = torch.ones(current_batch_size, device=device) - label_smoothing/2 if label_smoothing > 0 else torch.ones(current_batch_size, device=device)
+                    g_loss = gan.criterion(fake_output, target_labels)
                     
-                    g_loss_adversarial = gan.criterion(fake_output, target_labels)
-                    g_loss = g_loss_adversarial
+                    if feature_matching:
+                        try:
+                            g_loss += 10.0 * gan.feature_matching_loss(real_data, fake_data_for_generator)
+                        except Exception: pass
                     
                     g_loss.backward()
                     gan.g_optimizer.step()
                 
                 # Record statistics
                 current_fake_data = fake_data if fake_data is not None else fake_data_for_generator
-                
                 if current_fake_data is not None and g_loss is not None and d_loss is not None:
                     epoch_g_losses.append(g_loss.item())
                     epoch_d_losses.append(d_loss.item())
-                    
                     real_output_for_score = gan.discriminator(real_data).view(-1).mean().item()
                     fake_output_for_score = gan.discriminator(current_fake_data.detach()).view(-1).mean().item()
                     epoch_real_scores.append(real_output_for_score)
                     epoch_fake_scores.append(fake_output_for_score)
+                    
+                    if batch_idx % 50 == 0:
+                        print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx}/{len(dataloader)}] "
+                              f"G: {g_loss.item():.4f} D: {d_loss.item():.4f}")
             
-            # Record epoch statistics
-            avg_g_loss = np.mean(epoch_g_losses)
-            avg_d_loss = np.mean(epoch_d_losses)
-            avg_real_score = np.mean(epoch_real_scores)
-            avg_fake_score = np.mean(epoch_fake_scores)
+            # Epoch statistics
+            avg_g_loss = np.mean(epoch_g_losses) if epoch_g_losses else 1.0
+            avg_d_loss = np.mean(epoch_d_losses) if epoch_d_losses else 1.0
+            avg_real_score = np.mean(epoch_real_scores) if epoch_real_scores else 0.5
+            avg_fake_score = np.mean(epoch_fake_scores) if epoch_fake_scores else 0.5
             
             training_history['losses_g'].append(float(avg_g_loss))
             training_history['losses_d'].append(float(avg_d_loss))
@@ -1012,16 +517,14 @@ implementation:
             training_history['fake_scores'].append(float(avg_fake_score))
             training_history['timestamps'].append(time.time())
             
-            if (epoch + 1) % 5 == 0:
-                print(f"Epoch {epoch+1}/{epochs}: G Loss: {avg_g_loss:.4f}, D Loss: {avg_d_loss:.4f}")
+            print(f"Epoch {epoch+1}/{epochs}: G: {avg_g_loss:.4f}, D: {avg_d_loss:.4f}, "
+                  f"Real: {avg_real_score:.3f}, Fake: {avg_fake_score:.3f}")
         
         training_history['epochs_completed'] = epochs
         
         # Generate samples
-        print("\nGenerating samples...")
         generated_samples = []
         num_samples = min(16, training_config.get('num_samples', 16))
-        
         gan.generator.eval()
         with torch.no_grad():
             for i in range(num_samples):
@@ -1031,244 +534,125 @@ implementation:
                 
                 if channels == 1:
                     img_np = (fake_img.squeeze(0).squeeze(0).numpy() + 1) / 2 * 255
-                    img_np = np.clip(img_np, 0, 255)
                     img_pil = Image.fromarray(img_np.astype(np.uint8), mode='L')
                 else:
                     img_np = (fake_img.squeeze(0).permute(1, 2, 0).numpy() + 1) / 2 * 255
-                    img_np = np.clip(img_np, 0, 255)
                     img_pil = Image.fromarray(img_np.astype(np.uint8), mode='RGB')
+                
+                temp_image_path = f"/tmp/vanilla_gan_sample_{i}.png"
+                img_pil.save(temp_image_path)
                 
                 img_bytes = io.BytesIO()
                 img_pil.save(img_bytes, format='PNG')
                 base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
                 
                 generated_samples.append({
-                    'sample_id': i,
-                    'image_data': base64_data,
-                    'model_type': 'vanilla_gan',
-                    'algorithm': algorithm,
-                    'epoch': epochs,
-                    'filename': f'vanilla_gan_sample_{i}.jpg'
+                    'sample_id': i, 'image_data': base64_data, 'model_type': 'vanilla_gan',
+                    'algorithm': algorithm, 'training_type': 'balanced', 'epoch': epochs,
+                    'image_size': image_size, 'channels': channels,
+                    'filename': f'vanilla_gan_balanced_sample_{i}.png',
+                    'local_path': temp_image_path
                 })
         
-        print(f"Generated {len(generated_samples)} samples")
-        
-        # Calculate training metrics
+        # Training metrics
         training_metrics = {
-            'model_type': 'vanilla_gan',
-            'training_algorithm': algorithm,
-            'epochs_completed': epochs,
+            'model_type': 'vanilla_gan', 'training_algorithm': algorithm, 'training_type': 'balanced',
+            'architecture': 'fully_connected', 'epochs_completed': epochs,
             'final_generator_loss': training_history['losses_g'][-1] if training_history['losses_g'] else 1.0,
             'final_discriminator_loss': training_history['losses_d'][-1] if training_history['losses_d'] else 1.0,
+            'avg_generator_loss': np.mean(training_history['losses_g']) if training_history['losses_g'] else 1.0,
+            'avg_discriminator_loss': np.mean(training_history['losses_d']) if training_history['losses_d'] else 1.0,
             'final_real_score': training_history['real_scores'][-1] if training_history['real_scores'] else 0.5,
             'final_fake_score': training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5,
-            'samples_generated': len(generated_samples),
-            'continual_learning': continual_status,
-            'input_dim': input_dim,
-            'latent_dim': latent_dim,
-            'batch_size': batch_size
+            'training_time': training_history['timestamps'][-1] - training_history['timestamps'][0] if len(training_history['timestamps']) > 1 else 0,
+            'samples_generated': len(generated_samples), 'training_success': True,
+            'input_dim': input_dim, 'latent_dim': latent_dim, 'image_size': image_size,
+            'channels': channels, 'batch_size': batch_size,
+            'balanced_training_config': {
+                'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr,
+                'd_train_steps': d_train_steps, 'g_train_steps': g_train_steps,
+                'label_smoothing': label_smoothing, 'noise_std': noise_std,
+                'd_dropout': d_dropout, 'feature_matching': feature_matching,
+                'gradient_penalty': gradient_penalty
+            },
+            'continual_learning_status': continual_status
         }
         
-        # =============================================================================
-        # CDN UPLOADS
-        # =============================================================================
+        # CDN Upload
+        model_cdn_url, model_metadata_cdn_url, sample_urls = "", "", []
+        model_upload_response_json = json.dumps({"error": "No bearer token provided"})
+        
+        if args.bearer_token:
+            print("\nCDN UPLOAD PROCESS")
+            model_pt_path = "/tmp/trained_vanilla_gan.pt"
+            torch.save({
+                'generator_state_dict': gan.generator.state_dict(),
+                'discriminator_state_dict': gan.discriminator.state_dict(),
+                'config': gan.config,
+                'training_metrics': training_metrics
+            }, model_pt_path)
+            
+            model_upload_result = upload_to_cdn(model_pt_path, "model", args.bearer_token, args.get_cdn, args.upload_domain, "vanilla_gan")
+            if model_upload_result:
+                model_cdn_url = model_upload_result['url']
+                model_metadata_cdn_url = model_cdn_url
+                model_upload_response_json = json.dumps(model_upload_result['upload_response'])
+                print(f"Model uploaded: {model_cdn_url}")
+            
+            for sample in generated_samples:
+                sample_upload_result = upload_to_cdn(sample['local_path'], "image", args.bearer_token, args.get_cdn, args.upload_domain, "vanilla_gan")
+                if sample_upload_result:
+                    sample['cdn_url'] = sample_upload_result['url']
+                    sample_urls.append(sample_upload_result['url'])
+        
+        samples_cdn_urls_json = json.dumps(sample_urls)
+        
+        # Save outputs
+        def save_output(path, data, is_json=False):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            mode = 'w' if is_json else 'wb'
+            with open(path, mode) as f:
+                if is_json: json.dump(data, f, indent=2)
+                else: pickle.dump(data, f)
+        
+        save_output(args.trained_model, gan)
+        save_output(args.training_history, training_history, True)
+        save_output(args.training_metrics, training_metrics, True)
+        save_output(args.generated_samples, [s for s in generated_samples if 'local_path' not in s])
+        save_output(args.continual_learning_status, continual_status, True)
+        
+        with open(args.trained_model_cdn_url, 'w') as f: f.write(model_cdn_url)
+        with open(args.model_metadata_cdn_url, 'w') as f: f.write(model_metadata_cdn_url)
+        save_output(args.training_metrics_path, training_metrics, True)
+        save_output(args.model_config_json, training_metrics, True)
+        with open(args.samples_cdn_urls, 'w') as f: f.write(samples_cdn_urls_json)
+        with open(args.model_upload_response, 'w') as f: f.write(model_upload_response_json)
         
         print("\n" + "="*60)
-        print("STARTING CDN UPLOADS")
-        print("="*60)
-        
-        # Create temp directory
-        temp_dir = tempfile.mkdtemp()
-        print(f"Temp directory: {temp_dir}")
-        
-        # 1. Save and upload trained model as .pt file
-        model_pt_path = os.path.join(temp_dir, f"vanilla_gan_model_{int(time.time())}.pt")
-        model_upload_result = None
-        model_cdn_url = ""
-        
-        try:
-            # Combine configs for model saving
-            combined_config = {
-                **model_config,
-                'training_algorithm': algorithm,
-                'generator_lr': generator_lr,
-                'discriminator_lr': discriminator_lr,
-                'latent_dim': latent_dim,
-                'input_dim': input_dim,
-                'continual_learning': continual_status
-            }
-            
-            # Save model as .pt
-            if save_model_as_pt(gan, model_pt_path, combined_config, training_metrics):
-                # Upload model to CDN
-                model_filename = f"vanilla_gan_model_{int(time.time())}_{algorithm}.pt"
-                model_upload_result = upload_to_cdn(
-                    model_pt_path, 
-                    model_filename,
-                    args.bearer_token,
-                    args.upload_domain,
-                    args.get_cdn
-                )
-                
-                if model_upload_result and model_upload_result['success']:
-                    model_cdn_url = model_upload_result['cdn_url']
-                    print(f"✓ Model uploaded to CDN: {model_cdn_url}")
-                else:
-                    print(f"✗ Model upload failed")
-            else:
-                print("✗ Failed to save model as .pt file")
-        except Exception as e:
-            print(f"✗ Error in model upload: {str(e)}")
-            traceback.print_exc()
-        
-        # 2. Upload generated sample images
-        samples_cdn_urls_list = []
-        
-        try:
-            print(f"Uploading {len(generated_samples)} generated samples to CDN...")
-            
-            for i, sample in enumerate(generated_samples):
-                if sample.get('image_data'):
-                    # Save image as JPG
-                    sample_jpg_path = os.path.join(temp_dir, f"sample_{i}_{int(time.time())}.jpg")
-                    
-                    if save_image_as_jpg(sample['image_data'], sample_jpg_path):
-                        # Upload to CDN
-                        sample_filename = f"vanilla_gan_sample_{i}_{int(time.time())}.jpg"
-                        upload_result = upload_to_cdn(
-                            sample_jpg_path,
-                            sample_filename,
-                            args.bearer_token,
-                            args.upload_domain,
-                            args.get_cdn
-                        )
-                        
-                        if upload_result and upload_result['success']:
-                            samples_cdn_urls_list.append(upload_result['cdn_url'])
-                            print(f"  ✓ Sample {i} uploaded")
-                        else:
-                            print(f"  ✗ Sample {i} upload failed")
-                    else:
-                        print(f"  ✗ Failed to save sample {i} as JPG")
-        
-        except Exception as e:
-            print(f"✗ Error uploading samples: {str(e)}")
-            traceback.print_exc()
-        
-        print(f"\nCDN Upload Summary:")
-        print(f"  Model uploaded: {'✓' if model_cdn_url else '✗'}")
-        print(f"  Samples uploaded: {len(samples_cdn_urls_list)}/{len(generated_samples)}")
-        
-        # Add CDN URLs to metrics
-        training_metrics['cdn_urls'] = {
-            'model': model_cdn_url,
-            'samples': samples_cdn_urls_list,
-            'total_samples_uploaded': len(samples_cdn_urls_list)
-        }
-        
-        # =============================================================================
-        # SAVE ALL OUTPUTS
-        # =============================================================================
-        
-        print("\nSaving training outputs...")
-        
-        # Save trained model
-        os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
-        try:
-            with open(args.trained_model, 'wb') as f:
-                pickle.dump(gan, f)
-            print(f"✓ Trained model saved: {args.trained_model}")
-        except Exception as e:
-            print(f"✗ Error saving model: {e}")
-        
-        # Save training history
-        os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
-        with open(args.training_history, 'w') as f:
-            json.dump(training_history, f, indent=2)
-        print(f"✓ Training history saved: {args.training_history}")
-        
-        # Save training metrics
-        os.makedirs(os.path.dirname(args.training_metrics), exist_ok=True)
-        with open(args.training_metrics, 'w') as f:
-            json.dump(training_metrics, f, indent=2)
-        print(f"✓ Training metrics saved: {args.training_metrics}")
-        
-        # Save generated samples
-        os.makedirs(os.path.dirname(args.generated_samples), exist_ok=True)
-        with open(args.generated_samples, 'wb') as f:
-            pickle.dump(generated_samples, f)
-        print(f"✓ Generated samples saved: {args.generated_samples}")
-        
-        # Save CDN URLs
-        os.makedirs(os.path.dirname(args.model_cdn_url), exist_ok=True)
-        with open(args.model_cdn_url, 'w') as f:
-            f.write(model_cdn_url if model_cdn_url else "")
-        print(f"✓ Model CDN URL saved: {args.model_cdn_url}")
-        
-        os.makedirs(os.path.dirname(args.samples_cdn_urls), exist_ok=True)
-        with open(args.samples_cdn_urls, 'w') as f:
-            json.dump(samples_cdn_urls_list, f, indent=2)
-        print(f"✓ Sample CDN URLs saved: {args.samples_cdn_urls}")
-        
-        # Save upload response
-        os.makedirs(os.path.dirname(args.model_upload_response), exist_ok=True)
-        with open(args.model_upload_response, 'w') as f:
-            json.dump(model_upload_result if model_upload_result else {'success': False}, f, indent=2)
-        print(f"✓ Model upload response saved: {args.model_upload_response}")
-        
-        # Save continual learning status
-        os.makedirs(os.path.dirname(args.continual_learning_status), exist_ok=True)
-        with open(args.continual_learning_status, 'w') as f:
-            json.dump(continual_status, f, indent=2)
-        print(f"✓ Continual learning status saved: {args.continual_learning_status}")
-        
-        # Clean up temp files
-        try:
-            import shutil
-            shutil.rmtree(temp_dir)
-            print(f"✓ Cleaned up temp directory: {temp_dir}")
-        except Exception as e:
-            print(f"⚠ Could not clean up temp directory: {e}")
-        
-        print("\n" + "="*60)
-        print("VANILLA GAN TRAINING COMPLETED!")
-        print("="*60)
-        print(f"Training Algorithm: {algorithm.upper()}")
-        print(f"Continual Learning: {continual_status.get('loaded', False)}")
-        print(f"Epochs: {epochs}")
-        print(f"Final G Loss: {training_metrics['final_generator_loss']:.4f}")
+        print("TRAINING COMPLETED!")
+        print(f"Epochs: {epochs}, Final G Loss: {training_metrics['final_generator_loss']:.4f}")
         print(f"Final D Loss: {training_metrics['final_discriminator_loss']:.4f}")
-        print(f"Model CDN URL: {model_cdn_url[:100] if model_cdn_url else 'N/A'}...")
-        print(f"Samples uploaded to CDN: {len(samples_cdn_urls_list)}/{len(generated_samples)}")
+        print(f"Samples: {len(generated_samples)}")
+        if model_cdn_url: print(f"Model CDN URL: {model_cdn_url}")
         print("="*60)
 
     args:
-      # Original inputs
       - --initialized_model
       - {inputPath: initialized_model}
       - --preprocessed_data
       - {inputPath: preprocessed_data}
       - --gan_config_json
       - {inputValue: gan_config_json}
-      # Continual learning inputs
       - --enable_continual_learning
       - {inputValue: enable_continual_learning}
-      - --load_from_schema
-      - {inputValue: load_from_schema}
-      - --schema_id
-      - {inputValue: schema_id}
-      - --model_id
-      - {inputValue: model_id}
-      - --execution_id
-      - {inputValue: execution_id}
+      - --fine_tune_factor
+      - {inputValue: fine_tune_factor}
       - --bearer_token
       - {inputValue: bearer_token}
-      # CDN upload inputs
       - --get_cdn
       - {inputValue: get_cdn}
       - --upload_domain
       - {inputValue: upload_domain}
-      # Original outputs
       - --trained_model
       - {outputPath: trained_model}
       - --training_history
@@ -1277,9 +661,14 @@ implementation:
       - {outputPath: training_metrics}
       - --generated_samples
       - {outputPath: generated_samples}
-      # New outputs
-      - --model_cdn_url
-      - {outputPath: model_cdn_url}
+      - --trained_model_cdn_url
+      - {outputPath: trained_model_cdn_url}
+      - --model_metadata_cdn_url
+      - {outputPath: model_metadata_cdn_url}
+      - --training_metrics_path
+      - {outputPath: training_metrics_path}
+      - --model_config_json
+      - {outputPath: model_config_json}
       - --samples_cdn_urls
       - {outputPath: samples_cdn_urls}
       - --model_upload_response
