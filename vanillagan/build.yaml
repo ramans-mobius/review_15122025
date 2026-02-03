@@ -24,7 +24,7 @@ inputs:
     default: ""
     description: Execution ID for loading weights
   - name: bearer_token
-    type: String
+    type: string
     default: ""
     description: Bearer token for API authentication
   - name: load_from_cdn
