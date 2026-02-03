@@ -1,4 +1,4 @@
-name: Train Vanilla GAN 6 with Continual Learning
+name: Train Vanilla GAN 7 with Continual Learning
 description: Trains Vanilla GAN model with balanced training and optional continual learning fine-tuning
 inputs:
   - name: initialized_model
@@ -19,7 +19,7 @@ inputs:
     default: "0.1"
     description: Learning rate multiplier for fine-tuning (0.1 = 10% of original LR)
   - name: bearer_token
-    type: String
+    type: string
     default: ""
     description: Bearer token for CDN upload authentication
   - name: get_cdn
