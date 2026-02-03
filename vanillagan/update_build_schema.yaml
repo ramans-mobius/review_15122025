@@ -1,4 +1,4 @@
-name: I Update Schema Row v2
+name: I Update Schema Row v3
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -14,12 +14,12 @@ inputs:
   - { name: bearer_auth_token, type: string, description: "Bearer token for authentication." }
   - { name: domain, type: String, description: "The domain for the API endpoint." }
   - { name: float_keys_json, type: String, description: "JSON string of a list of keys to be converted to float."}
-  # New inputs for model artifacts from pipeline - using proper inputPath connections
-  - { name: trained_model_cdn_url, type: inputPath, description: "CDN URL for trained model (from Download and Re-upload PT Model).", default: "-1" }
-  - { name: model_metadata_cdn_url, type: inputPath, description: "CDN URL for model metadata (from Download and Re-upload PT Model).", default: "-1" }
-  - { name: training_metrics_path, type: inputPath, description: "Path to training metrics JSON file.", default: "-1" }
-  - { name: model_config_json, type: inputPath, description: "Path to model configuration JSON.", default: "-1" }
-  - { name: evaluation_metrics_path, type: inputPath, description: "Path to evaluation metrics JSON.", default: "-1" }
+  # Updated: Changed from inputPath to String for direct string inputs
+  - { name: trained_model_cdn_url, type: String, description: "CDN URL string for trained model.", default: "-1" }
+  - { name: model_metadata_cdn_url, type: String, description: "CDN URL string for model metadata.", default: "-1" }
+  - { name: training_metrics_path, type: String, description: "Training metrics JSON string.", default: "-1" }
+  - { name: model_config_json, type: String, description: "Model configuration JSON string.", default: "-1" }
+  - { name: evaluation_metrics_path, type: String, description: "Evaluation metrics JSON string.", default: "-1" }
 
 implementation:
   container:
@@ -43,7 +43,6 @@ implementation:
         from urllib3.util.retry import Retry
 
         def encode_dollar_signs(url):
-         
             if not url or url == '-1':
                 return url
             # First decode any existing encoding to avoid double encoding
@@ -56,34 +55,44 @@ implementation:
                 return encoded
             return url
 
-        def read_cdn_url_from_file(filepath):
-        
-            if filepath and os.path.exists(filepath) and filepath != '-1':
+        def get_input_content(input_value):
+            
+            if not input_value or input_value == '-1':
+                return None
+            
+            # Check if it's a valid file path that exists
+            if os.path.exists(input_value):
                 try:
-                    with open(filepath, 'r') as f:
-                        content = f.read().strip()
-                    print(f"Read CDN URL from {filepath}: {content}...")
-                    return content
+                    with open(input_value, 'r') as f:
+                        return f.read().strip()
                 except Exception as e:
-                    print(f"Error reading CDN URL file {filepath}: {e}")
-                    return None
-            return None
+                    print(f"Error reading file {input_value}: {e}")
+                    # Fallback to treating as string
+                    return input_value
+            else:
+                # It's already a string
+                return input_value
 
-        def read_json_file(filepath):
-         
-            if filepath and os.path.exists(filepath) and filepath != '-1':
-                try:
-                    with open(filepath, 'r') as f:
-                        content = json.load(f)
-                    print(f"Read JSON from {filepath}")
-                    return content
-                except Exception as e:
-                    print(f"Error reading JSON file {filepath}: {e}")
-                    return None
-            return None
+        def parse_json_input(input_value):
+          
+            if not input_value or input_value == '-1':
+                return None
+            
+            content = get_input_content(input_value)
+            if not content:
+                return None
+            
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError as e:
+                print(f"Error parsing JSON from input: {e}")
+                print(f"Input content (first 500 chars): {content[:500]}")
+                return None
+            except Exception as e:
+                print(f"Unexpected error parsing JSON: {e}")
+                return None
 
         def extract_model_metrics(metrics_data):
-          
             metrics = {}
             
             if not metrics_data:
@@ -148,7 +157,7 @@ implementation:
         parser.add_argument('--bearer_auth_token', type=str, required=True)
         parser.add_argument('--domain', type=str, required=True)
         parser.add_argument('--float_keys_json', type=str, required=False)
-        # New arguments for model artifacts
+        # Updated arguments for model artifacts
         parser.add_argument('--trained_model_cdn_url', type=str, required=False)
         parser.add_argument('--model_metadata_cdn_url', type=str, required=False)
         parser.add_argument('--training_metrics_path', type=str, required=False)
@@ -186,31 +195,31 @@ implementation:
         extracted_metrics = {}
         model_config = None
         
-        # 1. Read trained model CDN URL (from Download and Re-upload PT Model component)
+        # 1. Process trained model CDN URL
         if args.trained_model_cdn_url != '-1':
-            cdn_content = read_cdn_url_from_file(args.trained_model_cdn_url)
+            cdn_content = get_input_content(args.trained_model_cdn_url)
             if cdn_content:
                 model_weights_cdn = encode_dollar_signs(cdn_content)
-                print(f"✓ Model weights CDN URL: {model_weights_cdn}...")
+                print(f"✓ Model weights CDN URL: {model_weights_cdn[:100]}..." if len(model_weights_cdn) > 100 else f"✓ Model weights CDN URL: {model_weights_cdn}")
         
-        # 2. Read model metadata CDN URL
+        # 2. Process model metadata CDN URL
         if args.model_metadata_cdn_url != '-1':
-            cdn_content = read_cdn_url_from_file(args.model_metadata_cdn_url)
+            cdn_content = get_input_content(args.model_metadata_cdn_url)
             if cdn_content:
                 model_metadata_cdn = encode_dollar_signs(cdn_content)
-                print(f"✓ Model metadata CDN URL: {model_metadata_cdn}...")
+                print(f"✓ Model metadata CDN URL: {model_metadata_cdn[:100]}..." if len(model_metadata_cdn) > 100 else f"✓ Model metadata CDN URL: {model_metadata_cdn}")
         
-        # 3. Read training metrics
+        # 3. Process training metrics (as JSON)
         if args.training_metrics_path != '-1':
-            training_metrics = read_json_file(args.training_metrics_path)
+            training_metrics = parse_json_input(args.training_metrics_path)
             if training_metrics:
                 metrics = extract_model_metrics(training_metrics)
                 extracted_metrics.update(metrics)
                 print(f"✓ Extracted {len(metrics)} metrics from training data")
         
-        # 4. Read model config
+        # 4. Process model config (as JSON)
         if args.model_config_json != '-1':
-            config_data = read_json_file(args.model_config_json)
+            config_data = parse_json_input(args.model_config_json)
             if config_data:
                 model_config = config_data
                 # Also extract metrics from config
@@ -218,9 +227,9 @@ implementation:
                 extracted_metrics.update(config_metrics)
                 print(f"✓ Read model config with {len(config_data.keys())} keys")
         
-        # 5. Read evaluation metrics
+        # 5. Process evaluation metrics (as JSON)
         if args.evaluation_metrics_path != '-1':
-            eval_metrics = read_json_file(args.evaluation_metrics_path)
+            eval_metrics = parse_json_input(args.evaluation_metrics_path)
             if eval_metrics:
                 eval_extracted = extract_model_metrics(eval_metrics)
                 extracted_metrics.update(eval_extracted)
@@ -509,14 +518,14 @@ implementation:
       - {inputValue: domain}
       - --float_keys_json
       - {inputValue: float_keys_json}
-      # New arguments for pipeline artifacts
+      # Updated arguments for pipeline artifacts
       - --trained_model_cdn_url
-      - {inputPath: trained_model_cdn_url}
+      - {inputValue: trained_model_cdn_url}
       - --model_metadata_cdn_url
-      - {inputPath: model_metadata_cdn_url}
+      - {inputValue: model_metadata_cdn_url}
       - --training_metrics_path
-      - {inputPath: training_metrics_path}
+      - {inputValue: training_metrics_path}
       - --model_config_json
-      - {inputPath: model_config_json}
+      - {inputValue: model_config_json}
       - --evaluation_metrics_path
-      - {inputPath: evaluation_metrics_path}
+      - {inputValue: evaluation_metrics_path}
