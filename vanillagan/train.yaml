@@ -70,54 +70,124 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, os, json, pickle, base64, time, torch, torch.nn as nn
-        import numpy as np, traceback, requests, uuid
-        from torch.utils.data import DataLoader
-        from PIL import Image, io
+        import argparse
+        import os
+        import sys
+        import json
+        import pickle
+        import base64
+        import time
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from torch.utils.data import Dataset, DataLoader
+        import numpy as np
+        from PIL import Image
+        import io
+        import math
+        import traceback
+        import requests
+        import uuid
         
         # =============================================================================
-        # DEFINE MODEL CLASSES
+        # DEFINE VANILLAGANWRAPPER CLASS
         # =============================================================================
         
         class VanillaGANWrapper:
             def __init__(self, generator_state, discriminator_state, config, source='new'):
-                self.generator_state, self.discriminator_state = generator_state, discriminator_state
-                self.config, self.source = config, source
+                self.generator_state = generator_state
+                self.discriminator_state = discriminator_state
+                self.config = config
+                self.source = source
+                
+            @classmethod
+            def from_model(cls, model):
+                if hasattr(model, 'generator') and hasattr(model, 'discriminator'):
+                    return cls(
+                        generator_state=model.generator.state_dict(),
+                        discriminator_state=model.discriminator.state_dict(),
+                        config=getattr(model, 'config', {}),
+                        source='model'
+                    )
+                return None
+        
+        # =============================================================================
+        # DEFINE MODEL CLASSES THAT MATCH BUILD BRICK EXACTLY
+        # =============================================================================
         
         class VanillaGenerator(nn.Module):
             def __init__(self, latent_dim, output_dim, hidden_layers=[256, 512, 1024]):
-                super().__init__()
+                super(VanillaGenerator, self).__init__()
+                self.latent_dim = latent_dim
+                self.output_dim = output_dim
+                
                 layers = []
                 input_dim = latent_dim
+                
+                # Hidden layers
                 for hidden_dim in hidden_layers:
-                    layers.extend([nn.Linear(input_dim, hidden_dim), nn.ReLU()])
+                    layers.append(nn.Linear(input_dim, hidden_dim))
+                    layers.append(nn.ReLU())
                     input_dim = hidden_dim
-                layers.extend([nn.Linear(input_dim, output_dim), nn.Tanh()])
+                
+                # Output layer
+                layers.append(nn.Linear(input_dim, output_dim))
+                layers.append(nn.Tanh())
+                
                 self.model = nn.Sequential(*layers)
-            def forward(self, z): return self.model(z)
+            
+            def forward(self, z):
+                return self.model(z)
         
         class VanillaDiscriminator(nn.Module):
             def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
-                super().__init__()
+                super(VanillaDiscriminator, self).__init__()
+                self.input_dim = input_dim
+                
                 layers = []
                 current_dim = input_dim
+                
                 for hidden_dim in hidden_layers:
-                    layers.extend([nn.Linear(current_dim, hidden_dim), nn.LeakyReLU(0.2), nn.Dropout(0.3)])
+                    layers.append(nn.Linear(current_dim, hidden_dim))
+                    layers.append(nn.LeakyReLU(0.2))
+                    layers.append(nn.Dropout(0.3))
                     current_dim = hidden_dim
-                layers.extend([nn.Linear(current_dim, 1), nn.Sigmoid()])
+                
+                layers.append(nn.Linear(current_dim, 1))
+                layers.append(nn.Sigmoid())
+                
                 self.model = nn.Sequential(*layers)
-            def forward(self, x): return self.model(x)
+            
+            def forward(self, x):
+                return self.model(x)
+        
+        # =============================================================================
+        # FORWARD-FORWARD DISCRIMINATOR CLASSES
+        # =============================================================================
         
         class ForwardForwardDiscriminatorBlock(nn.Module):
             def __init__(self, input_dim, output_dim, config):
-                super().__init__()
+                super(ForwardForwardDiscriminatorBlock, self).__init__()
                 self.config = config
                 self.linear = nn.Linear(input_dim, output_dim)
                 self.activation = nn.LeakyReLU(0.2)
                 self.dropout = nn.Dropout(config.get('discriminator_dropout', 0.3))
-                self.local_predictor = nn.Sequential(nn.Linear(output_dim, 128), nn.ReLU(), nn.Linear(128, 1), nn.Sigmoid())
-            def forward(self, x): return self.dropout(self.activation(self.linear(x)))
-            def compute_goodness(self, x): return torch.sum(x**2, dim=-1)
+                self.local_predictor = nn.Sequential(
+                    nn.Linear(output_dim, 128),
+                    nn.ReLU(),
+                    nn.Linear(128, 1),
+                    nn.Sigmoid()
+                )
+            
+            def forward(self, x):
+                x = self.linear(x)
+                x = self.activation(x)
+                x = self.dropout(x)
+                return x
+            
+            def compute_goodness(self, x):
+                return torch.sum(x**2, dim=-1)
+            
             def forward_forward_loss(self, pos_goodness, neg_goodness):
                 theta = self.config.get('ff_theta', 2.0)
                 pos_margin = self.config.get('ff_positive_margin', 2.0)
@@ -128,125 +198,331 @@ implementation:
         
         class ForwardForwardDiscriminator(nn.Module):
             def __init__(self, input_dim, hidden_layers, config):
-                super().__init__()
-                self.config, self.ff_trained = config, False
+                super(ForwardForwardDiscriminator, self).__init__()
+                self.config = config
+                self.ff_trained = False
                 self.blocks = nn.ModuleList()
                 current_dim = input_dim
+                
                 for hidden_dim in hidden_layers:
-                    self.blocks.append(ForwardForwardDiscriminatorBlock(current_dim, hidden_dim, config))
+                    block = ForwardForwardDiscriminatorBlock(current_dim, hidden_dim, config)
+                    self.blocks.append(block)
                     current_dim = hidden_dim
-                self.final_layer = nn.Sequential(nn.Linear(current_dim, 1), nn.Sigmoid())
+                
+                self.final_layer = nn.Sequential(
+                    nn.Linear(current_dim, 1),
+                    nn.Sigmoid()
+                )
+            
             def forward(self, x, return_layers=False):
                 x = x.view(x.size(0), -1)
-                layer_outputs = [] if return_layers else None
+                if return_layers:
+                    layer_outputs = []
+                
                 h = x
                 for block in self.blocks:
                     h = block(h)
-                    if return_layers: layer_outputs.append(h)
+                    if return_layers:
+                        layer_outputs.append(h)
+                
                 output = self.final_layer(h).view(-1)
-                return (output, layer_outputs) if return_layers else output
+                if return_layers:
+                    return output, layer_outputs
+                return output
+            
             def forward_single_block(self, x, block_idx):
                 x = x.view(x.size(0), -1)
                 h = x
-                for i in range(block_idx + 1): h = self.blocks[i](h)
+                for i in range(block_idx + 1):
+                    h = self.blocks[i](h)
                 return h
+        
+        # =============================================================================
+        # CAFO DISCRIMINATOR CLASSES
+        # =============================================================================
         
         class CAFODiscriminatorBlock(nn.Module):
             def __init__(self, input_dim, output_dim, config):
-                super().__init__()
+                super(CAFODiscriminatorBlock, self).__init__()
                 self.config = config
                 self.linear = nn.Linear(input_dim, output_dim)
                 self.activation = nn.LeakyReLU(0.2)
                 self.dropout = nn.Dropout(config.get('discriminator_dropout', 0.3))
-                self.local_predictor = nn.Sequential(nn.Linear(output_dim, 64), nn.ReLU(), nn.Linear(64, 1), nn.Sigmoid())
-            def forward(self, x): return self.dropout(self.activation(self.linear(x)))
+                self.local_predictor = nn.Sequential(
+                    nn.Linear(output_dim, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, 1),
+                    nn.Sigmoid()
+                )
+            
+            def forward(self, x):
+                x = self.linear(x)
+                x = self.activation(x)
+                x = self.dropout(x)
+                return x
         
         class CAFODiscriminator(nn.Module):
             def __init__(self, input_dim, hidden_layers, config):
-                super().__init__()
-                self.config, self.cafo_trained = config, False
+                super(CAFODiscriminator, self).__init__()
+                self.config = config
+                self.cafo_trained = False
                 self.blocks = nn.ModuleList()
                 current_dim = input_dim
+                
                 for hidden_dim in hidden_layers:
-                    self.blocks.append(CAFODiscriminatorBlock(current_dim, hidden_dim, config))
+                    block = CAFODiscriminatorBlock(current_dim, hidden_dim, config)
+                    self.blocks.append(block)
                     current_dim = hidden_dim
-                self.final_layer = nn.Sequential(nn.Linear(current_dim, 1), nn.Sigmoid())
+                
+                self.final_layer = nn.Sequential(
+                    nn.Linear(current_dim, 1),
+                    nn.Sigmoid()
+                )
+            
             def forward(self, x):
                 x = x.view(x.size(0), -1)
                 h = x
-                for block in self.blocks: h = block(h)
+                for block in self.blocks:
+                    h = block(h)
                 return self.final_layer(h).view(-1)
         
         # =============================================================================
-        # HELPER FUNCTIONS
+        # CDN UPLOAD FUNCTION
         # =============================================================================
         
         def upload_to_cdn(file_path, file_type, bearer_token, get_cdn, upload_domain, model_type="vanilla_gan"):
-            if not bearer_token: return None
+          
             try:
-                with open(file_path, 'rb') as f: file_content = f.read()
-                unique_id, timestamp = str(uuid.uuid4())[:8], int(time.time())
+                if not bearer_token or bearer_token == "":
+                    print(f"No bearer token provided for {file_type} upload")
+                    return None
+                
+                with open(file_path, 'rb') as f:
+                    file_content = f.read()
+                
+                unique_id = str(uuid.uuid4())[:8]
+                timestamp = int(time.time())
                 filename = f"{model_type}_{file_type}_{timestamp}_{unique_id}"
-                filename += ".pt" if file_type == "model" else ".json" if file_type == "metadata" else ".png"
+                
+                if file_type == "model":
+                    filename += ".pt"
+                elif file_type == "metadata":
+                    filename += ".json"
+                elif file_type == "image":
+                    filename += ".png"
+                
                 upload_url = f"{upload_domain}/api/v2/upload"
-                headers = {"Authorization": f"Bearer {bearer_token}", "Content-Type": "application/octet-stream"}
+                headers = {
+                    "Authorization": f"Bearer {bearer_token}",
+                    "Content-Type": "application/octet-stream"
+                }
+                
+                print(f"Uploading {file_type} to CDN: {filename}")
                 response = requests.post(upload_url, data=file_content, headers=headers, timeout=30)
+                
                 if response.status_code == 200:
                     result = response.json()
                     if result.get('status') == 'success':
                         cdn_url = f"{get_cdn}/{result.get('filename')}"
-                        return {'url': cdn_url, 'filename': filename, 'upload_response': result}
-                return None
+                        print(f"Successfully uploaded {file_type} to CDN: {cdn_url}")
+                        return {
+                            'url': cdn_url,
+                            'filename': filename,
+                            'upload_response': result
+                        }
+                    else:
+                        print(f"Upload API returned error: {result.get('message', 'Unknown error')}")
+                        return None
+                else:
+                    print(f"Failed to upload {file_type}. Status code: {response.status_code}")
+                    return None
+                    
             except Exception as e:
-                print(f"CDN upload error: {str(e)}")
+                print(f"Error uploading {file_type} to CDN: {str(e)}")
                 return None
+        
+        # =============================================================================
+        # BALANCED VANILLA GAN CLASS
+        # =============================================================================
         
         class BalancedVanillaGAN:
             def __init__(self, generator, discriminator, config):
-                self.generator, self.discriminator = generator, discriminator
+                self.generator = generator
+                self.discriminator = discriminator
                 self.config = config
                 self.device = torch.device(config.get('device', 'cpu'))
+                
                 g_lr = config.get('generator_lr', 0.0002)
                 d_lr = config.get('discriminator_lr', 0.0001)
+                
                 self.g_optimizer = torch.optim.Adam(generator.parameters(), lr=g_lr, betas=(0.5, 0.999))
                 self.d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=d_lr, betas=(0.5, 0.999))
-                self.criterion, self.mse_loss = nn.BCELoss(), nn.MSELoss()
+                self.criterion = nn.BCELoss()
+                self.mse_loss = nn.MSELoss()
+                
+                print(f"Optimizers created: G_LR={g_lr}, D_LR={d_lr}")
             
             def compute_gradient_penalty(self, real_samples, fake_samples, lambda_gp=10):
                 batch_size = real_samples.size(0)
-                alpha = torch.rand(batch_size, 1, device=self.device).expand_as(real_samples)
+                alpha = torch.rand(batch_size, 1, device=self.device)
+                alpha = alpha.expand_as(real_samples)
                 interpolates = alpha * real_samples + (1 - alpha) * fake_samples
                 interpolates.requires_grad_(True)
                 d_interpolates = self.discriminator(interpolates)
                 gradients = torch.autograd.grad(
-                    outputs=d_interpolates, inputs=interpolates,
+                    outputs=d_interpolates,
+                    inputs=interpolates,
                     grad_outputs=torch.ones_like(d_interpolates),
-                    create_graph=True, retain_graph=True
+                    create_graph=True,
+                    retain_graph=True
                 )[0]
-                return lambda_gp * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+                gradient_penalty = lambda_gp * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+                return gradient_penalty
             
             def feature_matching_loss(self, real_data, fake_data):
-                real_features, fake_features = [], []
-                x_real, x_fake = real_data, fake_data
-                if hasattr(self.discriminator, 'model'): layers = self.discriminator.model
-                elif hasattr(self.discriminator, 'layers'): layers = self.discriminator.layers
-                elif hasattr(self.discriminator, 'blocks'): layers = self.discriminator.blocks
-                else: layers = list(self.discriminator.children())
-                for layer in layers[:-1]:
-                    x_real, x_fake = layer(x_real), layer(x_fake)
+                real_features = []
+                fake_features = []
+                x_real = real_data
+                x_fake = fake_data
+                
+                if hasattr(self.discriminator, 'model'):
+                    layers = self.discriminator.model
+                elif hasattr(self.discriminator, 'layers'):
+                    layers = self.discriminator.layers
+                elif hasattr(self.discriminator, 'blocks'):
+                    layers = self.discriminator.blocks
+                else:
+                    layers = list(self.discriminator.children())
+                
+                for i, layer in enumerate(layers[:-1]):
+                    x_real = layer(x_real)
+                    x_fake = layer(x_fake)
                     if hasattr(layer, 'out_features') or hasattr(layer, 'out_channels'):
                         real_features.append(x_real.detach())
                         fake_features.append(x_fake)
-                if not real_features: return torch.tensor(0.0, device=self.device)
-                fm_loss = sum(self.mse_loss(fake_feat.mean(0), real_feat.mean(0)) 
-                            for real_feat, fake_feat in zip(real_features, fake_features))
-                return fm_loss / len(real_features)
+                
+                fm_loss = 0
+                if real_features and fake_features:
+                    for real_feat, fake_feat in zip(real_features, fake_features):
+                        fm_loss += self.mse_loss(fake_feat.mean(0), real_feat.mean(0))
+                    return fm_loss / len(real_features)
+                else:
+                    return torch.tensor(0.0, device=self.device)
+        
+        # =============================================================================
+        # ALGORITHM-SPECIFIC TRAINING FUNCTIONS
+        # =============================================================================
+        
+        def train_forward_forward_blocks(gan, dataloader, config, device, latent_dim):
+            print("Training Forward-Forward blocks...")
+            ff_blocks = min(config.get('ff_blocks', 3), len(gan.discriminator.blocks))
+            ff_epochs_per_block = config.get('ff_epochs_per_block', 10)
+            
+            for block_idx in range(ff_blocks):
+                print(f"Training FF Block {block_idx + 1}/{ff_blocks}")
+                block_params = list(gan.discriminator.blocks[block_idx].parameters())
+                optimizer = torch.optim.Adam(block_params, lr=config.get('block_lr', 0.001))
+                
+                for epoch in range(ff_epochs_per_block):
+                    epoch_loss = 0.0
+                    batch_count = 0
+                    
+                    for batch_idx, real_data in enumerate(dataloader):
+                        if batch_idx >= 10:
+                            break
+                        
+                        current_batch_size = real_data.size(0)
+                        real_data = real_data.to(device)
+                        optimizer.zero_grad()
+                        
+                        pos_output = gan.discriminator.forward_single_block(real_data, block_idx)
+                        pos_goodness = gan.discriminator.blocks[block_idx].compute_goodness(pos_output)
+                        
+                        z = torch.randn(current_batch_size, latent_dim, device=device)
+                        fake_data = gan.generator(z).detach()
+                        neg_output = gan.discriminator.forward_single_block(fake_data, block_idx)
+                        neg_goodness = gan.discriminator.blocks[block_idx].compute_goodness(neg_output)
+                        
+                        loss = gan.discriminator.blocks[block_idx].forward_forward_loss(pos_goodness, neg_goodness)
+                        loss.backward()
+                        optimizer.step()
+                        
+                        epoch_loss += loss.item()
+                        batch_count += 1
+                    
+                    if epoch % max(1, ff_epochs_per_block // 3) == 0:
+                        avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
+                        print(f"  FF Block {block_idx + 1} Epoch {epoch + 1}: Loss = {avg_loss:.6f}")
+            
+            gan.discriminator.ff_trained = True
+            print("Forward-Forward block training completed")
+        
+        def train_cafo_blocks(gan, dataloader, config, device, latent_dim):
+            print("Training CAFO blocks...")
+            cafo_blocks = min(config.get('cafo_blocks', 3), len(gan.discriminator.blocks))
+            epochs_per_block = config.get('epochs_per_block', 10)
+            
+            for block_idx in range(cafo_blocks):
+                print(f"Training CAFO Block {block_idx + 1}/{cafo_blocks}")
+                
+                for i, block in enumerate(gan.discriminator.blocks):
+                    for param in block.parameters():
+                        param.requires_grad = (i == block_idx)
+                
+                current_block_params = list(gan.discriminator.blocks[block_idx].parameters())
+                optimizer = torch.optim.Adam(current_block_params, lr=config.get('block_lr', 0.001))
+                
+                for epoch in range(epochs_per_block):
+                    epoch_loss = 0.0
+                    batch_count = 0
+                    
+                    for real_data in dataloader:
+                        current_batch_size = real_data.size(0)
+                        real_data = real_data.to(device)
+                        optimizer.zero_grad()
+                        
+                        def forward_through_blocks(x, up_to_block):
+                            x = x.view(x.size(0), -1)
+                            h = x
+                            for i in range(up_to_block + 1):
+                                h = gan.discriminator.blocks[i](h)
+                            return h
+                        
+                        real_features = forward_through_blocks(real_data, block_idx)
+                        real_pred = gan.discriminator.blocks[block_idx].local_predictor(real_features).view(-1)
+                        real_labels = torch.ones(current_batch_size, device=device)
+                        real_loss = gan.criterion(real_pred, real_labels)
+                        
+                        z = torch.randn(current_batch_size, latent_dim, device=device)
+                        fake_data = gan.generator(z).detach()
+                        fake_features = forward_through_blocks(fake_data, block_idx)
+                        fake_pred = gan.discriminator.blocks[block_idx].local_predictor(fake_features).view(-1)
+                        fake_labels = torch.zeros(current_batch_size, device=device)
+                        fake_loss = gan.criterion(fake_pred, fake_labels)
+                        
+                        block_loss = (real_loss + fake_loss) / 2
+                        block_loss.backward()
+                        optimizer.step()
+                        
+                        epoch_loss += block_loss.item()
+                        batch_count += 1
+                    
+                    if epoch % max(1, epochs_per_block // 3) == 0:
+                        avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
+                        print(f"  CAFO Block {block_idx + 1} Epoch {epoch + 1}: Loss = {avg_loss:.6f}")
+                
+                for block in gan.discriminator.blocks:
+                    for param in block.parameters():
+                        param.requires_grad = True
+            
+            gan.discriminator.cafo_trained = True
+            print("CAFO block training completed")
         
         # =============================================================================
         # MAIN EXECUTION
         # =============================================================================
         
-        parser = argparse.ArgumentParser()
+        parser = argparse.ArgumentParser(description='Vanilla GAN Training with Continual Learning')
         parser.add_argument('--initialized_model', type=str, required=True)
         parser.add_argument('--preprocessed_data', type=str, required=True)
         parser.add_argument('--gan_config_json', type=str, required=True)
@@ -268,15 +544,13 @@ implementation:
         parser.add_argument('--continual_learning_status', type=str, required=True)
         args = parser.parse_args()
         
-        print("VANILLA GAN TRAINING WITH CONTINUAL LEARNING")
+        print("VANILLA GAN BALANCED TRAINING WITH CONTINUAL LEARNING STARTING")
         print("="*60)
         
-        # Load configuration
         gan_config = json.loads(args.gan_config_json)
         model_config = gan_config.get('model', {})
         training_config = gan_config.get('training', {})
         
-        # Training parameters
         generator_lr = model_config.get('generator_lr', model_config.get('learning_rate', 0.0002))
         discriminator_lr = model_config.get('discriminator_lr', model_config.get('learning_rate', 0.00002))
         d_train_steps = training_config.get('d_train_steps', 1)
@@ -287,26 +561,44 @@ implementation:
         feature_matching = training_config.get('feature_matching', True)
         gradient_penalty = training_config.get('gradient_penalty', 0.1)
         
+        print(f"AGGRESSIVE TRAINING CONFIG:")
+        print(f"  Generator LR: {generator_lr}")
+        print(f"  Discriminator LR: {discriminator_lr}")
+        print(f"  D Train Steps: {d_train_steps}")
+        print(f"  G Train Steps: {g_train_steps}")
+        print(f"  Label Smoothing: {label_smoothing}")
+        print(f"  Noise Std: {noise_std}")
+        print(f"  D Dropout: {d_dropout}")
+        print(f"  Feature Matching: {feature_matching}")
+        print(f"  Gradient Penalty: {gradient_penalty}")
+        
         algorithm = model_config.get('training_algorithm', 'backprop')
         use_forward_forward = model_config.get('use_forward_forward', False)
         use_cafo = model_config.get('use_cafo', False)
-        if use_forward_forward: algorithm = 'forward_forward'
-        elif use_cafo: algorithm = 'cafo'
         
-        print(f"Training {algorithm.upper()} with G_LR={generator_lr}, D_LR={discriminator_lr}")
-        print(f"Continual Learning: {args.enable_continual_learning}")
+        if use_forward_forward:
+            algorithm = 'forward_forward'
+        elif use_cafo:
+            algorithm = 'cafo'
         
-        # Continual learning setup
+        print(f"Training {algorithm.upper()} algorithm")
+        print(f"Forward-Forward: {use_forward_forward}, CAFO: {use_cafo}")
+        
         continual_status = {
             'enabled': args.enable_continual_learning == 'true',
             'fine_tune_factor': float(args.fine_tune_factor),
-            'original_lr': {'generator': generator_lr, 'discriminator': discriminator_lr},
-            'adjusted_lr': {'generator': generator_lr, 'discriminator': discriminator_lr},
+            'original_lr': {
+                'generator': generator_lr,
+                'discriminator': discriminator_lr
+            },
+            'adjusted_lr': {
+                'generator': generator_lr,
+                'discriminator': discriminator_lr
+            },
             'model_loaded_from': 'new',
             'fine_tuning_applied': False
         }
         
-        # Load data
         with open(args.preprocessed_data, 'rb') as f:
             data_wrapper = pickle.load(f)
         
@@ -315,8 +607,14 @@ implementation:
             input_dim = data_wrapper.get('input_dim', 784)
             image_size = data_wrapper.get('image_size', 28)
             channels = data_wrapper.get('channels', 1)
+            print(f"Dataset: {len(dataset)} samples")
+            print(f"Input dimension: {input_dim} ({image_size}x{image_size}x{channels})")
         else:
-            dataset, input_dim, image_size, channels = data_wrapper, 784, 28, 1
+            dataset = data_wrapper
+            input_dim = 784
+            image_size = 28
+            channels = 1
+            print(f"Direct dataset: {len(dataset)} samples")
         
         batch_size = training_config.get('batch_size', 64)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -324,8 +622,11 @@ implementation:
         # Load model
         gan = None
         try:
+            print("Attempting to load model...")
             with open(args.initialized_model, 'rb') as f:
                 model_data = pickle.load(f)
+            
+            print(f"Model data type: {type(model_data)}")
             
             if hasattr(model_data, 'source'):
                 continual_status['model_loaded_from'] = model_data.source
@@ -333,11 +634,14 @@ implementation:
             if hasattr(model_data, 'generator') and hasattr(model_data, 'discriminator'):
                 if hasattr(model_data, '__class__') and 'Balanced' in str(model_data.__class__):
                     gan = model_data
+                    print("Loaded BalancedVanillaGAN directly")
                 else:
                     config = {'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr, 'device': 'cpu'}
                     gan = BalancedVanillaGAN(model_data.generator, model_data.discriminator, config)
+                    print("Converted to BalancedVanillaGAN")
 
             elif isinstance(model_data, VanillaGANWrapper) or (hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state')):
+                print("Reconstructing from VanillaGANWrapper...")
                 config = model_data.config
                 config.update({'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr})
                 input_dim = config.get('input_dim', 784)
@@ -349,28 +653,35 @@ implementation:
                 generator = VanillaGenerator(latent_dim, input_dim, generator_layers)
                 if algorithm == 'forward_forward':
                     discriminator = ForwardForwardDiscriminator(input_dim, discriminator_layers, config)
+                    print(f"Created Forward-Forward discriminator")
                 elif algorithm == 'cafo':
                     discriminator = CAFODiscriminator(input_dim, discriminator_layers, config)
+                    print(f"Created CAFO discriminator")
                 else:
                     discriminator = VanillaDiscriminator(input_dim, discriminator_layers)
+                    print("Created standard Vanilla discriminator")
                 
                 generator.load_state_dict(model_data.generator_state)
                 discriminator.load_state_dict(model_data.discriminator_state)
                 gan = BalancedVanillaGAN(generator, discriminator, config)
+                print("Successfully reconstructed model")
 
             elif hasattr(model_data, 'generator_arch') and hasattr(model_data, 'discriminator_arch'):
+                print("Loading from architecture wrapper...")
                 config = {'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr, 'device': 'cpu'}
                 gan = BalancedVanillaGAN(model_data.generator_arch, model_data.discriminator_arch, config)
+                print("Successfully loaded from architecture wrapper")
             
-            else: raise ValueError("Creating fallback model")
+            else:
+                raise ValueError("Creating fallback model")
                 
         except Exception as e:
-            print(f"Creating fallback model: {e}")
-            generator = VanillaGenerator(
-                latent_dim=model_config.get('latent_dim', 100),
-                output_dim=input_dim,
-                hidden_layers=model_config.get('generator_layers', [256, 512, 1024])
-            )
+            print(f"Error loading model, creating fallback: {e}")
+            traceback.print_exc()
+            
+            latent_dim = model_config.get('latent_dim', 100)
+            generator = VanillaGenerator(latent_dim, input_dim, model_config.get('generator_layers', [256, 512, 1024]))
+            
             if algorithm == 'forward_forward':
                 discriminator = ForwardForwardDiscriminator(input_dim, model_config.get('discriminator_layers', [1024, 512, 256]), 
                                                           {'discriminator_dropout': d_dropout})
@@ -382,46 +693,78 @@ implementation:
             
             balanced_config = {'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr, 'device': 'cpu'}
             gan = BalancedVanillaGAN(generator, discriminator, balanced_config)
+            print("Created balanced fallback model")
         
-        # Apply continual learning fine-tuning
-        if args.enable_continual_learning == 'true' and continual_status['model_loaded_from'] in ['schema', 'cdn', 'model']:
-            try:
-                fine_tune_factor = float(args.fine_tune_factor)
-                for param_group in gan.g_optimizer.param_groups: param_group['lr'] = generator_lr * fine_tune_factor
-                for param_group in gan.d_optimizer.param_groups: param_group['lr'] = discriminator_lr * fine_tune_factor
-                continual_status['adjusted_lr'] = {'generator': generator_lr * fine_tune_factor, 'discriminator': discriminator_lr * fine_tune_factor}
-                continual_status['fine_tuning_applied'] = True
-                print(f"Fine-tuning applied: factor={fine_tune_factor}")
-            except Exception as e:
+        if gan is None:
+            raise ValueError("Failed to load or create model")
+        
+        # Apply continual learning
+        if args.enable_continual_learning == 'true':
+            if continual_status['model_loaded_from'] in ['schema', 'cdn', 'model']:
+                try:
+                    fine_tune_factor = float(args.fine_tune_factor)
+                    for param_group in gan.g_optimizer.param_groups:
+                        param_group['lr'] = generator_lr * fine_tune_factor
+                    for param_group in gan.d_optimizer.param_groups:
+                        param_group['lr'] = discriminator_lr * fine_tune_factor
+                    continual_status['adjusted_lr'] = {
+                        'generator': generator_lr * fine_tune_factor,
+                        'discriminator': discriminator_lr * fine_tune_factor
+                    }
+                    continual_status['fine_tuning_applied'] = True
+                    print(f"Continual Learning Fine-tuning Applied:")
+                    print(f"  Model loaded from: {continual_status['model_loaded_from']}")
+                    print(f"  Fine-tune factor: {fine_tune_factor}")
+                except Exception as e:
+                    print(f"Error applying fine-tuning: {e}")
+                    continual_status['fine_tuning_applied'] = False
+                    continual_status['error'] = str(e)
+            else:
+                print(f"Continual Learning enabled but model was not loaded from previous weights")
                 continual_status['fine_tuning_applied'] = False
-                continual_status['error'] = str(e)
+        else:
+            print(f"Continual Learning disabled")
+            continual_status['fine_tuning_applied'] = False
         
-        # Setup device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {device}")
         gan.generator.to(device)
         gan.discriminator.to(device)
         
-        # Training parameters
         epochs = training_config.get('epochs', 20)
         latent_dim = model_config.get('latent_dim', 100)
         
-        print(f"Training: Epochs={epochs}, Batch={batch_size}, Latent={latent_dim}")
+        print(f"\\nStarting BALANCED Vanilla GAN training...")
+        print(f"Epochs: {epochs}, Batch size: {batch_size}")
+        print(f"Latent dim: {latent_dim}, Input dim: {input_dim}")
         
-        # Training history
         training_history = {
             'epochs_completed': 0,
-            'losses_g': [], 'losses_d': [],
-            'real_scores': [], 'fake_scores': [],
+            'losses_g': [],
+            'losses_d': [],
+            'real_scores': [],
+            'fake_scores': [],
             'algorithm': algorithm,
             'training_type': 'balanced',
             'continual_learning': continual_status,
             'timestamps': []
         }
         
-        # =============================================================================
-        # TRAINING LOOP
-        # =============================================================================
+        # Algorithm-specific pre-training
+        if algorithm == 'forward_forward':
+            if hasattr(gan.discriminator, 'blocks') and hasattr(gan.discriminator, 'forward_single_block'):
+                train_forward_forward_blocks(gan, dataloader, gan.config, device, latent_dim)
+            else:
+                print("Using standard discriminator (not ForwardForwardDiscriminator)")
         
+        elif algorithm == 'cafo':
+            if hasattr(gan.discriminator, 'blocks'):
+                train_cafo_blocks(gan, dataloader, gan.config, device, latent_dim)
+            else:
+                print("Using standard discriminator (not CAFODiscriminator)")
+        
+        # Main training loop
+        print(f"\\nStarting main {algorithm.upper()} training loop...")
         for epoch in range(epochs):
             epoch_start = time.time()
             epoch_g_losses, epoch_d_losses = [], []
@@ -431,16 +774,22 @@ implementation:
                 current_batch_size = real_data.size(0)
                 real_data = real_data.to(device)
                 
-                # Labels
-                real_labels = torch.ones(current_batch_size, device=device) - label_smoothing if label_smoothing > 0 else torch.ones(current_batch_size, device=device)
-                fake_labels = torch.zeros(current_batch_size, device=device) + label_smoothing if label_smoothing > 0 else torch.zeros(current_batch_size, device=device)
+                if label_smoothing > 0:
+                    real_labels = torch.ones(current_batch_size, device=device) - label_smoothing
+                    fake_labels = torch.zeros(current_batch_size, device=device) + label_smoothing
+                else:
+                    real_labels = torch.ones(current_batch_size, device=device)
+                    fake_labels = torch.zeros(current_batch_size, device=device)
                 
-                # Add noise
-                real_data_noisy = real_data + torch.randn_like(real_data) * noise_std if noise_std > 0 else real_data
+                if noise_std > 0:
+                    noise_real = torch.randn_like(real_data) * noise_std
+                    real_data_noisy = real_data + noise_real
+                else:
+                    real_data_noisy = real_data
                 
                 # Train Discriminator
                 d_steps_to_run = d_train_steps
-                if epoch_real_scores:
+                if len(epoch_real_scores) > 0:
                     recent_real_score = np.mean(epoch_real_scores[-10:])
                     recent_fake_score = np.mean(epoch_fake_scores[-10:])
                     if recent_real_score > 0.85 and recent_fake_score < 0.15:
@@ -454,20 +803,26 @@ implementation:
                     
                     noise = torch.randn(current_batch_size, latent_dim, device=device)
                     fake_data = gan.generator(noise).detach()
-                    fake_data_noisy = fake_data + torch.randn_like(fake_data) * noise_std if noise_std > 0 else fake_data
+                    if noise_std > 0:
+                        noise_fake = torch.randn_like(fake_data) * noise_std
+                        fake_data_noisy = fake_data + noise_fake
+                    else:
+                        fake_data_noisy = fake_data
+                    
                     fake_output = gan.discriminator(fake_data_noisy).view(-1)
                     d_loss_fake = gan.criterion(fake_output, fake_labels)
                     
                     d_loss = (d_loss_real + d_loss_fake) / 2
                     if gradient_penalty > 0 and fake_data_noisy is not None:
-                        d_loss += gan.compute_gradient_penalty(real_data_noisy, fake_data_noisy, gradient_penalty)
+                        gp = gan.compute_gradient_penalty(real_data_noisy, fake_data_noisy, gradient_penalty)
+                        d_loss += gp
                     
                     d_loss.backward()
                     gan.d_optimizer.step()
                 
                 # Train Generator
                 g_steps_to_run = g_train_steps
-                if epoch_real_scores:
+                if len(epoch_real_scores) > 0:
                     recent_real_score = np.mean(epoch_real_scores[-10:])
                     recent_fake_score = np.mean(epoch_fake_scores[-10:])
                     if recent_real_score > 0.85 and recent_fake_score < 0.15:
@@ -480,13 +835,18 @@ implementation:
                     fake_data_for_generator = gan.generator(noise)
                     fake_output = gan.discriminator(fake_data_for_generator).view(-1)
                     
-                    target_labels = torch.ones(current_batch_size, device=device) - label_smoothing/2 if label_smoothing > 0 else torch.ones(current_batch_size, device=device)
-                    g_loss = gan.criterion(fake_output, target_labels)
+                    if label_smoothing > 0:
+                        target_labels = torch.ones(current_batch_size, device=device) - label_smoothing/2
+                    else:
+                        target_labels = torch.ones(current_batch_size, device=device)
                     
+                    g_loss = gan.criterion(fake_output, target_labels)
                     if feature_matching:
                         try:
-                            g_loss += 10.0 * gan.feature_matching_loss(real_data, fake_data_for_generator)
-                        except Exception: pass
+                            fm_loss = gan.feature_matching_loss(real_data, fake_data_for_generator)
+                            g_loss += 10.0 * fm_loss
+                        except Exception:
+                            pass
                     
                     g_loss.backward()
                     gan.g_optimizer.step()
@@ -503,9 +863,8 @@ implementation:
                     
                     if batch_idx % 50 == 0:
                         print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx}/{len(dataloader)}] "
-                              f"G: {g_loss.item():.4f} D: {d_loss.item():.4f}")
+                              f"G Loss: {g_loss.item():.4f} D Loss: {d_loss.item():.4f}")
             
-            # Epoch statistics
             avg_g_loss = np.mean(epoch_g_losses) if epoch_g_losses else 1.0
             avg_d_loss = np.mean(epoch_d_losses) if epoch_d_losses else 1.0
             avg_real_score = np.mean(epoch_real_scores) if epoch_real_scores else 0.5
@@ -517,14 +876,20 @@ implementation:
             training_history['fake_scores'].append(float(avg_fake_score))
             training_history['timestamps'].append(time.time())
             
-            print(f"Epoch {epoch+1}/{epochs}: G: {avg_g_loss:.4f}, D: {avg_d_loss:.4f}, "
-                  f"Real: {avg_real_score:.3f}, Fake: {avg_fake_score:.3f}")
+            print(f"\\nEpoch {epoch+1}/{epochs} completed:")
+            print(f"  Average G Loss: {avg_g_loss:.4f}")
+            print(f"  Average D Loss: {avg_d_loss:.4f}")
+            print(f"  Average Real Score: {avg_real_score:.3f}")
+            print(f"  Average Fake Score: {avg_fake_score:.3f}")
+            print(f"  Time: {time.time() - epoch_start:.2f}s")
         
         training_history['epochs_completed'] = epochs
         
         # Generate samples
+        print("\\nGenerating evaluation samples...")
         generated_samples = []
         num_samples = min(16, training_config.get('num_samples', 16))
+        
         gan.generator.eval()
         with torch.no_grad():
             for i in range(num_samples):
@@ -534,9 +899,11 @@ implementation:
                 
                 if channels == 1:
                     img_np = (fake_img.squeeze(0).squeeze(0).numpy() + 1) / 2 * 255
+                    img_np = np.clip(img_np, 0, 255)
                     img_pil = Image.fromarray(img_np.astype(np.uint8), mode='L')
                 else:
                     img_np = (fake_img.squeeze(0).permute(1, 2, 0).numpy() + 1) / 2 * 255
+                    img_np = np.clip(img_np, 0, 255)
                     img_pil = Image.fromarray(img_np.astype(np.uint8), mode='RGB')
                 
                 temp_image_path = f"/tmp/vanilla_gan_sample_{i}.png"
@@ -547,17 +914,27 @@ implementation:
                 base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
                 
                 generated_samples.append({
-                    'sample_id': i, 'image_data': base64_data, 'model_type': 'vanilla_gan',
-                    'algorithm': algorithm, 'training_type': 'balanced', 'epoch': epochs,
-                    'image_size': image_size, 'channels': channels,
+                    'sample_id': i,
+                    'image_data': base64_data,
+                    'model_type': 'vanilla_gan',
+                    'algorithm': algorithm,
+                    'training_type': 'balanced',
+                    'epoch': epochs,
+                    'image_size': image_size,
+                    'channels': channels,
                     'filename': f'vanilla_gan_balanced_sample_{i}.png',
                     'local_path': temp_image_path
                 })
         
-        # Training metrics
+        print(f"Generated {len(generated_samples)} samples")
+        
+        # Calculate metrics
         training_metrics = {
-            'model_type': 'vanilla_gan', 'training_algorithm': algorithm, 'training_type': 'balanced',
-            'architecture': 'fully_connected', 'epochs_completed': epochs,
+            'model_type': 'vanilla_gan',
+            'training_algorithm': algorithm,
+            'training_type': 'balanced',
+            'architecture': 'fully_connected',
+            'epochs_completed': epochs,
             'final_generator_loss': training_history['losses_g'][-1] if training_history['losses_g'] else 1.0,
             'final_discriminator_loss': training_history['losses_d'][-1] if training_history['losses_d'] else 1.0,
             'avg_generator_loss': np.mean(training_history['losses_g']) if training_history['losses_g'] else 1.0,
@@ -565,14 +942,22 @@ implementation:
             'final_real_score': training_history['real_scores'][-1] if training_history['real_scores'] else 0.5,
             'final_fake_score': training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5,
             'training_time': training_history['timestamps'][-1] - training_history['timestamps'][0] if len(training_history['timestamps']) > 1 else 0,
-            'samples_generated': len(generated_samples), 'training_success': True,
-            'input_dim': input_dim, 'latent_dim': latent_dim, 'image_size': image_size,
-            'channels': channels, 'batch_size': batch_size,
+            'samples_generated': len(generated_samples),
+            'training_success': True,
+            'input_dim': input_dim,
+            'latent_dim': latent_dim,
+            'image_size': image_size,
+            'channels': channels,
+            'batch_size': batch_size,
             'balanced_training_config': {
-                'generator_lr': generator_lr, 'discriminator_lr': discriminator_lr,
-                'd_train_steps': d_train_steps, 'g_train_steps': g_train_steps,
-                'label_smoothing': label_smoothing, 'noise_std': noise_std,
-                'd_dropout': d_dropout, 'feature_matching': feature_matching,
+                'generator_lr': generator_lr,
+                'discriminator_lr': discriminator_lr,
+                'd_train_steps': d_train_steps,
+                'g_train_steps': g_train_steps,
+                'label_smoothing': label_smoothing,
+                'noise_std': noise_std,
+                'd_dropout': d_dropout,
+                'feature_matching': feature_matching,
                 'gradient_penalty': gradient_penalty
             },
             'continual_learning_status': continual_status
@@ -582,8 +967,11 @@ implementation:
         model_cdn_url, model_metadata_cdn_url, sample_urls = "", "", []
         model_upload_response_json = json.dumps({"error": "No bearer token provided"})
         
-        if args.bearer_token:
-            print("\nCDN UPLOAD PROCESS")
+        if args.bearer_token and args.bearer_token != "":
+            print("\\n" + "="*40)
+            print("CDN UPLOAD PROCESS")
+            print("="*40)
+            
             model_pt_path = "/tmp/trained_vanilla_gan.pt"
             torch.save({
                 'generator_state_dict': gan.generator.state_dict(),
@@ -592,33 +980,48 @@ implementation:
                 'training_metrics': training_metrics
             }, model_pt_path)
             
-            model_upload_result = upload_to_cdn(model_pt_path, "model", args.bearer_token, args.get_cdn, args.upload_domain, "vanilla_gan")
+            model_upload_result = upload_to_cdn(
+                model_pt_path, "model", args.bearer_token, args.get_cdn, args.upload_domain, "vanilla_gan"
+            )
+            
             if model_upload_result:
                 model_cdn_url = model_upload_result['url']
                 model_metadata_cdn_url = model_cdn_url
                 model_upload_response_json = json.dumps(model_upload_result['upload_response'])
-                print(f"Model uploaded: {model_cdn_url}")
+                print(f"✓ Model uploaded to CDN: {model_cdn_url}")
             
             for sample in generated_samples:
-                sample_upload_result = upload_to_cdn(sample['local_path'], "image", args.bearer_token, args.get_cdn, args.upload_domain, "vanilla_gan")
+                sample_upload_result = upload_to_cdn(
+                    sample['local_path'], "image", args.bearer_token, args.get_cdn, args.upload_domain, "vanilla_gan"
+                )
                 if sample_upload_result:
                     sample['cdn_url'] = sample_upload_result['url']
                     sample_urls.append(sample_upload_result['url'])
+                    print(f"✓ Sample {sample['sample_id']} uploaded")
         
         samples_cdn_urls_json = json.dumps(sample_urls)
         
         # Save outputs
+        print("\\nSaving training outputs...")
+        
         def save_output(path, data, is_json=False):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             mode = 'w' if is_json else 'wb'
             with open(path, mode) as f:
-                if is_json: json.dump(data, f, indent=2)
-                else: pickle.dump(data, f)
+                if is_json:
+                    json.dump(data, f, indent=2)
+                else:
+                    pickle.dump(data, f)
         
         save_output(args.trained_model, gan)
         save_output(args.training_history, training_history, True)
         save_output(args.training_metrics, training_metrics, True)
-        save_output(args.generated_samples, [s for s in generated_samples if 'local_path' not in s])
+        
+        for sample in generated_samples:
+            if 'local_path' in sample:
+                del sample['local_path']
+        
+        save_output(args.generated_samples, generated_samples)
         save_output(args.continual_learning_status, continual_status, True)
         
         with open(args.trained_model_cdn_url, 'w') as f: f.write(model_cdn_url)
@@ -628,12 +1031,19 @@ implementation:
         with open(args.samples_cdn_urls, 'w') as f: f.write(samples_cdn_urls_json)
         with open(args.model_upload_response, 'w') as f: f.write(model_upload_response_json)
         
-        print("\n" + "="*60)
-        print("TRAINING COMPLETED!")
-        print(f"Epochs: {epochs}, Final G Loss: {training_metrics['final_generator_loss']:.4f}")
+        print("\\n" + "="*60)
+        print("VANILLA GAN TRAINING COMPLETED!")
+        print("="*60)
+        print(f"Training Type: BALANCED with {algorithm.upper()}")
+        print(f"Epochs: {epochs}")
+        print(f"Final G Loss: {training_metrics['final_generator_loss']:.4f}")
         print(f"Final D Loss: {training_metrics['final_discriminator_loss']:.4f}")
-        print(f"Samples: {len(generated_samples)}")
-        if model_cdn_url: print(f"Model CDN URL: {model_cdn_url}")
+        print(f"Samples generated: {len(generated_samples)}")
+        print(f"Continual Learning: {continual_status['enabled']}")
+        if continual_status['enabled']:
+            print(f"  Fine-tuning applied: {continual_status['fine_tuning_applied']}")
+        if model_cdn_url:
+            print(f"Model uploaded to CDN: {model_cdn_url}")
         print("="*60)
 
     args:
