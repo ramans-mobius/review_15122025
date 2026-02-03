@@ -1,4 +1,4 @@
-name: I Update Schema Row v4
+name: I Update Schema Row v5
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -7,18 +7,18 @@ inputs:
   - { name: mapping_json, type: String, description: "JSON string mapping column names to keys in update_data_json." }
   - { name: model_id, type: String, description: "The ID of the model to filter by." }
   - { name: execution_id, type: String, description: "The ID of the model to filter by." }
-  - { name: tenant_id, type: string, description: "The ID of the tenant." }
+  - { name: tenant_id, type: String, description: "The ID of the tenant." }
   - { name: project_id, type: String, description: "The ID of the project." }
   - { name: architecture_type, type: String, description: "The architecture type." }
   - { name: multiple_rows_json, type: String, description: "JSON string containing a list of rows to create." }
-  - { name: bearer_auth_token, type: string, description: "Bearer token for authentication." }
+  - { name: bearer_auth_token, type: String, description: "Bearer token for authentication." }
   - { name: domain, type: String, description: "The domain for the API endpoint." }
   - { name: float_keys_json, type: String, description: "JSON string of a list of keys to be converted to float."}
-  - { name: trained_model_cdn_url, type: inputPath, description: "CDN URL string for trained model."}
-  - { name: model_metadata_cdn_url, type: inputPath, description: "CDN URL string for model metadata."}
-  - { name: training_metrics_path, type: inputPath, description: "Training metrics JSON string." }
-  - { name: model_config_json, type: inputPath, description: "Model configuration JSON string."}
-  - { name: evaluation_metrics_path, type: inputPath, description: "Evaluation metrics JSON string." }
+  - { name: trained_model_cdn_url, type: String, description: "CDN URL string for trained model."}
+  - { name: model_metadata_cdn_url, type: String, description: "CDN URL string for model metadata."}
+  - { name: training_metrics_path, type: String, description: "Training metrics JSON string." }
+  - { name: model_config_json, type: String, description: "Model configuration JSON string."}
+  - { name: evaluation_metrics_path, type: String, description: "Evaluation metrics JSON string." }
 
 implementation:
   container:
@@ -155,7 +155,20 @@ implementation:
         
         update_data = json.loads(args.update_data_json)
         mapping = json.loads(args.mapping_json)
-        float_keys = json.loads(args.float_keys_json) if args.float_keys_json else []
+        
+        # Read float_keys_json from file path
+        float_keys = []
+        if args.float_keys_json and args.float_keys_json != '-1':
+            if os.path.exists(args.float_keys_json):
+                try:
+                    with open(args.float_keys_json, 'r') as f:
+                        float_keys_content = f.read().strip()
+                        if float_keys_content:
+                            float_keys = json.loads(float_keys_content)
+                except Exception as e:
+                    print(f"Error reading float_keys_json file: {e}")
+            else:
+                print(f"float_keys_json file not found at: {args.float_keys_json}")
 
         print("\\n" + "=" * 40)
         print("PROCESSING PIPELINE ARTIFACTS")
@@ -472,7 +485,7 @@ implementation:
       - --domain
       - {inputValue: domain}
       - --float_keys_json
-      - {inputValue: float_keys_json}
+      - {inputPath: float_keys_json}
       - --trained_model_cdn_url
       - {inputPath: trained_model_cdn_url}
       - --model_metadata_cdn_url
