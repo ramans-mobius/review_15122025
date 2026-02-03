@@ -1,4 +1,4 @@
-name: Evaluate Vanilla GAN v3
+name: Evaluate Vanilla GAN v4
 description: Evaluates Vanilla GAN model using master config with fully connected architecture metrics and uploads to CDN
 inputs:
   - name: trained_model
@@ -128,7 +128,7 @@ implementation:
                             elif '_V1_data' in full_url:
                                 full_url = full_url.replace('_V1_data', '_$$_V1_data')
                         
-                        print(f"Generated CDN URL: {full_url[:100]}...")
+                        print(f"Generated CDN URL: {full_url}...")
                         return {
                             'success': True,
                             'cdn_url': full_url,
@@ -592,7 +592,7 @@ implementation:
                         
                         if upload_result and upload_result['success']:
                             samples_cdn_urls_list.append(upload_result['cdn_url'])
-                            print(f"  ✓ Eval sample {i} uploaded: {upload_result['cdn_url'][:80]}...")
+                            print(f"  ✓ Eval sample {i} uploaded: {upload_result['cdn_url']}...")
                         else:
                             print(f"  ✗ Eval sample {i} upload failed")
         
