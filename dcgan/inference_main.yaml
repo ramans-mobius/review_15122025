@@ -1,5 +1,5 @@
 name: DCGAN Inference with Metrics
-description: Runs inference on downloaded DCGAN model, calculates metrics, prepares schema data
+description: Runs inference with same logic as train and eval bricks
 inputs:
   - name: downloaded_model
     type: Model
@@ -43,7 +43,7 @@ implementation:
       - sh
       - -c
       - |
-        echo "Installing required packages for metrics..."
+        echo "Installing required packages..."
         apt-get update > /dev/null && apt-get install -y curl > /dev/null
         pip install scikit-image scipy pillow matplotlib > /dev/null 2>&1
         exec "$0" "$@"
@@ -51,10 +51,269 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, pickle, json, os, torch, time, sys, uuid, subprocess, numpy as np
-        import matplotlib.pyplot as plt
+        import argparse, pickle, json, os, torch, time, sys, uuid, subprocess
+        import numpy as np
         import warnings
         warnings.filterwarnings('ignore')
+        
+        # ============================================================================
+        # COMPATIBILITY CLASSES (SAME AS TRAIN AND EVAL BRICKS)
+        # ============================================================================
+        
+        # From Load Data Brick
+        class RawDatasetWrapper:
+            def __init__(self, images, labels, dataset_name='mnist'):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = False
+                self._num_samples = len(images)
+            
+            def __len__(self):
+                return self._num_samples
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': self.preprocessed
+                }
+        
+        # From Preprocess Brick
+        class PreprocessedDataset:
+            def __init__(self, images, labels, dataset_name, preprocessor_params):
+                self.images = images
+                self.labels = labels
+                self.dataset_name = dataset_name
+                self.preprocessed = True
+                self.preprocessor_params = preprocessor_params
+            
+            def __len__(self):
+                return len(self.images)
+            
+            def __getitem__(self, idx):
+                return self.images[idx]
+            
+            def get_sample(self, idx):
+                return {
+                    'image': self.images[idx],
+                    'label': self.labels[idx],
+                    'index': idx,
+                    'dataset': self.dataset_name,
+                    'preprocessed': True
+                }
+        
+        # Dataset info wrapper
+        class DatasetInfoWrapper:
+            def __init__(self, info_dict):
+                self.__dict__.update(info_dict)
+        
+        # ============================================================================
+        # CDN UPLOAD FUNCTION (SAME AS EVAL BRICK)
+        # ============================================================================
+        
+        def upload_images_as_jpeg(images_tensor, description, bearer_token, domain, get_cdn):
+           
+            if images_tensor is None or len(images_tensor) == 0:
+                print(f"    ERROR: No images to upload")
+                return None
+            
+            print(f"  CDN: Preparing {len(images_tensor)} images for JPEG upload...")
+            
+            try:
+                # Import matplotlib for image creation
+                import matplotlib
+                matplotlib.use('Agg')  # Non-interactive backend
+                import matplotlib.pyplot as plt
+                
+                # Convert tensor to numpy and denormalize from [-1, 1] to [0, 1]
+                images_np = images_tensor.cpu().numpy()
+                images_np = (images_np + 1) / 2  # Denormalize to [0, 1]
+                images_np = np.clip(images_np, 0, 1)
+                
+                # Handle different tensor shapes
+                if images_np.shape[1] == 1:  # Grayscale
+                    images_np = images_np[:, 0, :, :]  # Remove channel dimension
+                    cmap = 'gray'
+                else:
+                    # For RGB, transpose to (N, H, W, C)
+                    images_np = np.transpose(images_np, (0, 2, 3, 1))
+                    cmap = None
+                
+                # Create figure with grid of images
+                n_images = min(len(images_np), 16)  # Max 16 images
+                n_cols = 4
+                n_rows = (n_images + n_cols - 1) // n_cols
+                
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 3 * n_rows))
+                axes = axes.flatten() if n_rows > 1 else [axes]
+                
+                for i, (ax, img) in enumerate(zip(axes, images_np[:n_images])):
+                    ax.imshow(img, cmap=cmap)
+                    ax.axis('off')
+                    ax.set_title(f'Sample {i+1}', fontsize=8)
+                
+                # Hide unused axes
+                for i in range(len(images_np[:n_images]), len(axes)):
+                    axes[i].axis('off')
+                
+                plt.suptitle(f'DCGAN Generated Samples - {description}', fontsize=12)
+                plt.tight_layout()
+                
+                # Save to temporary file
+                temp_dir = "/tmp/generated_images"
+                os.makedirs(temp_dir, exist_ok=True)
+                
+                unique_id = str(uuid.uuid4())[:8]
+                jpeg_filename = f"dcgan_inference_{description.replace(' ', '_')}_{unique_id}.jpg"
+                jpeg_path = os.path.join(temp_dir, jpeg_filename)
+                
+                plt.savefig(jpeg_path, dpi=150, bbox_inches='tight', pad_inches=0.1)
+                plt.close(fig)
+                
+                file_size = os.path.getsize(jpeg_path)
+                print(f"  CDN: Saved JPEG: {jpeg_filename} ({file_size:,} bytes)")
+                
+            except Exception as e:
+                print(f"  CDN ERROR creating JPEG: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+            
+            # Upload to CDN
+            print(f"  CDN: Uploading JPEG to CDN...")
+            
+            # URL with proper $ handling (same as eval brick)
+            upload_url = f"{domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2Fmodels%2F"
+            upload_url_encoded = upload_url.replace("$$", "$$$")
+            
+            curl_cmd = [
+                "curl", "--location", upload_url_encoded,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--form", f"file=@{jpeg_path}", "--form", f"filename={jpeg_filename}",
+                "--fail", "--show-error", "--connect-timeout", "30", "--max-time", "120",
+                "--silent"
+            ]
+            
+            try:
+                process = subprocess.run(curl_cmd, capture_output=True, text=True, check=True)
+                response = json.loads(process.stdout)
+                cdn_path = response.get('cdnUrl') or response.get('info', {}).get('cdnUrl') or response.get('url')
+                
+                if cdn_path:
+                    full_url = cdn_path if cdn_path.startswith("http") else f"{get_cdn}{cdn_path}"
+                    
+                    # Ensure proper $$ pattern (same as eval brick)
+                    if "_V1_data" in full_url and "_$$_V1_data" not in full_url:
+                        if "_$_V1_data" in full_url:
+                            full_url = full_url.replace("_$_V1_data", "_$$_V1_data")
+                    
+                    print(f"    CDN: Upload successful!")
+                    print(f"    CDN: Filename: {jpeg_filename}")
+                    print(f"    CDN: Full URL: {full_url}")
+                    return full_url
+                    
+            except subprocess.CalledProcessError as e:
+                print(f"    CDN ERROR (curl): {e.stderr[:200]}")
+            except Exception as e:
+                print(f"    CDN ERROR: {str(e)}")
+            
+            return None
+        
+        # ============================================================================
+        # METRICS FUNCTIONS (SIMILAR TO EVAL BRICK)
+        # ============================================================================
+        
+        def calculate_ssim_psnr(real_images, fake_images):
+            try:
+                from skimage.metrics import structural_similarity as ssim
+                from skimage.metrics import peak_signal_noise_ratio as psnr
+                
+                real_np = real_images.cpu().numpy()
+                fake_np = fake_images.cpu().numpy()
+                
+                ssim_scores = []
+                psnr_scores = []
+                
+                num_samples = min(len(real_np), len(fake_np), 20)
+                
+                for i in range(num_samples):
+                    # Handle both grayscale and color images
+                    if len(real_np[i].shape) == 3 and real_np[i].shape[0] == 1:
+                        real_img = real_np[i][0]
+                        fake_img = fake_np[i][0]
+                    elif len(real_np[i].shape) == 3:
+                        real_img = real_np[i].transpose(1, 2, 0)
+                        fake_img = fake_np[i].transpose(1, 2, 0)
+                    else:
+                        real_img = real_np[i]
+                        fake_img = fake_np[i]
+                    
+                    # Denormalize from [-1, 1] to [0, 1]
+                    real_img = (real_img + 1) / 2
+                    fake_img = (fake_img + 1) / 2
+                    
+                    try:
+                        ssim_score = ssim(real_img, fake_img, data_range=1.0, 
+                                          channel_axis=-1 if real_img.ndim == 3 else None)
+                        ssim_scores.append(ssim_score)
+                    except:
+                        ssim_scores.append(0.0)
+                    
+                    try:
+                        psnr_score = psnr(real_img, fake_img, data_range=1.0)
+                        psnr_scores.append(psnr_score)
+                    except:
+                        psnr_scores.append(0.0)
+                
+                return float(np.mean(ssim_scores)), float(np.mean(psnr_scores))
+                    
+            except Exception as e:
+                print(f"Warning: SSIM/PSNR calculation failed: {e}")
+                return 0.0, 0.0
+        
+        def calculate_fid_simple(real_images, fake_images):
+            print("  Calculating simplified FID...")
+            
+            # Flatten images
+            real_np = real_images.cpu().numpy().reshape(real_images.shape[0], -1)
+            fake_np = fake_images.cpu().numpy().reshape(fake_images.shape[0], -1)
+            
+            # Calculate statistics
+            mu_real = np.mean(real_np, axis=0)
+            sigma_real = np.cov(real_np, rowvar=False)
+            
+            mu_fake = np.mean(fake_np, axis=0)
+            sigma_fake = np.cov(fake_np, rowvar=False)
+            
+            # Calculate FID
+            try:
+                diff = mu_real - mu_fake
+                # Add small epsilon for numerical stability
+                eps = 1e-6
+                sigma_real = sigma_real + eps * np.eye(sigma_real.shape[0])
+                sigma_fake = sigma_fake + eps * np.eye(sigma_fake.shape[0])
+                
+                from scipy import linalg
+                covmean = linalg.sqrtm(sigma_real.dot(sigma_fake))
+                if np.iscomplexobj(covmean):
+                    covmean = covmean.real
+                
+                fid = diff.dot(diff) + np.trace(sigma_real + sigma_fake - 2*covmean)
+                return float(fid)
+                
+            except Exception as e:
+                print(f"  Warning: Simplified FID calculation failed: {e}")
+                return float('nan')
+        
+        # ============================================================================
+        # MAIN CODE
+        # ============================================================================
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--downloaded_model', type=str, required=True)
@@ -72,7 +331,7 @@ implementation:
         args = parser.parse_args()
         
         print("=" * 80)
-        print("DCGAN INFERENCE WITH METRICS")
+        print("DCGAN INFERENCE - COMPATIBLE WITH TRAIN/EVAL BRICKS")
         print("=" * 80)
         
         # Create output directories
@@ -84,27 +343,45 @@ implementation:
                     os.makedirs(dir_path, exist_ok=True)
         
         # ============================================================================
-        # LOAD INPUTS
+        # LOAD INPUTS (SAME LOGIC AS EVAL BRICK)
         # ============================================================================
         print("\\nLoading inputs...")
         
-        # Load model
+        # Check file existence
+        for path, name in [(args.downloaded_model, 'downloaded_model'), 
+                          (args.raw_dataset, 'raw_dataset'),
+                          (args.preprocessor_params, 'preprocessor_params')]:
+            if not os.path.exists(path):
+                print(f"ERROR: {name} file does not exist: {path}")
+                sys.exit(1)
+        
+        # Load model (same as eval brick)
         checkpoint = torch.load(args.downloaded_model, map_location='cpu')
         algorithm = checkpoint.get('algorithm', 'dcgan')
         print(f"✓ Model: {algorithm}")
         
-        # Load dataset
+        # Load dataset (same as eval brick)
         with open(args.raw_dataset, 'rb') as f:
-            dataset_wrapper = pickle.load(f)
+            raw_dataset = pickle.load(f)
         
-        if hasattr(dataset_wrapper, 'images'):
-            raw_images = dataset_wrapper.images
-            print(f"✓ Dataset: {len(raw_images)} samples")
+        # Handle different data wrapper types (same as eval brick)
+        if hasattr(raw_dataset, 'images'):
+            # RawDatasetWrapper from Load Data brick
+            raw_images = raw_dataset.images
+            raw_labels = raw_dataset.labels if hasattr(raw_dataset, 'labels') else None
+            print(f"✓ Raw dataset loaded: {len(raw_images)} samples")
+        elif hasattr(raw_dataset, '__len__'):
+            # Direct dataset
+            if isinstance(raw_dataset, (list, tuple)):
+                raw_images = raw_dataset
+            else:
+                raw_images = [raw_dataset[i] for i in range(len(raw_dataset))]
+            print(f"✓ Raw dataset loaded: {len(raw_images)} samples")
         else:
-            print("✗ Invalid dataset format")
+            print(f"ERROR: Unsupported data format")
             sys.exit(1)
         
-        # Load preprocessor params
+        # Load preprocessor params (same as eval brick)
         with open(args.preprocessor_params, 'r') as f:
             preprocess_params = json.load(f)
         
@@ -114,110 +391,162 @@ implementation:
         print(f"✓ Preprocessor: scale={scale:.6f}, shift={shift:.6f}")
         
         # ============================================================================
-        # APPLY PREPROCESSING
+        # APPLY PREPROCESSING (SAME AS EVAL BRICK)
         # ============================================================================
         print("\\nApplying preprocessing...")
-        processed_images = raw_images * scale + shift
-        print(f"  Input range: [{raw_images.min():.3f}, {raw_images.max():.3f}]")
+        
+        # Convert raw images to tensor if needed
+        if isinstance(raw_images, list):
+            # Stack list of tensors
+            if isinstance(raw_images[0], torch.Tensor):
+                raw_tensor = torch.stack(raw_images)
+            else:
+                # Convert to tensors first
+                raw_tensor = torch.stack([torch.tensor(img) for img in raw_images])
+        else:
+            raw_tensor = raw_images
+        
+        # Apply same preprocessing as training
+        print(f"  Input range: [{raw_tensor.min():.3f}, {raw_tensor.max():.3f}]")
+        processed_images = raw_tensor * scale + shift
         print(f"  Output range: [{processed_images.min():.3f}, {processed_images.max():.3f}]")
         
         # ============================================================================
-        # LOAD GENERATOR
+        # LOAD GENERATOR (SAME AS EVAL BRICK)
         # ============================================================================
         print("\\nLoading generator...")
         
         try:
+            # Check if generator exists in checkpoint
             if 'generator_state_dict' not in checkpoint:
-                print("ERROR: No generator in checkpoint")
+                print("ERROR: No generator state dict in checkpoint")
                 sys.exit(1)
             
-            # Try nesy_factory first
+            # Import nesy_factory modules (same as train/eval bricks)
             try:
-                from nesy_factory.GANs.dcgan import DCGANConfig, FullyConfigurableDCGANGenerator
-                config_dict = checkpoint.get('config', {'latent_dim': 100, 'channels': 1})
-                dcgan_config = DCGANConfig.from_dict(config_dict)
+                from nesy_factory.GANs.dcgan import DCGANConfig
+                from nesy_factory.GANs.dcgan import FullyConfigurableDCGANGenerator
+                
+                # Recreate config from checkpoint (same as eval brick)
+                config_dict = checkpoint.get('config', {})
+                if not config_dict:
+                    # Create minimal config
+                    config_dict = {
+                        'image_size': 32,
+                        'channels': 1,
+                        'latent_dim': 100
+                    }
+                    dcgan_config = DCGANConfig.from_dict(config_dict)
+                elif isinstance(config_dict, DCGANConfig):
+                    dcgan_config = config_dict
+                elif hasattr(config_dict, '__dataclass_fields__'):
+                    dcgan_config = config_dict
+                elif isinstance(config_dict, dict):
+                    dcgan_config = DCGANConfig.from_dict(config_dict)
+                else:
+                    config_dict = {
+                        'image_size': 32,
+                        'channels': 1,
+                        'latent_dim': 100
+                    }
+                    dcgan_config = DCGANConfig.from_dict(config_dict)
+                
+                # Create generator (same as eval brick)
                 generator = FullyConfigurableDCGANGenerator(dcgan_config)
                 generator.load_state_dict(checkpoint['generator_state_dict'])
-                print("✓ Generator loaded via nesy_factory")
-            except ImportError:
-                # Fallback
-                generator = torch.nn.Sequential(
-                    torch.nn.Linear(100, 128 * 8 * 8),
-                    torch.nn.ReLU(),
-                    torch.nn.Unflatten(1, (128, 8, 8)),
-                    torch.nn.ConvTranspose2d(128, 64, 4, 2, 1),
-                    torch.nn.BatchNorm2d(64),
-                    torch.nn.ReLU(),
-                    torch.nn.ConvTranspose2d(64, 32, 4, 2, 1),
-                    torch.nn.BatchNorm2d(32),
-                    torch.nn.ReLU(),
-                    torch.nn.ConvTranspose2d(32, 1, 4, 2, 1),
-                    torch.nn.Tanh()
-                )
-                generator.load_state_dict(checkpoint['generator_state_dict'])
-                generator.latent_dim = 100
-                print("✓ Generator loaded via fallback")
+                
+                print(f"✓ Generator loaded via nesy_factory (same as train/eval)")
+                
+            except ImportError as e:
+                print(f"ERROR: nesy_factory import failed: {e}")
+                print("  This should not happen since train/eval bricks use it")
+                sys.exit(1)
             
-            generator.eval()
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            generator.to(device)
+            # Get latent dim (same as eval brick)
+            if hasattr(generator, 'latent_dim'):
+                latent_dim = generator.latent_dim
+            elif 'latent_dim' in checkpoint:
+                latent_dim = checkpoint['latent_dim']
+            else:
+                latent_dim = 100
+            
+            print(f"  Latent dim: {latent_dim}")
             
         except Exception as e:
             print(f"ERROR loading generator: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
         
+        # Set up device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        generator.to(device)
+        generator.eval()
+        
         # ============================================================================
-        # GENERATE SAMPLES & CALCULATE METRICS
+        # GENERATE SAMPLES (SAME AS EVAL BRICK)
         # ============================================================================
-        print("\\nGenerating samples and calculating metrics...")
+        print("\\nGenerating samples...")
         
         num_samples = min(50, len(processed_images))
+        print(f"  Using {num_samples} samples for inference")
+        
+        # Prepare real samples
         real_tensor = processed_images[:num_samples].to(device)
         
+        # Generate fake samples (same as eval brick)
         with torch.no_grad():
-            latent_dim = generator.latent_dim if hasattr(generator, 'latent_dim') else 100
-            z = torch.randn(num_samples, latent_dim, 1, 1, device=device)
+            z = torch.randn(num_samples, latent_dim, device=device)
             fake_tensor = generator(z).cpu()
         
-        print(f"✓ Generated {num_samples} samples")
+        print(f"✓ Generated {num_samples} fake samples")
+        print(f"  Real samples shape: {real_tensor.shape}")
+        print(f"  Fake samples shape: {fake_tensor.shape}")
         
-        # Calculate FID
-        def calculate_fid(real, fake):
-            try:
-                real_np = real.numpy().reshape(real.shape[0], -1)
-                fake_np = fake.numpy().reshape(fake.shape[0], -1)
-                mu_real, sigma_real = np.mean(real_np, axis=0), np.cov(real_np, rowvar=False)
-                mu_fake, sigma_fake = np.mean(fake_np, axis=0), np.cov(fake_np, rowvar=False)
-                from scipy import linalg
-                diff = mu_real - mu_fake
-                covmean = linalg.sqrtm(sigma_real.dot(sigma_fake))
-                if np.iscomplexobj(covmean):
-                    covmean = covmean.real
-                fid = diff.dot(diff) + np.trace(sigma_real + sigma_fake - 2*covmean)
-                return float(fid)
-            except:
-                return float('nan')
+        # ============================================================================
+        # UPLOAD GENERATED IMAGES AS JPEG TO CDN (SAME AS EVAL BRICK)
+        # ============================================================================
+        print("\\n" + "=" * 60)
+        print("UPLOADING GENERATED IMAGES AS JPEG TO CDN")
+        print("=" * 60)
         
-        # Calculate SSIM & PSNR
-        def calculate_ssim_psnr(real, fake):
-            try:
-                from skimage.metrics import structural_similarity as ssim
-                from skimage.metrics import peak_signal_noise_ratio as psnr
-                ssim_scores, psnr_scores = [], []
-                for i in range(min(10, len(real))):
-                    real_img = real[i][0].numpy() if real[i].shape[0] == 1 else real[i].permute(1, 2, 0).numpy()
-                    fake_img = fake[i][0].numpy() if fake[i].shape[0] == 1 else fake[i].permute(1, 2, 0).numpy()
-                    real_img, fake_img = (real_img + 1) / 2, (fake_img + 1) / 2
-                    try:
-                        ssim_scores.append(ssim(real_img, fake_img, data_range=1.0))
-                        psnr_scores.append(psnr(real_img, fake_img, data_range=1.0))
-                    except:
-                        ssim_scores.append(0.0); psnr_scores.append(0.0)
-                return float(np.mean(ssim_scores)), float(np.mean(psnr_scores))
-            except:
-                return 0.0, 0.0
+        generated_images_cdn_url = ""
+        if args.bearer_token and args.bearer_token.strip():
+            # Read bearer token
+            with open(args.bearer_token, 'r') as f:
+                bearer = f.read().strip()
+            
+            # Upload images as JPEG grid (same function as eval brick)
+            generated_images_cdn_url = upload_images_as_jpeg(
+                fake_tensor, 
+                algorithm, 
+                bearer, 
+                args.domain, 
+                args.get_cdn
+            )
+        else:
+            print("  Skipping CDN upload (no bearer token)")
         
-        fid = calculate_fid(real_tensor.cpu(), fake_tensor)
+        # Save CDN URL to output
+        with open(args.generated_samples_url, 'w') as f:
+            if generated_images_cdn_url:
+                f.write(generated_images_cdn_url)
+                print(f"✓ Generated images JPEG URL saved: {args.generated_samples_url}")
+            else:
+                f.write("")
+                print(f"⚠ No CDN URL for generated images (upload may have failed)")
+        
+        # ============================================================================
+        # CALCULATE METRICS (SIMILAR TO EVAL BRICK)
+        # ============================================================================
+        print("\\n" + "=" * 60)
+        print("CALCULATING METRICS")
+        print("=" * 60)
+        
+        # Calculate FID (same simplified version as eval brick)
+        fid = calculate_fid_simple(real_tensor.cpu(), fake_tensor)
+        
+        # Calculate SSIM & PSNR (same function as eval brick)
         ssim, psnr = calculate_ssim_psnr(real_tensor.cpu(), fake_tensor)
         
         # Save evaluation metrics
@@ -235,6 +564,13 @@ implementation:
                 'shift': shift,
                 'source_min': normalization.get('source_min', 0.0),
                 'source_max': normalization.get('source_max', 1.0)
+            },
+            'generated_images_info': {
+                'num_samples': num_samples,
+                'shape': list(fake_tensor.shape),
+                'cdn_url': generated_images_cdn_url if generated_images_cdn_url else None,
+                'format': 'jpeg',
+                'note': 'Images uploaded as JPEG grid to CDN (same as eval brick)'
             }
         }
         
@@ -245,68 +581,6 @@ implementation:
         print(f"  FID: {fid if not np.isnan(fid) else 'N/A'}")
         print(f"  SSIM: {ssim:.3f}")
         print(f"  PSNR: {psnr:.1f} dB")
-        
-        # ============================================================================
-        # UPLOAD GENERATED SAMPLES TO CDN
-        # ============================================================================
-        print("\\nUploading generated samples to CDN...")
-        
-        def upload_to_cdn(file_path, description):
-            if not os.path.exists(file_path):
-                return None
-            
-            # Read bearer token
-            with open(args.bearer_token, 'r') as f:
-                bearer = f.read().strip()
-            
-            upload_url = f"{args.domain}/mobius-content-service/v1.0/content/upload?filePathAccess=private&filePath=%2Fdcgan%2F"
-            unique_id = str(uuid.uuid4())[:8]
-            filename = f"dcgan_generated_{description}_{unique_id}.png"
-            
-            curl_cmd = [
-                "curl", "--location", upload_url,
-                "--header", f"Authorization: Bearer {bearer}",
-                "--form", f"file=@{file_path}",
-                "--form", f"filename={filename}",
-                "--fail", "--show-error",
-                "--connect-timeout", "30", "--max-time", "120"
-            ]
-            
-            try:
-                result = subprocess.run(curl_cmd, capture_output=True, text=True, check=True)
-                response = json.loads(result.stdout)
-                cdn_url = response.get("cdnUrl", "")
-                return f"{args.get_cdn}{cdn_url}" if cdn_url else None
-            except:
-                return None
-        
-        # Create and upload visualization
-        try:
-            fig, axes = plt.subplots(2, 4, figsize=(12, 6))
-            for i in range(min(8, len(fake_tensor))):
-                ax = axes[i // 4, i % 4]
-                img = fake_tensor[i][0].numpy() if fake_tensor[i].shape[0] == 1 else fake_tensor[i].permute(1, 2, 0).numpy()
-                img = (img + 1) / 2
-                ax.imshow(img, cmap='gray' if len(img.shape) == 2 else None)
-                ax.axis('off')
-                ax.set_title(f"Sample {i+1}")
-            
-            plt.tight_layout()
-            viz_path = "/tmp/generated_samples.png"
-            plt.savefig(viz_path, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            generated_url = upload_to_cdn(viz_path, "samples")
-            
-            with open(args.generated_samples_url, 'w') as f:
-                f.write(generated_url if generated_url else "")
-            
-            print(f"✓ Generated samples URL: {'Uploaded' if generated_url else 'Failed'}")
-            
-        except Exception as e:
-            print(f"  Warning: Visualization failed: {e}")
-            with open(args.generated_samples_url, 'w') as f:
-                f.write("")
         
         # ============================================================================
         # PREPARE SCHEMA DATA IN CORRECT FORMAT
@@ -322,7 +596,7 @@ implementation:
             "model_id": args.model_id,
             "projectId": args.project_id,
             
-            # Metrics (matching your schema attributes)
+            # Metrics
             "fid": fid if not np.isnan(fid) else None,
             "ssim": float(ssim),
             "psnr": float(psnr),
@@ -335,9 +609,10 @@ implementation:
             "infernce_input": json.dumps({
                 "dataset_samples": num_samples,
                 "latent_dim": latent_dim,
-                "preprocessing": {"scale": scale, "shift": shift}
+                "preprocessing": {"scale": scale, "shift": shift},
+                "compatibility_note": "Using same logic as train/eval bricks"
             }),
-            "infernce_output": generated_url if generated_url else "",
+            "infernce_output": generated_images_cdn_url if generated_images_cdn_url else "",
             "infernce_score_blue": 0.0,
             "inference_confidence": float(ssim) if ssim > 0 else 0.5,
             "inference_score_rouge": 0.0,
@@ -345,7 +620,9 @@ implementation:
             
             # Metadata
             "evaluation_timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-            "algorithm": algorithm
+            "algorithm": algorithm,
+            "generated_images_format": "jpeg",
+            "cdn_upload_success": generated_images_cdn_url is not None
         }
         
         # Save schema data
@@ -359,12 +636,23 @@ implementation:
             'model_id': args.model_id,
             'project_id': args.project_id,
             'samples_generated': num_samples,
+            'algorithm': algorithm,
             'metrics': {
                 'fid': fid if not np.isnan(fid) else None,
                 'ssim': ssim,
                 'psnr': psnr
             },
-            'generated_samples_url': generated_url if generated_url else None,
+            'generated_images_info': {
+                'cdn_url': generated_images_cdn_url if generated_images_cdn_url else None,
+                'format': 'jpeg',
+                'upload_success': generated_images_cdn_url is not None
+            },
+            'compatibility_info': {
+                'uses_nesy_factory': True,
+                'same_as_train_brick': True,
+                'same_as_eval_brick': True,
+                'cdn_upload_function': 'upload_images_as_jpeg (same as eval brick)'
+            },
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
             'output_files': {
                 'evaluation_metrics': args.evaluation_metrics,
@@ -386,13 +674,18 @@ implementation:
         # FINAL OUTPUT
         # ============================================================================
         print('\\n' + '=' * 80)
-        print('INFERENCE COMPLETE')
+        print('INFERENCE COMPLETE - COMPATIBLE WITH TRAIN/EVAL BRICKS')
         print('=' * 80)
         print(f"Execution ID: {execution_id}")
+        print(f"Algorithm: {algorithm}")
         print(f"Metrics: FID={fid if not np.isnan(fid) else 'N/A'}, SSIM={ssim:.3f}, PSNR={psnr:.1f}dB")
         print(f"Samples: {num_samples}")
-        print(f"Generated URL: {'✓' if generated_url else '✗'}")
+        print(f"Generated URL: {'✓ Uploaded as JPEG' if generated_images_cdn_url else '✗ Failed'}")
+        if generated_images_cdn_url:
+            print(f"CDN URL: {generated_images_cdn_url[:80]}...")
         print(f"Schema data: ✓ Ready for upload")
+        print(f"Compatibility: ✓ Same as train/eval bricks")
+        print('=' * 80)
         
     args:
       - --downloaded_model
