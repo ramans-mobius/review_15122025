@@ -1,4 +1,4 @@
-name: I Update Schema Row v11
+name: I Update Schema Row v12
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -360,7 +360,7 @@ implementation:
                         ]
                     }
                     
-                    print(f"\nRequest URL: PATCH {update_url}")
+                    print(f"\\nRequest URL: PATCH {update_url}")
                     print(f"Request Headers: {json.dumps(headers)}")
                     print(f"Request Payload: {json.dumps(update_payload, indent=2)}")
                     
@@ -449,7 +449,7 @@ implementation:
                         "data": [creation_data]
                     }
         
-                    print(f"\nRequest URL: POST {create_url}")
+                    print(f"\\nRequest URL: POST {create_url}")
                     print(f"Request Headers: {json.dumps(headers)}")
                     print(f"Request Payload: {json.dumps(create_payload, indent=2)}")
                     
@@ -460,7 +460,7 @@ implementation:
                     response.raise_for_status()
                     print("Successfully created a new model instance.")
                     
-                print(f"\nResponse: {response.json()}")
+                print(f"\\nResponse: {response.json()}")
         
             except requests.exceptions.RequestException as e:
                 print(f"Error: {e}")
@@ -469,7 +469,7 @@ implementation:
                     print(f"Response Content: {e.response.text}")
                 exit(1)
         
-        print("\n" + "=" * 80)
+        print("\\n" + "=" * 80)
         print("UPDATE COMPLETE")
         print("=" * 80)
     args:
