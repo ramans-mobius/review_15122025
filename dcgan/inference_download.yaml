@@ -1,9 +1,9 @@
-name: Download DCGAN Assets from CDN
+name: Download DCGAN Assets from CDN - Fixed
 description: Downloads model, dataset, and preprocessor params from encoded CDN URLs
 inputs:
   - name: model_cdn_url
     type: String
-    description: "Encoded URL for model download (%28→(, %29→), %24→$)"
+    description: "Encoded URL for model download"
   - name: dataset_cdn_url
     type: String
     description: "Encoded URL for raw dataset download"
@@ -12,7 +12,7 @@ inputs:
     description: "Encoded URL for preprocessor params JSON"
   - name: bearer_token
     type: String
-    description: "Bearer token for CDN authentication"
+    description: "Bearer token for CDN authentication (either file path or token string)"
 outputs:
   - name: downloaded_model
     type: Model
@@ -55,12 +55,71 @@ implementation:
         args = parser.parse_args()
         
         print('=' * 80)
-        print('CDN DOWNLOAD WITH PREPROCESSOR PARAMS')
+        print('CDN DOWNLOAD WITH PREPROCESSOR PARAMS - FIXED')
         print('=' * 80)
         
-        # Read bearer token
-        with open(args.bearer_token, 'r') as f:
-            bearer_token = f.read().strip()
+        # FIX: Handle bearer token - could be file path or token string
+        def get_bearer_token(token_input):
+            """
+            Extract bearer token from input.
+            Input could be:
+            1. File path containing token
+            2. Direct token string
+            3. JSON string with token
+            """
+            print("Extracting bearer token...")
+            
+            # Check if input is a file path
+            if os.path.exists(token_input):
+                print(f"  Token input is a file path: {token_input}")
+                try:
+                    with open(token_input, 'r') as f:
+                        content = f.read().strip()
+                    # Check if file contains JSON
+                    if content.startswith('{'):
+                        token_data = json.loads(content)
+                        token = token_data.get('access_token') or token_data.get('accessToken') or token_data.get('token')
+                        if token:
+                            print(f"  ✓ Extracted token from JSON file")
+                            return token
+                    else:
+                        # Direct token in file
+                        print(f"  ✓ Using token from file")
+                        return content
+                except Exception as e:
+                    print(f"  ✗ Error reading token file: {e}")
+            
+            # Check if input is a JSON string
+            if token_input.startswith('{'):
+                try:
+                    token_data = json.loads(token_input)
+                    token = token_data.get('access_token') or token_data.get('accessToken') or token_data.get('token')
+                    if token:
+                        print(f"  ✓ Extracted token from JSON string")
+                        return token
+                except:
+                    pass
+            
+            # Check if it looks like a JWT token (contains dots)
+            if '.' in token_input and len(token_input) > 100:
+                print(f"  ✓ Input appears to be direct JWT token")
+                return token_input.strip()
+            
+            # Default: assume it's a direct token
+            print(f"  ✓ Using input as direct token")
+            return token_input.strip()
+        
+        # Get bearer token
+        bearer_token = get_bearer_token(args.bearer_token)
+        
+        # Log token info (truncated for security)
+        if bearer_token:
+            token_preview = bearer_token[:50] + '...' if len(bearer_token) > 50 else bearer_token
+            print(f"Bearer token preview: {token_preview}")
+            print(f"Token length: {len(bearer_token)} chars")
+        else:
+            print("✗ ERROR: No bearer token found!")
+            sys.exit(1)
         
         def decode_url(encoded_url):
            
@@ -69,10 +128,11 @@ implementation:
         def download_file(url, output_path, description):
            
             print(f"\\nDownloading {description}...")
-            print(f"  URL: {url}...")
+            print(f"  URL: {url[:100]}..." if len(url) > 100 else f"  URL: {url}")
             
             req = urllib.request.Request(url)
             req.add_header('Authorization', f'Bearer {bearer_token}')
+            req.add_header('User-Agent', 'Mozilla/5.0')
             
             try:
                 with urllib.request.urlopen(req, timeout=60) as response:
@@ -84,32 +144,46 @@ implementation:
                 file_size = len(data)
                 file_hash = hashlib.md5(data).hexdigest()[:8]
                 
-                print(f"  ✓ Size: {file_size:,} bytes")
+                print(f"  ✓ Success: {file_size:,} bytes")
                 print(f"  ✓ Hash: {file_hash}")
                 
                 return {
                     'success': True,
                     'path': output_path,
                     'size': file_size,
-                    'hash': file_hash
+                    'hash': file_hash,
+                    'status': 'downloaded'
                 }
             except Exception as e:
-                print(f"  ✗ Failed: {e}")
-                return {'success': False, 'error': str(e)}
+                print(f"  ✗ Failed: {str(e)[:200]}")
+                return {'success': False, 'error': str(e)[:200]}
         
         # Decode URLs
         print("\\nDecoding CDN URLs...")
-        model_url = decode_url(args.model_cdn_url)
-        dataset_url = decode_url(args.dataset_cdn_url)
-        preprocessor_url = decode_url(args.preprocessor_cdn_url)
+        model_url = decode_url(args.model_cdn_url) if args.model_cdn_url else None
+        dataset_url = decode_url(args.dataset_cdn_url) if args.dataset_cdn_url else None
+        preprocessor_url = decode_url(args.preprocessor_cdn_url) if args.preprocessor_cdn_url else None
         
-        # Create temp directory
-        os.makedirs('/tmp/downloads', exist_ok=True)
+        # Check if URLs are provided
+        if not model_url:
+            print("✗ ERROR: Model CDN URL is empty!")
+            sys.exit(1)
+        
+        # Create output directories
+        for path in [args.downloaded_model, args.raw_dataset, args.preprocessor_params, args.download_summary]:
+            if path:
+                dir_path = os.path.dirname(path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
         
         # Download files
-        model_result = download_file(model_url, args.downloaded_model, "DCGAN Model")
-        dataset_result = download_file(dataset_url, '/tmp/dataset_raw.pkl', "Raw Dataset")
-        preprocessor_result = download_file(preprocessor_url, args.preprocessor_params, "Preprocessor Params")
+        model_result = download_file(model_url, args.downloaded_model, "DCGAN Model") if model_url else {'success': False, 'error': 'No URL provided'}
+        
+        # Create temp file for dataset if downloading
+        dataset_temp_path = '/tmp/dataset_raw.pkl'
+        dataset_result = download_file(dataset_url, dataset_temp_path, "Raw Dataset") if dataset_url else {'success': False, 'error': 'No URL provided'}
+        
+        preprocessor_result = download_file(preprocessor_url, args.preprocessor_params, "Preprocessor Params") if preprocessor_url else {'success': False, 'error': 'No URL provided'}
         
         # Load and convert dataset to RawDatasetWrapper format
         print("\\nConverting dataset to proper format...")
@@ -137,54 +211,84 @@ implementation:
                     'preprocessed': self.preprocessed
                 }
         
-        try:
-            with open('/tmp/dataset_raw.pkl', 'rb') as f:
-                downloaded_data = pickle.load(f)
-            
-            if hasattr(downloaded_data, 'images'):
-                # Already in wrapper format
-                dataset_wrapper = downloaded_data
-            elif isinstance(downloaded_data, (list, tuple)):
-                images = torch.stack([torch.tensor(img) for img in downloaded_data])
-                labels = torch.zeros(len(images))
-                dataset_wrapper = RawDatasetWrapper(images, labels)
-            elif hasattr(downloaded_data, '__len__'):
-                images = torch.stack([downloaded_data[i] for i in range(min(100, len(downloaded_data)))])
-                labels = torch.zeros(len(images))
-                dataset_wrapper = RawDatasetWrapper(images, labels)
-            else:
-                raise ValueError("Unknown dataset format")
-            
-            # Save wrapped dataset
-            with open(args.raw_dataset, 'wb') as f:
-                pickle.dump(dataset_wrapper, f)
-            
-            print(f"✓ Dataset converted: {len(dataset_wrapper)} samples")
-            
-        except Exception as e:
-            print(f"✗ Dataset conversion failed: {e}")
-            # Create empty dataset wrapper as fallback
+        dataset_wrapper = None
+        if dataset_result.get('success'):
+            try:
+                with open(dataset_temp_path, 'rb') as f:
+                    downloaded_data = pickle.load(f)
+                
+                if hasattr(downloaded_data, 'images'):
+                    # Already in wrapper format
+                    dataset_wrapper = downloaded_data
+                elif isinstance(downloaded_data, (list, tuple)):
+                    images = torch.stack([torch.tensor(img) for img in downloaded_data])
+                    labels = torch.zeros(len(images))
+                    dataset_wrapper = RawDatasetWrapper(images, labels)
+                elif hasattr(downloaded_data, '__len__'):
+                    # Try to get first 100 samples
+                    sample_size = min(100, len(downloaded_data))
+                    images_list = []
+                    for i in range(sample_size):
+                        try:
+                            img = downloaded_data[i]
+                            if isinstance(img, torch.Tensor):
+                                images_list.append(img)
+                            else:
+                                images_list.append(torch.tensor(img))
+                        except:
+                            pass
+                    
+                    if images_list:
+                        images = torch.stack(images_list)
+                        labels = torch.zeros(len(images))
+                        dataset_wrapper = RawDatasetWrapper(images, labels)
+                    else:
+                        raise ValueError("Could not extract images from dataset")
+                else:
+                    raise ValueError("Unknown dataset format")
+                
+                print(f"✓ Dataset converted: {len(dataset_wrapper)} samples")
+                
+            except Exception as e:
+                print(f"✗ Dataset conversion failed: {e}")
+                import traceback
+                traceback.print_exc()
+                # Create empty dataset as fallback
+                dataset_wrapper = RawDatasetWrapper(torch.Tensor(), torch.Tensor())
+        else:
+            print("⚠ No dataset downloaded, creating empty wrapper")
             dataset_wrapper = RawDatasetWrapper(torch.Tensor(), torch.Tensor())
+        
+        # Save wrapped dataset
+        try:
             with open(args.raw_dataset, 'wb') as f:
                 pickle.dump(dataset_wrapper, f)
+            print(f"✓ Dataset saved: {args.raw_dataset}")
+        except Exception as e:
+            print(f"✗ Failed to save dataset: {e}")
         
         # Create download summary
         summary = {
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'bearer_token_info': {
+                'length': len(bearer_token),
+                'type': 'jwt' if '.' in bearer_token else 'unknown'
+            },
             'downloads': {
                 'model': model_result,
                 'dataset': dataset_result,
                 'preprocessor': preprocessor_result
             },
             'dataset_info': {
-                'samples': len(dataset_wrapper) if 'dataset_wrapper' in locals() else 0,
+                'samples': len(dataset_wrapper) if dataset_wrapper else 0,
                 'format': 'RawDatasetWrapper',
-                'preprocessed': False
+                'preprocessed': False,
+                'has_images': len(dataset_wrapper) > 0 if dataset_wrapper else False
             },
-            'urls': {
-                'model': model_url + '...',
-                'dataset': dataset_url + '...',
-                'preprocessor': preprocessor_url + '...'
+            'urls_provided': {
+                'model': bool(model_url),
+                'dataset': bool(dataset_url),
+                'preprocessor': bool(preprocessor_url)
             }
         }
         
@@ -195,14 +299,20 @@ implementation:
         print('\\n' + '=' * 80)
         print('DOWNLOAD SUMMARY')
         print('=' * 80)
-        print(f"Model: {'✓' if model_result['success'] else '✗'}")
-        print(f"Dataset: {'✓' if dataset_result['success'] else '✗'}")
-        print(f"Preprocessor: {'✓' if preprocessor_result['success'] else '✗'}")
-        print(f"Dataset samples: {len(dataset_wrapper) if 'dataset_wrapper' in locals() else 0}")
+        print(f"Bearer token: ✓ ({len(bearer_token)} chars)")
+        print(f"Model: {'✓' if model_result.get('success') else '✗'} {model_result.get('error', '')}")
+        print(f"Dataset: {'✓' if dataset_result.get('success') else '✗'} {dataset_result.get('error', '')}")
+        print(f"Preprocessor: {'✓' if preprocessor_result.get('success') else '✗'} {preprocessor_result.get('error', '')}")
+        print(f"Dataset samples: {len(dataset_wrapper) if dataset_wrapper else 0}")
         
-        # Exit if any critical download failed
-        if not (model_result['success'] and dataset_result['success']):
+        # Exit if model download failed (critical)
+        if not model_result.get('success'):
+            print("✗ CRITICAL: Model download failed!")
             sys.exit(1)
+        
+        print('=' * 80)
+        print('DOWNLOAD COMPLETE')
+        print('=' * 80)
         
     args:
       - --model_cdn_url
