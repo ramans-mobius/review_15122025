@@ -1,4 +1,4 @@
-name: I Update Schema Row v10
+name: I Update Schema Row v11
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -41,9 +41,99 @@ implementation:
         from urllib.parse import quote, unquote
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
-
-        # ... [Keep all the helper functions same as before] ...
-
+        
+        # Helper function to get current datetime in ISO format
+        def get_current_datetime():
+            return datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
+        # Helper function to create requests session with retry logic
+        def create_session():
+            session = requests.Session()
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            return session
+        
+        # Helper function to read file content
+        def read_file_content(filepath):
+            if os.path.exists(filepath):
+                with open(filepath, 'r') as f:
+                    return f.read().strip()
+            return None
+        
+        # Helper function to extract metrics from training metrics
+        def extract_metrics_from_training(training_metrics):
+            extracted = {}
+            if not training_metrics:
+                return extracted
+            
+            try:
+                metrics_data = json.loads(training_metrics)
+                
+                # Extract parameter count
+                if 'parameter_count' in metrics_data:
+                    extracted['parameter_count'] = metrics_data['parameter_count']
+                
+                # Extract model architecture info
+                if 'model_architecture' in metrics_data:
+                    arch = metrics_data['model_architecture']
+                    if 'input_shape' in arch:
+                        extracted['input_shape'] = str(arch['input_shape'])
+                    if 'output_shape' in arch:
+                        extracted['output_shape'] = str(arch['output_shape'])
+                    if 'name' in arch:
+                        extracted['name'] = arch['name']
+                    if 'architecture_type' in arch:
+                        extracted['architecture_type'] = arch['architecture_type']
+                
+                # Extract final loss
+                if 'final_epoch_metrics' in metrics_data:
+                    final_metrics = metrics_data['final_epoch_metrics']
+                    if 'loss' in final_metrics:
+                        extracted['final_loss'] = final_metrics['loss']
+                
+                # Extract other relevant metrics
+                for key in ['latent_dim', 'learning_rate', 'batch_size']:
+                    if key in metrics_data:
+                        extracted[key] = metrics_data[key]
+                        
+            except Exception as e:
+                print(f"Error extracting training metrics: {e}")
+            
+            return extracted
+        
+        # Helper function to extract metrics from evaluation
+        def extract_metrics_from_evaluation(evaluation_metrics):
+            extracted = {}
+            if not evaluation_metrics:
+                return extracted
+            
+            try:
+                eval_data = json.loads(evaluation_metrics)
+                
+                # Extract evaluation metrics
+                if 'metrics' in eval_data:
+                    metrics = eval_data['metrics']
+                    for key, value in metrics.items():
+                        extracted[f'eval_{key}'] = value
+                
+                # Extract model performance summary
+                if 'summary' in eval_data:
+                    summary = eval_data['summary']
+                    for key, value in summary.items():
+                        extracted[f'summary_{key}'] = value
+                        
+            except Exception as e:
+                print(f"Error extracting evaluation metrics: {e}")
+            
+            return extracted
+        
+        # Main execution
         parser = argparse.ArgumentParser()
         parser.add_argument('--schema_id', type=str, required=True)
         parser.add_argument('--update_data_json', type=str, required=True)
@@ -63,15 +153,15 @@ implementation:
         parser.add_argument('--model_config_json', type=str, required=False)
         parser.add_argument('--evaluation_metrics_path', type=str, required=False)
         args = parser.parse_args()
-
+        
         execution_id_int = int(args.execution_id)
-
+        
         with open(args.bearer_auth_token, 'r') as f:
             bearer_auth_token = f.read().strip()
-
+        
         with open(args.tenant_id, 'r') as f:
             tenant_id = f.read().strip()
-
+        
         print("=" * 80)
         print("UPDATE SCHEMA ROW WITH MODEL METADATA")
         print("=" * 80)
@@ -79,15 +169,41 @@ implementation:
         print(f" Input Data ")
         print(f"update_data_json: {args.update_data_json}")
         print(f"mapping_json: {args.mapping_json}")
-        print(f"model_id: {args.model_id}")  # Added logging
+        print(f"model_id: {args.model_id}")
         
         update_data = json.loads(args.update_data_json)
         mapping = json.loads(args.mapping_json)
         
-        # ... [Rest of the code same until the update section] ...
-
+        # Process float keys
+        float_keys = []
+        if args.float_keys_json != '-1':
+            float_keys = json.loads(args.float_keys_json)
+        
+        # Read additional files
+        model_weights_cdn = read_file_content(args.trained_model_cdn_url) if args.trained_model_cdn_url != '-1' else None
+        model_metadata_cdn = read_file_content(args.model_metadata_cdn_url) if args.model_metadata_cdn_url != '-1' else None
+        training_metrics = read_file_content(args.training_metrics_path) if args.training_metrics_path != '-1' else None
+        model_config = read_file_content(args.model_config_json) if args.model_config_json != '-1' else None
+        evaluation_metrics = read_file_content(args.evaluation_metrics_path) if args.evaluation_metrics_path != '-1' else None
+        
+        # Extract metrics
+        extracted_metrics = {}
+        if training_metrics:
+            extracted_metrics.update(extract_metrics_from_training(training_metrics))
+        if evaluation_metrics:
+            extracted_metrics.update(extract_metrics_from_evaluation(evaluation_metrics))
+        
+        # Create HTTP session
+        http = create_session()
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_auth_token}',
+            'X-Tenant-Id': tenant_id
+        }
+        
         if args.multiple_rows_json != '-1':
-            # ... [Same as before] ...
+            multiple_rows = json.loads(args.multiple_rows_json)
+            print(f"Processing multiple rows: {len(multiple_rows)} rows found")
         else:
             check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
             check_payload = {
@@ -102,7 +218,7 @@ implementation:
             print(f"Request URL: POST {check_url}")
             print(f"Request Headers: {json.dumps(headers)}")
             print(f"Request Payload: {json.dumps(check_payload, indent=2)}")
-
+        
             try:
                 response = http.post(check_url, headers=headers, data=json.dumps(check_payload), timeout=60)
                 response.raise_for_status()
@@ -125,7 +241,7 @@ implementation:
                                         value_to_patch = str(value)
                                 else:
                                     value_to_patch = str(value)
-
+        
                         if value_to_patch is not None:
                             patch_requests.append({
                                 "operation": "REPLACE",
@@ -218,7 +334,7 @@ implementation:
                         "path": "experiment_id",
                         "value": execution_id_int
                     })
-
+        
                     update_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
                     update_payload = {
                         "dbType": "TIDB",
@@ -244,7 +360,7 @@ implementation:
                         ]
                     }
                     
-                    print(f"\\nRequest URL: PATCH {update_url}")
+                    print(f"\nRequest URL: PATCH {update_url}")
                     print(f"Request Headers: {json.dumps(headers)}")
                     print(f"Request Payload: {json.dumps(update_payload, indent=2)}")
                     
@@ -268,7 +384,7 @@ implementation:
                                         value_to_add = str(value)
                                 else:
                                     value_to_add = str(value)
-
+        
                         if value_to_add is not None:
                             creation_data[column] = value_to_add
                     
@@ -327,13 +443,13 @@ implementation:
                     # Ensure name is set
                     if 'name' not in creation_data:
                         creation_data['name'] = f"model_{args.model_id}"
-
+        
                     create_url = f"{args.domain}/pi-entity-instances-service/v2.0/schemas/{args.schema_id}/instances"
                     create_payload = {
                         "data": [creation_data]
                     }
-
-                    print(f"\\nRequest URL: POST {create_url}")
+        
+                    print(f"\nRequest URL: POST {create_url}")
                     print(f"Request Headers: {json.dumps(headers)}")
                     print(f"Request Payload: {json.dumps(create_payload, indent=2)}")
                     
@@ -344,8 +460,8 @@ implementation:
                     response.raise_for_status()
                     print("Successfully created a new model instance.")
                     
-                print(f"\\nResponse: {response.json()}")
-
+                print(f"\nResponse: {response.json()}")
+        
             except requests.exceptions.RequestException as e:
                 print(f"Error: {e}")
                 if e.response is not None:
@@ -353,10 +469,9 @@ implementation:
                     print(f"Response Content: {e.response.text}")
                 exit(1)
         
-        print("\\n" + "=" * 80)
+        print("\n" + "=" * 80)
         print("UPDATE COMPLETE")
         print("=" * 80)
-
     args:
       - --schema_id
       - {inputValue: schema_id}
