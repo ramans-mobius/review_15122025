@@ -1,4 +1,4 @@
-name: I Update Schema Row v12
+name: I Update Schema Row v13
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -13,12 +13,12 @@ inputs:
   - { name: multiple_rows_json, type: String, description: "JSON string containing a list of rows to create." }
   - { name: bearer_auth_token, type: string, description: "Bearer token for authentication." }
   - { name: domain, type: String, description: "The domain for the API endpoint." }
-  - { name: float_keys_json, type: String, description: "JSON string of a list of keys to be converted to float."}
-  - { name: trained_model_cdn_url, type: String, description: "CDN URL string for trained model."}
-  - { name: model_metadata_cdn_url, type: String, description: "CDN URL string for model metadata."}
-  - { name: training_metrics_path, type: String, description: "Training metrics JSON string." }
-  - { name: model_config_json, type: String, description: "Model configuration JSON string."}
-  - { name: evaluation_metrics_path, type: String, description: "Evaluation metrics JSON string." }
+  - { name: float_keys_json, type: String, description: "JSON string of a list of keys to be converted to float.", default: '[]'}
+  - { name: trained_model_cdn_url, type: String, description: "CDN URL string for trained model.", default: '-1'}
+  - { name: model_metadata_cdn_url, type: String, description: "CDN URL string for model metadata.", default: '-1'}
+  - { name: training_metrics_path, type: String, description: "Training metrics JSON string.", default: '-1' }
+  - { name: model_config_json, type: String, description: "Model configuration JSON string.", default: '-1'}
+  - { name: evaluation_metrics_path, type: String, description: "Evaluation metrics JSON string.", default: '-1'}
 
 implementation:
   container:
@@ -61,10 +61,30 @@ implementation:
         
         # Helper function to read file content
         def read_file_content(filepath):
-            if os.path.exists(filepath):
+            if filepath != '-1' and os.path.exists(filepath):
                 with open(filepath, 'r') as f:
-                    return f.read().strip()
+                    content = f.read().strip()
+                    return content if content else None
             return None
+        
+        # Helper function to parse JSON from either file or direct string
+        def parse_json_input(input_value, is_file_path=False):
+            if input_value == '-1':
+                return None
+            try:
+                if is_file_path:
+                    content = read_file_content(input_value)
+                    if content:
+                        return json.loads(content)
+                    return None
+                else:
+                    return json.loads(input_value)
+            except json.JSONDecodeError as e:
+                print(f"Warning: Failed to parse JSON input: {e}")
+                return None
+            except Exception as e:
+                print(f"Warning: Error reading input: {e}")
+                return None
         
         # Helper function to extract metrics from training metrics
         def extract_metrics_from_training(training_metrics):
@@ -73,7 +93,10 @@ implementation:
                 return extracted
             
             try:
-                metrics_data = json.loads(training_metrics)
+                if isinstance(training_metrics, str):
+                    metrics_data = json.loads(training_metrics)
+                else:
+                    metrics_data = training_metrics
                 
                 # Extract parameter count
                 if 'parameter_count' in metrics_data:
@@ -114,7 +137,10 @@ implementation:
                 return extracted
             
             try:
-                eval_data = json.loads(evaluation_metrics)
+                if isinstance(evaluation_metrics, str):
+                    eval_data = json.loads(evaluation_metrics)
+                else:
+                    eval_data = evaluation_metrics
                 
                 # Extract evaluation metrics
                 if 'metrics' in eval_data:
@@ -171,20 +197,36 @@ implementation:
         print(f"mapping_json: {args.mapping_json}")
         print(f"model_id: {args.model_id}")
         
-        update_data = json.loads(args.update_data_json)
-        mapping = json.loads(args.mapping_json)
+        # Parse inputs - note which ones are file paths vs direct strings
+        update_data = parse_json_input(args.update_data_json, is_file_path=False)
+        mapping = parse_json_input(args.mapping_json, is_file_path=False)
         
-        # Process float keys
+        # Parse float_keys - this is a file path
         float_keys = []
-        if args.float_keys_json != '-1':
-            float_keys = json.loads(args.float_keys_json)
+        if args.float_keys_json and args.float_keys_json != '-1':
+            try:
+                # First try to read as file path
+                float_keys_data = parse_json_input(args.float_keys_json, is_file_path=True)
+                if float_keys_data is not None:
+                    float_keys = float_keys_data
+                else:
+                    # If that fails, try to parse as direct JSON string
+                    float_keys = parse_json_input(args.float_keys_json, is_file_path=False) or []
+            except Exception as e:
+                print(f"Warning: Failed to parse float_keys_json: {e}")
+                float_keys = []
+        
+        # For debugging
+        print(f"float_keys: {float_keys}")
         
         # Read additional files
         model_weights_cdn = read_file_content(args.trained_model_cdn_url) if args.trained_model_cdn_url != '-1' else None
         model_metadata_cdn = read_file_content(args.model_metadata_cdn_url) if args.model_metadata_cdn_url != '-1' else None
-        training_metrics = read_file_content(args.training_metrics_path) if args.training_metrics_path != '-1' else None
-        model_config = read_file_content(args.model_config_json) if args.model_config_json != '-1' else None
-        evaluation_metrics = read_file_content(args.evaluation_metrics_path) if args.evaluation_metrics_path != '-1' else None
+        
+        # Parse JSON files
+        training_metrics = parse_json_input(args.training_metrics_path, is_file_path=True) if args.training_metrics_path != '-1' else None
+        model_config = parse_json_input(args.model_config_json, is_file_path=True) if args.model_config_json != '-1' else None
+        evaluation_metrics = parse_json_input(args.evaluation_metrics_path, is_file_path=True) if args.evaluation_metrics_path != '-1' else None
         
         # Extract metrics
         extracted_metrics = {}
@@ -202,7 +244,7 @@ implementation:
         }
         
         if args.multiple_rows_json != '-1':
-            multiple_rows = json.loads(args.multiple_rows_json)
+            multiple_rows = parse_json_input(args.multiple_rows_json, is_file_path=False)
             print(f"Processing multiple rows: {len(multiple_rows)} rows found")
         else:
             check_url = f"{args.domain}/pi-entity-instances-service/v3.0/schemas/{args.schema_id}/instances/list"
@@ -466,7 +508,7 @@ implementation:
                 print(f"Error: {e}")
                 if e.response is not None:
                     print(f"Response Status Code: {e.response.status_code}")
-                    print(f"Response Content: {e.response.text}")
+                    print(f"Response Content: {response.text}")
                 exit(1)
         
         print("\\n" + "=" * 80)
