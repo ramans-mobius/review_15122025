@@ -1,4 +1,4 @@
-name: I Update Schema Row v13
+name: I Update Schema Row v14
 description: Updates a row in a schema based on a mapping between column names and a JSON object.
 
 inputs:
@@ -446,7 +446,6 @@ implementation:
                         creation_data['name'] = f"model_{args.model_id}"
                     
                     creation_data['source'] = 'auto-generated'
-                    creation_data['created_at'] = get_current_datetime()
                     creation_data['created_by'] = 'training_pipeline'
                     creation_data['experiment_id'] = execution_id_int
                     
