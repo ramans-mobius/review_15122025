@@ -60,13 +60,7 @@ implementation:
         
         # FIX: Handle bearer token - could be file path or token string
         def get_bearer_token(token_input):
-            """
-            Extract bearer token from input.
-            Input could be:
-            1. File path containing token
-            2. Direct token string
-            3. JSON string with token
-            """
+          
             print("Extracting bearer token...")
             
             # Check if input is a file path
