@@ -1,4 +1,4 @@
-name: Generalized Hyperparameter Tuner v3
+name: Generalized Hyperparameter Tuner v4
 description: Launches a Katib experiment for CNN using a predefined objective function.
 
 inputs:
@@ -98,7 +98,7 @@ inputs:
     default: "2Gi"
     description: Memory request for each trial container
 
-  # GPU CONFIGURATION - FIXED FOR KUBERNETES COMPATIBILITY
+  # GPU CONFIGURATION
   - name: trial_gpu_enabled
     type: String
     default: "false"
@@ -138,7 +138,6 @@ implementation:
         import uuid
         import base64
         import traceback
-        import subprocess
         from kubernetes import client, config
         import kubeflow.katib as katib
         from kubeflow.katib import (
@@ -231,50 +230,47 @@ implementation:
         namespace = "admin"
         print(f"DEBUG: Using hardcoded namespace: {namespace}")
 
-        # FUNCTION TO CHECK IF GPU IS AVAILABLE IN CLUSTER
-        def check_gpu_available():
-          
+        # SIMPLE GPU CHECK WITHOUT PERMISSION ISSUES
+        def check_gpu_available_safe():
+            """Check if GPU might be available without requiring node list permissions"""
             try:
-                print("DEBUG: Checking GPU availability in cluster...")
+                print("DEBUG: Checking for GPU indicators...")
+                
+                # Method 1: Check for GPU device plugin pods in current namespace
                 v1 = client.CoreV1Api()
+                try:
+                    pods = v1.list_namespaced_pod(
+                        namespace=namespace,
+                        label_selector="app in (nvidia-device-plugin,gpu-device-plugin)"
+                    )
+                    if pods.items:
+                        print(f"DEBUG: Found GPU device plugin pods in namespace: {len(pods.items)}")
+                        return True
+                except:
+                    pass
                 
-                # Check nodes with GPU labels
-                nodes = v1.list_node()
-                gpu_nodes = []
+                # Method 2: Check for GPU-related daemonsets
+                apps_v1 = client.AppsV1Api()
+                try:
+                    daemonsets = apps_v1.list_namespaced_daemon_set(
+                        namespace=namespace,
+                        label_selector="name in (nvidia-device-plugin-ds,gpu-device-plugin)"
+                    )
+                    if daemonsets.items:
+                        print(f"DEBUG: Found GPU device plugin daemonsets: {len(daemonsets.items)}")
+                        return True
+                except:
+                    pass
                 
-                for node in nodes.items:
-                    # Check for common GPU labels
-                    labels = node.metadata.labels or {}
-                    has_gpu = False
-                    
-                    # Check for GPU resource allocatable
-                    allocatable = node.status.allocatable or {}
-                    gpu_resources = [
-                        "nvidia.com/gpu",
-                        "amd.com/gpu", 
-                        "gpu"
-                    ]
-                    
-                    for gpu_resource in gpu_resources:
-                        if gpu_resource in allocatable:
-                            gpu_count = allocatable[gpu_resource]
-                            print(f"DEBUG: Found GPU resource on node {node.metadata.name}: {gpu_resource}={gpu_count}")
-                            has_gpu = True
-                            break
-                    
-                    if has_gpu:
-                        gpu_nodes.append(node.metadata.name)
+                # Method 3: Simple assumption - if user wants GPU, assume it might be available
+                # Let Kubernetes scheduler make the final decision
+                print("DEBUG: No clear GPU indicators found - letting Kubernetes decide")
+                return True  # Let Kubernetes handle scheduling
                 
-                if gpu_nodes:
-                    print(f"DEBUG: GPU available on nodes: {gpu_nodes}")
-                    return True
-                else:
-                    print("DEBUG: No GPU nodes found in cluster")
-                    return False
-                    
             except Exception as e:
-                print(f"DEBUG: Error checking GPU availability: {e}")
-                return False
+                print(f"DEBUG: GPU check error: {e}")
+                # If we can't check, return True to let Kubernetes handle it
+                return True
 
         try:
             # Parse and validate parameters_to_tune
@@ -388,52 +384,54 @@ implementation:
             }
         }
 
-        # AUTO-DETECT AND CONFIGURE GPU RESOURCES
+        # GPU CONFIGURATION - SIMPLIFIED AND RELIABLE
         gpu_enabled = args.trial_gpu_enabled.lower() == "true"
-        gpu_available_in_cluster = check_gpu_available()
+        gpu_count = args.trial_gpu_count
         
-        # Determine final GPU configuration
-        use_gpu = gpu_enabled and gpu_available_in_cluster
-        
-        if use_gpu:
-            print("DEBUG: GPU is enabled and available in cluster - configuring GPU resources")
+        if gpu_enabled and gpu_count != "0":
+            print("DEBUG: GPU enabled by user - configuring GPU resources")
             
-            # Map vendor to Kubernetes resource name
-            vendor_to_resource = {
-                "nvidia": "nvidia.com/gpu",
-                "amd": "amd.com/gpu",
-                "generic": "gpu"
-            }
+            # Check if GPU might be available
+            gpu_likely_available = check_gpu_available_safe()
             
-            gpu_resource_name = vendor_to_resource.get(
-                args.trial_gpu_vendor.lower(), 
-                "nvidia.com/gpu"  # Default to NVIDIA
-            )
-            
-            gpu_count = args.trial_gpu_count
-            
-            # Add GPU to both requests and limits (required by Kubernetes)
-            resources["requests"][gpu_resource_name] = gpu_count
-            resources["limits"][gpu_resource_name] = gpu_count
-            
-            print(f"DEBUG: Added GPU resources: {gpu_resource_name} = {gpu_count}")
-            
-            # Add node selector for GPU nodes (optional but recommended)
-            node_selector = {
-                "accelerator": "nvidia-gpu"  # Common GPU node label
-            }
-            
+            if gpu_likely_available:
+                # Map vendor to Kubernetes resource name
+                vendor_to_resource = {
+                    "nvidia": "nvidia.com/gpu",
+                    "amd": "amd.com/gpu",
+                    "generic": "gpu"
+                }
+                
+                gpu_resource_name = vendor_to_resource.get(
+                    args.trial_gpu_vendor.lower(), 
+                    "nvidia.com/gpu"  # Default to NVIDIA
+                )
+                
+                # Add GPU to both requests and limits
+                resources["requests"][gpu_resource_name] = gpu_count
+                resources["limits"][gpu_resource_name] = gpu_count
+                
+                print(f"DEBUG: Added GPU resources: {gpu_resource_name} = {gpu_count}")
+                print(f"DEBUG: Note: If no GPU nodes exist, trials will fail to schedule")
+                
+                # Optional: Add GPU-specific node selector and tolerations
+                node_selector = {"accelerator": "nvidia-gpu"}
+                tolerations = [{
+                    "key": "nvidia.com/gpu",
+                    "operator": "Exists",
+                    "effect": "NoSchedule"
+                }]
+            else:
+                print("WARNING: GPU enabled but no GPU indicators found. Using CPU-only.")
+                
         else:
-            if gpu_enabled and not gpu_available_in_cluster:
-                print("WARNING: GPU enabled but no GPU nodes found in cluster. Falling back to CPU.")
-            elif not gpu_enabled:
-                print("DEBUG: GPU not enabled by user configuration")
-            
+            print("DEBUG: GPU not enabled by user configuration")
             node_selector = {}
-        
+            tolerations = []
+
         print(f"DEBUG: Final resources configuration: {json.dumps(resources, indent=2)}")
         
-        # Build trial spec with conditional node selector
+        # Build trial spec
         trial_spec_base = {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -461,9 +459,10 @@ implementation:
             }
         }
         
-        # Add node selector if GPU is enabled
-        if use_gpu and node_selector:
+        # Add node selector and tolerations if GPU is enabled
+        if gpu_enabled and gpu_count != "0" and 'node_selector' in locals() and node_selector:
             trial_spec_base["spec"]["template"]["spec"]["nodeSelector"] = node_selector
+            trial_spec_base["spec"]["template"]["spec"]["tolerations"] = tolerations
         
         trial_template = V1beta1TrialTemplate(
             retain=True,
