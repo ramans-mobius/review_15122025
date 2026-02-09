@@ -1,4 +1,4 @@
-name: Generalized Hyperparameter Tuner v2
+name: Generalized Hyperparameter Tuner v3
 description: Launches a Katib experiment for CNN using a predefined objective function.
 
 inputs:
@@ -98,7 +98,7 @@ inputs:
     default: "2Gi"
     description: Memory request for each trial container
 
-  # GPU CONFIGURATION - EXACTLY MATCHING YOUR FORMAT
+  # GPU CONFIGURATION - FIXED FOR KUBERNETES COMPATIBILITY
   - name: trial_gpu_enabled
     type: String
     default: "false"
@@ -109,10 +109,10 @@ inputs:
     default: "1"
     description: Number of GPUs to request
 
-  - name: trial_gpu_type
+  - name: trial_gpu_vendor
     type: String
-    default: "gpu"
-    description: GPU type identifier (e.g., "gpu", "nvidia-gpu", "amd-gpu")
+    default: "nvidia"
+    description: GPU vendor (nvidia, amd, generic)
 
 outputs:
   - name: best_hyperparams
@@ -138,6 +138,7 @@ implementation:
         import uuid
         import base64
         import traceback
+        import subprocess
         from kubernetes import client, config
         import kubeflow.katib as katib
         from kubeflow.katib import (
@@ -193,10 +194,10 @@ implementation:
         parser.add_argument("--trial_memory_limit", type=str, required=True)
         parser.add_argument("--trial_cpu_request", type=str, required=True)
         parser.add_argument("--trial_memory_request", type=str, required=True)
-        # GPU CONFIGURATION ARGUMENTS - EXACTLY MATCHING YOUR FORMAT
+        # GPU CONFIGURATION ARGUMENTS
         parser.add_argument("--trial_gpu_enabled", type=str, required=True)
         parser.add_argument("--trial_gpu_count", type=str, required=True)
-        parser.add_argument("--trial_gpu_type", type=str, required=True)
+        parser.add_argument("--trial_gpu_vendor", type=str, required=True)
         
         args = parser.parse_args()
 
@@ -221,14 +222,59 @@ implementation:
         print(f"DEBUG: trial_memory_limit: {args.trial_memory_limit}")
         print(f"DEBUG: trial_cpu_request: {args.trial_cpu_request}")
         print(f"DEBUG: trial_memory_request: {args.trial_memory_request}")
-        # GPU CONFIGURATION DEBUG LINES - EXACTLY MATCHING YOUR FORMAT
+        # GPU CONFIGURATION DEBUG LINES
         print(f"DEBUG: trial_gpu_enabled: {args.trial_gpu_enabled}")
         print(f"DEBUG: trial_gpu_count: {args.trial_gpu_count}")
-        print(f"DEBUG: trial_gpu_type: {args.trial_gpu_type}")
+        print(f"DEBUG: trial_gpu_vendor: {args.trial_gpu_vendor}")
 
         # HARDCODED NAMESPACE - admin only
         namespace = "admin"
         print(f"DEBUG: Using hardcoded namespace: {namespace}")
+
+        # FUNCTION TO CHECK IF GPU IS AVAILABLE IN CLUSTER
+        def check_gpu_available():
+          
+            try:
+                print("DEBUG: Checking GPU availability in cluster...")
+                v1 = client.CoreV1Api()
+                
+                # Check nodes with GPU labels
+                nodes = v1.list_node()
+                gpu_nodes = []
+                
+                for node in nodes.items:
+                    # Check for common GPU labels
+                    labels = node.metadata.labels or {}
+                    has_gpu = False
+                    
+                    # Check for GPU resource allocatable
+                    allocatable = node.status.allocatable or {}
+                    gpu_resources = [
+                        "nvidia.com/gpu",
+                        "amd.com/gpu", 
+                        "gpu"
+                    ]
+                    
+                    for gpu_resource in gpu_resources:
+                        if gpu_resource in allocatable:
+                            gpu_count = allocatable[gpu_resource]
+                            print(f"DEBUG: Found GPU resource on node {node.metadata.name}: {gpu_resource}={gpu_count}")
+                            has_gpu = True
+                            break
+                    
+                    if has_gpu:
+                        gpu_nodes.append(node.metadata.name)
+                
+                if gpu_nodes:
+                    print(f"DEBUG: GPU available on nodes: {gpu_nodes}")
+                    return True
+                else:
+                    print("DEBUG: No GPU nodes found in cluster")
+                    return False
+                    
+            except Exception as e:
+                print(f"DEBUG: Error checking GPU availability: {e}")
+                return False
 
         try:
             # Parse and validate parameters_to_tune
@@ -342,50 +388,90 @@ implementation:
             }
         }
 
-        # Add GPU resources if enabled - EXACTLY MATCHING YOUR FORMAT
+        # AUTO-DETECT AND CONFIGURE GPU RESOURCES
         gpu_enabled = args.trial_gpu_enabled.lower() == "true"
-        if gpu_enabled and args.trial_gpu_count != "0":
-            # Add GPU fields exactly as in your example format
-            resources["requests"]["gpuType"] = args.trial_gpu_type
-            resources["requests"]["gpuCount"] = args.trial_gpu_count
-            resources["limits"]["gpuType"] = args.trial_gpu_type
-            resources["limits"]["gpuCount"] = args.trial_gpu_count
+        gpu_available_in_cluster = check_gpu_available()
+        
+        # Determine final GPU configuration
+        use_gpu = gpu_enabled and gpu_available_in_cluster
+        
+        if use_gpu:
+            print("DEBUG: GPU is enabled and available in cluster - configuring GPU resources")
             
-            print(f"DEBUG: Added GPU resources: type={args.trial_gpu_type}, count={args.trial_gpu_count}")
-
+            # Map vendor to Kubernetes resource name
+            vendor_to_resource = {
+                "nvidia": "nvidia.com/gpu",
+                "amd": "amd.com/gpu",
+                "generic": "gpu"
+            }
+            
+            gpu_resource_name = vendor_to_resource.get(
+                args.trial_gpu_vendor.lower(), 
+                "nvidia.com/gpu"  # Default to NVIDIA
+            )
+            
+            gpu_count = args.trial_gpu_count
+            
+            # Add GPU to both requests and limits (required by Kubernetes)
+            resources["requests"][gpu_resource_name] = gpu_count
+            resources["limits"][gpu_resource_name] = gpu_count
+            
+            print(f"DEBUG: Added GPU resources: {gpu_resource_name} = {gpu_count}")
+            
+            # Add node selector for GPU nodes (optional but recommended)
+            node_selector = {
+                "accelerator": "nvidia-gpu"  # Common GPU node label
+            }
+            
+        else:
+            if gpu_enabled and not gpu_available_in_cluster:
+                print("WARNING: GPU enabled but no GPU nodes found in cluster. Falling back to CPU.")
+            elif not gpu_enabled:
+                print("DEBUG: GPU not enabled by user configuration")
+            
+            node_selector = {}
+        
         print(f"DEBUG: Final resources configuration: {json.dumps(resources, indent=2)}")
+        
+        # Build trial spec with conditional node selector
+        trial_spec_base = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "spec": {
+                "ttlSecondsAfterFinished": 86400,
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "sidecar.istio.io/inject": "false"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "training-container",
+                                "image": args.training_image,
+                                "command": ["python", args.training_script],
+                                "args": trial_args,
+                                "resources": resources
+                            }
+                        ],
+                        "restartPolicy": "Never"
+                    }
+                }
+            }
+        }
+        
+        # Add node selector if GPU is enabled
+        if use_gpu and node_selector:
+            trial_spec_base["spec"]["template"]["spec"]["nodeSelector"] = node_selector
         
         trial_template = V1beta1TrialTemplate(
             retain=True,
             primary_container_name="training-container",
             trial_parameters=trial_parameters,
-            trial_spec={
-                "apiVersion": "batch/v1",
-                "kind": "Job",
-                "spec": {
-                    "ttlSecondsAfterFinished": 86400,
-                    "template": {
-                        "metadata": {
-                            "annotations": {
-                                "sidecar.istio.io/inject": "false"
-                            }
-                        },
-                        "spec": {
-                            "containers": [
-                                {
-                                    "name": "training-container",
-                                    "image": args.training_image,
-                                    "command": ["python", args.training_script],
-                                    "args": trial_args,
-                                    "resources": resources  # USING CONFIGURABLE RESOURCES
-                                }
-                            ],
-                            "restartPolicy": "Never"
-                        }
-                    }
-                }
-            }
+            trial_spec=trial_spec_base
         )
+        
         print("=== DEBUG: CREATING EXPERIMENT SPEC ===")
         experiment_spec = V1beta1ExperimentSpec(
             objective=objective_spec,
@@ -574,13 +660,13 @@ implementation:
       - {inputValue: trial_cpu_request}
       - --trial_memory_request
       - {inputValue: trial_memory_request}
-      # GPU CONFIGURATION ARGUMENT MAPPINGS - EXACTLY MATCHING YOUR FORMAT
+      # GPU CONFIGURATION ARGUMENT MAPPINGS
       - --trial_gpu_enabled
       - {inputValue: trial_gpu_enabled}
       - --trial_gpu_count
       - {inputValue: trial_gpu_count}
-      - --trial_gpu_type
-      - {inputValue: trial_gpu_type}
+      - --trial_gpu_vendor
+      - {inputValue: trial_gpu_vendor}
       - --best_hyperparams
       - {outputPath: best_hyperparams}
       - --payload
