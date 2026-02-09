@@ -1,4 +1,4 @@
-name: DCGAN Hyperparameter Tuner v5
+name: DCGAN Hyperparameter Tuner v6
 description: Launches a Katib experiment for DCGAN using a predefined objective function.
 
 inputs:
@@ -278,7 +278,7 @@ implementation:
                                     "command": ["python", "train_dcgan_hpt.py"],
                                     "args": trial_args,
                                     "resources": {
-                                        "limits": {"cpu": "4", "memory": "8Gi"}
+                                        "limits": {"cpu": "4", "memory": "8Gi","gpuType": "gpu", "gpuCount": "1"}
                                     }
                                 }
                             ],
