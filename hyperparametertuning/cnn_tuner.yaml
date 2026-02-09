@@ -1,4 +1,4 @@
-name: Generalized Hyperparameter Tuner
+name: Generalized Hyperparameter Tuner v2
 description: Launches a Katib experiment for CNN using a predefined objective function.
 
 inputs:
@@ -98,7 +98,7 @@ inputs:
     default: "2Gi"
     description: Memory request for each trial container
 
-  # GPU CONFIGURATION - UPDATED FORMAT
+  # GPU CONFIGURATION - EXACTLY MATCHING YOUR FORMAT
   - name: trial_gpu_enabled
     type: String
     default: "false"
@@ -109,10 +109,10 @@ inputs:
     default: "1"
     description: Number of GPUs to request
 
-  - name: trial_gpu_vendor
+  - name: trial_gpu_type
     type: String
-    default: "nvidia"
-    description: GPU vendor (nvidia, amd, etc.)
+    default: "gpu"
+    description: GPU type identifier (e.g., "gpu", "nvidia-gpu", "amd-gpu")
 
 outputs:
   - name: best_hyperparams
@@ -193,10 +193,10 @@ implementation:
         parser.add_argument("--trial_memory_limit", type=str, required=True)
         parser.add_argument("--trial_cpu_request", type=str, required=True)
         parser.add_argument("--trial_memory_request", type=str, required=True)
-        # GPU CONFIGURATION ARGUMENTS - UPDATED FORMAT
+        # GPU CONFIGURATION ARGUMENTS - EXACTLY MATCHING YOUR FORMAT
         parser.add_argument("--trial_gpu_enabled", type=str, required=True)
         parser.add_argument("--trial_gpu_count", type=str, required=True)
-        parser.add_argument("--trial_gpu_vendor", type=str, required=True)
+        parser.add_argument("--trial_gpu_type", type=str, required=True)
         
         args = parser.parse_args()
 
@@ -221,10 +221,10 @@ implementation:
         print(f"DEBUG: trial_memory_limit: {args.trial_memory_limit}")
         print(f"DEBUG: trial_cpu_request: {args.trial_cpu_request}")
         print(f"DEBUG: trial_memory_request: {args.trial_memory_request}")
-        # GPU CONFIGURATION DEBUG LINES - UPDATED
+        # GPU CONFIGURATION DEBUG LINES - EXACTLY MATCHING YOUR FORMAT
         print(f"DEBUG: trial_gpu_enabled: {args.trial_gpu_enabled}")
         print(f"DEBUG: trial_gpu_count: {args.trial_gpu_count}")
-        print(f"DEBUG: trial_gpu_vendor: {args.trial_gpu_vendor}")
+        print(f"DEBUG: trial_gpu_type: {args.trial_gpu_type}")
 
         # HARDCODED NAMESPACE - admin only
         namespace = "admin"
@@ -342,25 +342,16 @@ implementation:
             }
         }
 
-        # Add GPU resources if enabled
+        # Add GPU resources if enabled - EXACTLY MATCHING YOUR FORMAT
         gpu_enabled = args.trial_gpu_enabled.lower() == "true"
         if gpu_enabled and args.trial_gpu_count != "0":
-            # Map vendor to Kubernetes resource name
-            vendor_map = {
-                "nvidia": "nvidia.com/gpu",
-                "amd": "amd.com/gpu",
-                "generic": "gpu"
-            }
+            # Add GPU fields exactly as in your example format
+            resources["requests"]["gpuType"] = args.trial_gpu_type
+            resources["requests"]["gpuCount"] = args.trial_gpu_count
+            resources["limits"]["gpuType"] = args.trial_gpu_type
+            resources["limits"]["gpuCount"] = args.trial_gpu_count
             
-            gpu_resource_name = vendor_map.get(args.trial_gpu_vendor.lower(), "nvidia.com/gpu")
-            gpu_count = args.trial_gpu_count
-            
-            # Add GPU to both requests and limits
-            resources["requests"][gpu_resource_name] = gpu_count
-            resources["limits"][gpu_resource_name] = gpu_count
-            
-            print(f"DEBUG: Added GPU resources: {gpu_resource_name} = {gpu_count}")
-            print(f"DEBUG: Vendor: {args.trial_gpu_vendor}")
+            print(f"DEBUG: Added GPU resources: type={args.trial_gpu_type}, count={args.trial_gpu_count}")
 
         print(f"DEBUG: Final resources configuration: {json.dumps(resources, indent=2)}")
         
@@ -583,13 +574,13 @@ implementation:
       - {inputValue: trial_cpu_request}
       - --trial_memory_request
       - {inputValue: trial_memory_request}
-      # GPU CONFIGURATION ARGUMENT MAPPINGS - UPDATED
+      # GPU CONFIGURATION ARGUMENT MAPPINGS - EXACTLY MATCHING YOUR FORMAT
       - --trial_gpu_enabled
       - {inputValue: trial_gpu_enabled}
       - --trial_gpu_count
       - {inputValue: trial_gpu_count}
-      - --trial_gpu_vendor
-      - {inputValue: trial_gpu_vendor}
+      - --trial_gpu_type
+      - {inputValue: trial_gpu_type}
       - --best_hyperparams
       - {outputPath: best_hyperparams}
       - --payload
