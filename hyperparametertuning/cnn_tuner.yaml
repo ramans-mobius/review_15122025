@@ -1,4 +1,4 @@
-name: Generalized Hyperparameter Tuner v4
+name: Generalized Hyperparameter Tuner v5
 description: Launches a Katib experiment for CNN using a predefined objective function.
 
 inputs:
@@ -232,7 +232,7 @@ implementation:
 
         # SIMPLE GPU CHECK WITHOUT PERMISSION ISSUES
         def check_gpu_available_safe():
-            """Check if GPU might be available without requiring node list permissions"""
+            
             try:
                 print("DEBUG: Checking for GPU indicators...")
                 
